@@ -143,3 +143,20 @@ test('published quoted status and hash inside text are parsed without a prose qu
   assert.equal((await createArchiveService(f.store, f.config, { now }).run({ month: '2026-07', mode: 'apply' })).status, 'complete');
   await assert.rejects(readFile(join(f.config.wiki_root, daily)), { code: 'ENOENT' });
 });
+test('commented and quoted protection scalars retain daily in report, apply and prepared-delete resume', async t => {
+  for (const field of ['pinned: true # do not delete', "'retention': 'pinned' # preserve", '"intentional-journal": true # hand written', 'intentional_journal: "true"', 'journal_class: "pinned-daily" # preserve', 'type: "personal-reflection" # unknown daily type', 'journal_class: "unknown-custom-class"', 'type: "unterminated']) {
+    const f = await fixture(t), protectedBytes = `---\n${field}\n---\n${original}`;
+    await writeFile(join(f.config.wiki_root, daily), protectedBytes);
+    const service = createArchiveService(f.store, f.config, { now });
+    assert.equal((await service.report('2026-07')).pages[0].status, 'retained', field);
+    const applied = await service.run({ month: '2026-07', mode: 'apply' });
+    assert.equal(applied.pages[0].status, 'retained', field);
+    assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), protectedBytes);
+    // A person can add protection after a deletion intent was persisted too.
+    await writeFile(join(f.config.wiki_root, daily), original); await interrupt(f, 'after_intent');
+    await writeFile(join(f.config.wiki_root, daily), protectedBytes);
+    const resumed = await createPublisher(f.store, f.config, { now }).resume();
+    assert.ok(resumed.files.some(file => file.operation_id.startsWith('archive-delete:') && file.status === 'pending'), field);
+    assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), protectedBytes);
+  }
+});
