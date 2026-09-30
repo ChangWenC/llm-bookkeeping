@@ -5,6 +5,7 @@ import type { BookkeepingConfig, Store, Publisher, PublishResult, ReviewResult, 
 import { acquireWikiLock } from './lock.ts';
 import { SafeWikiWriter, digestBytes, readWikiTarget, syncDirectory, type WriterOptions } from './files.ts';
 import { canonicalDailyDate, retainedJournal, retainedWindowStart } from './journals.ts';
+import { affectedMonths } from '../consumers/periods.ts';
 export { acquireWikiLock, withWikiLock, wikiLockLocation, assertWikiLockHeld } from './lock.ts';
 export { createSafeWikiWriter, SafeWikiWriter, digestBytes, resolveWikiPath, readWikiTarget } from './files.ts';
 export type { WikiLock } from './lock.ts';
@@ -30,7 +31,7 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     await store.enqueueWork({ schema_version: 1, work_id: `${kind}:${id}`, kind, lane: 'live', state: 'pending', payload, reason, migration_key: null, updated_at: now() });
   }
   async function queueConsumers(artifact: FactArtifact): Promise<void> {
-    const months = [...new Set([...(artifact.affected_months ?? []), ...[...artifact.affected_dates, ...artifact.affected_weeks].map(date => date.slice(0, 7))])].sort();
+    const months = affectedMonths(artifact);
     for (const consumer of ['analytics', 'monthly']) await enqueue('consumer', `${consumer}:${artifact.batch_id}`, { consumer, batch_id: artifact.batch_id,
       affected_dates: artifact.affected_dates, affected_weeks: artifact.affected_weeks, affected_months: months });
     for (const [kind, periods] of [['date', artifact.affected_dates], ['week', artifact.affected_weeks], ['month', months]] as const)
@@ -187,7 +188,7 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     const monthsByBatch = new Map<string, string[]>();
     const batchesByMonth = new Map<string, FactArtifact[]>();
     for (const batch of displayBatches) {
-      const months = [...new Set([...(batch.affected_months ?? []), ...[...batch.affected_dates, ...batch.affected_weeks].map(date => date.slice(0, 7))])];
+      const months = affectedMonths(batch);
       monthsByBatch.set(batch.batch_id, months);
       for (const month of months) {
         const grouped = batchesByMonth.get(month) ?? [];

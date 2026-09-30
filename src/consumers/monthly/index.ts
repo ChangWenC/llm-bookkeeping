@@ -5,6 +5,7 @@ import type { WriterOptions } from '../../publish/files.ts';
 import { analysisMonthRange } from '../../time.ts';
 import { coverageStatus } from '../../analytics/model.ts';
 import { updateManagedBlock, safeRegionText } from './blocks.ts';
+import { affectedMonths } from '../periods.ts';
 
 const startPrefix = '<!-- bookkeeping:monthly-supplement:start';
 const endMarker = '<!-- bookkeeping:monthly-supplement:end -->';
@@ -35,7 +36,7 @@ export function createMonthlyConsumer(store: Store, config: BookkeepingConfig, o
       const batches = await store.listReadyBatches('monthly');
       const supplements = await store.listWork('journal_supplement', 'pending');
       for (const batch of batches) {
-        const months = [...new Set([...(batch.affected_months ?? []), ...batch.affected_dates.map(date => date.slice(0, 7)), ...batch.affected_weeks.map(date => date.slice(0, 7))])];
+        const months = affectedMonths(batch);
         // A monthly semantic output is already prepared. Its file publication is
         // handled by Publisher; never enqueue the same accepted result as new LLM work.
         if (batch.monthly_review) for (let index = months.length - 1; index >= 0; index--) if (months[index] === batch.monthly_review.month) months.splice(index, 1);
