@@ -46,3 +46,11 @@ Its seven scenarios cover native mirror versus true repeated text, stable recapt
 Capture exceptions persist unavailable/partial coverage and collection_retry work. Material/backup/state paths cannot overlap Wiki, raw source roots or iCloud, including canonical existing ancestors. prepare writes compact immutable bundles and an atomic manifest; final file bytes cannot exceed configured bundle_bytes. Explicit finite review and collection budgets can exceed defaults.
 
 Current runtime connects collect, prepare, publish/resume, replay, facts, status, backup and restore. Second-wave consumers/archive/import/migration/validation are still unavailable until concrete services are integrated. Weekly/monthly semantic payload publication is explicitly unavailable until Store supports durable validated analysis. This report is synthetic integration evidence, not production, WeChat or scheduled-run acceptance.
+
+## M2 service composition
+
+`consume --target monthly|index` and `archive --month YYYY-MM --report|--apply` now call the actual consumer/archive factories in `docs/archive-monthly-index-interface.md`. Index commands are configured in `index_commands:{schema_version:1,lint,build_index,qmd}`, each command `{schema_version:1,executable,args,timeout_ms?}`. Defaults use the current pinned Node for `scripts/lint.mjs` and `scripts/build_index.mjs`, then `qmd update`; no shell and no pull. Explicit executable paths are supported. An index stage failure retains durable work and reports pending/partial independently of facts.
+
+`prepare --pages /absolute/page-targets.json` accepts `{schema_version:1,paths:["wiki/projects/项目_example.md","log.md"]}`. These are explicit Wiki targets, not implicit cwd ownership. Raw, traversal, symlink and outside paths are rejected; bounded/excerpt baselines are owned by Reviewer. Every accepted page patch still goes through the common Publisher/SafeWikiWriter lock, backups and recovery.
+
+Analytics, migration and health validation are composed from their concrete modules when available; missing modules remain explicit execution failures during this staged implementation. The temporary M1 semantic payload guard is removed only after Store's actual typed payload persistence is delivered.

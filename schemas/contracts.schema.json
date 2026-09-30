@@ -2764,6 +2764,72 @@
         "basis"
       ]
     },
+    "PublicCliCommand": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "executable": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_ms": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "executable",
+        "args"
+      ]
+    },
+    "IndexCommands": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "lint": {
+          "$ref": "#/$defs/PublicCliCommand"
+        },
+        "build_index": {
+          "$ref": "#/$defs/PublicCliCommand"
+        },
+        "qmd": {
+          "$ref": "#/$defs/PublicCliCommand"
+        }
+      },
+      "required": [
+        "schema_version",
+        "lint",
+        "build_index",
+        "qmd"
+      ]
+    },
+    "PageTargetsManifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "paths"
+      ]
+    },
     "BookkeepingConfig": {
       "type": "object",
       "properties": {
@@ -2822,6 +2888,9 @@
             "bundle_bytes",
             "bundles_per_round"
           ]
+        },
+        "index_commands": {
+          "$ref": "#/$defs/IndexCommands"
         },
         "collection_budgets": {
           "type": "object",

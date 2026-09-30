@@ -2,7 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, resolve, relative, dirname, basename, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { InputError, record, string, version, array, zone, utc, parseJsonPreservingIntegers } from './contracts/validation.ts';
-import type { BookkeepingConfig, CollectionBudget } from './contracts/types.ts';
+import type { BookkeepingConfig, CollectionBudget, IndexCommands } from './contracts/types.ts';
 
 export const DEFAULT_LIMITS = Object.freeze({
   chunk_events: 80,
@@ -14,6 +14,13 @@ export const DEFAULT_COLLECTION_BUDGETS: Readonly<Record<'live' | 'history', Col
   live: { max_duration_ms: 90_000, max_bytes: 64 * 1024 * 1024, max_directory_entries: 2000 },
   history: { max_duration_ms: 30_000, max_bytes: 32 * 1024 * 1024, max_directory_entries: 2000 },
 });
+
+export const DEFAULT_INDEX_COMMANDS: IndexCommands = {
+  schema_version: 1,
+  lint: { schema_version: 1, executable: process.execPath, args: ['scripts/lint.mjs'], timeout_ms: 120_000 },
+  build_index: { schema_version: 1, executable: process.execPath, args: ['scripts/build_index.mjs'], timeout_ms: 120_000 },
+  qmd: { schema_version: 1, executable: 'qmd', args: ['update'], timeout_ms: 120_000 },
+};
 
 export function absolutePath(value: unknown, name: string): string {
   const path = string(value, name);
@@ -92,6 +99,16 @@ export function validateConfig(value: unknown): BookkeepingConfig {
     for (const lane of ['live', 'history']) {
       const budget = record(budgets[lane], `collection_budgets.${lane}`);
       for (const key of ['max_duration_ms', 'max_bytes', 'max_directory_entries']) positiveBudget(budget[key], `${lane}.${key}`);
+    }
+  }
+  if (config.index_commands !== undefined) {
+    const commands = version(config.index_commands, 'index_commands');
+    for (const stage of ['lint', 'build_index', 'qmd']) {
+      const command = version(commands[stage], `index_commands.${stage}`);
+      string(command.executable, 'executable');
+      if (command.executable.includes('\0')) throw new InputError('Command executable contains NUL');
+      for (const argument of array(command.args, 'command.args')) if (typeof argument !== 'string' || argument.includes('\0')) throw new InputError('Command args must be strings without NUL');
+      if (command.timeout_ms !== undefined) positiveBudget(command.timeout_ms, 'command.timeout_ms');
     }
   }
   for (const key of ['project_whitelist', 'goal_whitelist']) {

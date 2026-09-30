@@ -4,14 +4,14 @@ import { resolve, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, absolutePath, DEFAULT_COLLECTION_BUDGETS, canonicalLocation, validateDataLocation } from './config.ts';
-import { InputError, utc, date, parseJsonPreservingIntegers, validateManifest, validateReviewResult } from './contracts/validation.ts';
+import { InputError, utc, date, parseJsonPreservingIntegers, validateManifest, validateReviewResult, version, array, string } from './contracts/validation.ts';
 import { createRuntime, restoreRuntime, UnavailableError } from './runtime.ts';
 import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, SourceAdapter, SourceCoverage } from './contracts/types.ts';
 
 export const COMMANDS = ['collect','prepare','publish','consume','archive','import','migrate','replay','facts','analytics-review','status','backup','restore','validate'] as const;
 export interface ParsedCommand { command: typeof COMMANDS[number]; options: Record<string,string|boolean> }
 const allowed: Record<string, string[]> = {
-  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output'], publish: ['input', 'resume'],
+  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages'], publish: ['input', 'resume'],
   consume: ['target'], archive: ['month', 'report', 'apply'], import: ['manifest'], migrate: ['manifest'],
   replay: ['source', 'from', 'to'], facts: ['from', 'to'], 'analytics-review': ['input'],
   status: [], backup: ['output'], restore: ['input', 'data-dir'], validate: ['scope'],
@@ -217,9 +217,17 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
   const options = parsed.options;
   const outputDir = resolve(required(options, 'output'));
   await privateDirectory(outputDir, config);
+  let pagePaths: string[] | undefined;
+  if (options.pages) {
+    const manifest = version(await readJson(required(options, 'pages')), 'page manifest');
+    pagePaths = array(manifest.paths, 'page manifest.paths').map((path: unknown) => string(path, 'page path'));
+    if (new Set(pagePaths).size !== pagePaths.length) throw new InputError('Duplicate page target');
+    const { resolveWikiPath } = await import('./publish/index.ts');
+    for (const path of pagePaths) await resolveWikiPath(config.wiki_root, path);
+  }
   const bundles = await services.reviewer.prepare({
     kind: required(options, 'kind') as ReviewKind, lane: required(options, 'lane') as Lane,
-    period: options.period as string | undefined, cutoff, output_dir: outputDir,
+    period: options.period as string | undefined, cutoff, output_dir: outputDir, page_paths: pagePaths,
   });
   const files = [];
   for (const bundle of bundles) {
@@ -306,7 +314,7 @@ export async function executeCommand(parsed: ParsedCommand, config: BookkeepingC
 
 export interface CliDependencies {
   loadConfig?: (path?: string) => Promise<BookkeepingConfig>;
-  createRuntime?: (config: BookkeepingConfig, command?: string) => Promise<RuntimeServices>;
+  createRuntime?: (config: BookkeepingConfig, command?: string, options?: Record<string, string | boolean>) => Promise<RuntimeServices>;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
   now?: () => string;
@@ -327,7 +335,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     if (parsed.command === 'restore' && !dependencies.createRuntime) {
       result = await restoreRuntime(resolve(required(parsed.options, 'input')), required(parsed.options, 'data-dir'), config);
     } else {
-      services = await (dependencies.createRuntime ?? createRuntime)(config, parsed.command);
+      services = await (dependencies.createRuntime ?? createRuntime)(config, parsed.command, parsed.options);
       result = await executeCommand(parsed, config, services, (dependencies.now ?? (() => new Date().toISOString()))());
     }
     if (services) {

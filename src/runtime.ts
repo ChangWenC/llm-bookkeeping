@@ -36,7 +36,7 @@ export async function restoreRuntime(input: string, dataDir: string, config: Boo
 }
 
 /** Command-scoped composition. Reading status/facts or restoring never initializes sources. */
-export async function createRuntime(config: BookkeepingConfig, command?: string): Promise<RuntimeServices> {
+export async function createRuntime(config: BookkeepingConfig, command?: string, options: Record<string, string | boolean> = {}): Promise<RuntimeServices> {
   requireNode();
   const storeModule = await loadModule('./store/index.ts');
   const store: Store = await storeModule.createStore(config);
@@ -71,6 +71,32 @@ export async function createRuntime(config: BookkeepingConfig, command?: string)
     if (!command || command === 'publish') {
       const module = await loadModule('./publish/index.ts');
       services.publisher = module.createPublisher(store, config);
+    }
+    if (!command || command === 'consume') {
+      const module = await loadModule('./consumers/index.ts');
+      const target = options.target;
+      const targets = typeof target === 'string' && target !== 'all' ? [target] : ['analytics', 'monthly', 'index'];
+      services.consumers = await module.createConsumers(store, config, targets);
+    }
+    if (!command || command === 'archive') {
+      const module = await loadModule('./consumers/archive/index.ts');
+      services.archive = request => module.createArchiveService(store, config).run(request);
+    }
+    if (command === 'analytics-review') {
+      const module = await loadModule('./consumers/analytics/index.ts');
+      const analytics = module.createAnalyticsConsumer(store, config);
+      services.analyticsReview = input => analytics.review(input);
+    }
+    if (command === 'import' || command === 'migrate') {
+      const module = await loadModule('./migration/index.ts');
+      const historyModule = await loadModule('./store/history.ts');
+      const migration = module.createMigrationService(store, config, { analytics: historyModule.createAnalyticsHistoryPort(store, config) });
+      services.importManifest = input => migration.importManifest(input);
+      services.migrateManifest = input => migration.migrateManifest(input);
+    }
+    if (command === 'validate') {
+      const module = await loadModule('./store/health.ts');
+      services.validate = scope => module.validateStore(store, scope);
     }
     return services;
   } catch (error) {
