@@ -21,10 +21,13 @@ test('canonical daily pinned and intentional journal_class preserves originals w
   const f = await fixture(t);
   const pinned = await f.daily('15', '---\ntype: journal\njournal_class: pinned-daily\ntags: [journal]\n---\n\n合成长期保留原文。\n');
   const intentional = await f.daily('16', '---\ntype: journal\njournal_class: "intentional-journal"\ntags: [journal]\n---\n\n合成主动日记原文。\n');
+  const nonDaily = [];
+  for (const [day, classification] of [['17', 'monthly-review'], ['18', 'yearly-review'], ['19', 'unknown-topic']]) nonDaily.push(await f.daily(day, `---\ntype: journal\njournal_class: ${classification}\ntags: [journal]\n---\n\n显式非普通日记保持原样。\n`));
   const service = createArchiveService(f.store, f.config, { now: () => new Date('2026-09-30T12:00:00Z') });
   assert.ok((await service.report('2026-07')).pages.every(page => page.status === 'retained'));
   assert.ok((await service.run({ month: '2026-07', mode: 'apply' })).pages.every(page => page.status === 'retained'));
   await access(pinned); await access(intentional);
+  for (const path of nonDaily) await access(path);
   assert.equal((await f.store.listWork('archive_plan')).length, 0);
 });
 test('a substantive human monthly review change before deletion defers only that archive source', async t => {
