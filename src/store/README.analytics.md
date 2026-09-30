@@ -23,6 +23,16 @@ Collection identity rows now store a versioned digest, IDs and fragment hashes; 
 Verification uses Node 25.8, synthetic messages and temporary Wiki roots. Live private projections, weekly Codex semantics, production locks/scheduling and production migrations are not exercised by these module tests.
 # 原文材料续读
 
+## 职业分析审阅
+
+`analytics_catalog` 保留配置中的正式能力/方向定义和明确项目映射；`repo_hint` 只是提示。新能力通过 `capability_candidate` 注册候选 exact revision，再用同 revision 的用户确认晋升。已配置正式定义不伪造 review 事件。
+
+普通 observation 确认只确认活动。归因审阅必须提供 `selected_pairs`，每对绑定 observation revision 与 capability definition revision。确认只作用于选中对；纠正确认选中对、争议其余对。`retracts_review_id` 撤回一条确切、同 target 的已应用效果，审计事件保留并重建 fold；撤回撤回可以恢复前效。新 observation/definition revision 不继承旧确认。
+
+周材料包含目录、仅当前有效的精确已确认目标契约、以及明确 `goal_whitelist` Wiki 路径的有界页上下文。目标页面不会自动生成契约。专业消费者通过传入 clock 计算重大决策契约当前有效期；过期通知不再显示，历史记录仍保留。没有新批次时也能刷新已有 cockpit 的期限状态。
+
+`consume analytics` 返回四个已结束 Amsterdam 周的 `analytics_pilot`：实际覆盖、精确 pair 审计、历史/当前通知与动作继续/收窄/放弃/完成/当前状态。未测量的回顾耗时为 null 加原因。事实、语义快照和消费者输出仍各自独立；输出失败不会回滚事实。
+
 月准备支持明确 `page_paths` 与 `archive_context_offset`。归档仅读取已入队、精确路径的 immutable v2 JSON；原文 bytes/digest/date/locator 必须相符。首次事实快照同时冻结归档 work 列表（含已完成项），之后完成任务与后到任务不会移动偏移。上下文不分配新事实。
 
 截断项保留 pending，并说明原文 bytes 和重读同偏移所需 `limits.bundle_bytes`；提高预算可以读到尾部。`completed_archive_context_ids` 仅接受本页完整显示项，月发布成功后由月 consumer 精确完成。材料页身份包含事实偏移、明确源页及归档原文身份；零事实多页也累积已接受摘要，重读同页不会重复累加。旧 `semantic_pages` 接受记录仍参与汇总。

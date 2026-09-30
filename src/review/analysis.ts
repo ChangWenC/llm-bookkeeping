@@ -7,6 +7,7 @@ import { createMonthlyConsumer } from '../consumers/monthly/index.ts';
 import { readPageBaseline } from './baselines.ts';
 import { coverageStatus, factKey } from '../analytics/model.ts';
 import { addArchiveContexts } from './archives.ts';
+import { readGoalPageBaselines } from './goals.ts';
 const gap = (reason: string): CoverageGap => ({ schema_version: 1, range: null, reason, locator: null, resumable: true });
 function frozen(store: Store, request: PrepareRequest, period: string, initial: FactRef[], work_ids: string[], context_work_ids: string[] = []): {
     refs: FactRef[];
@@ -61,7 +62,7 @@ async function save(store: Store, bundle: ReviewBundle, limit: number): Promise<
     return [bundle];
 }
 export async function prepareWeeklyBundle(store: Store, config: BookkeepingConfig, request: PrepareRequest): Promise<ReviewBundle[]> {
-    const week = request.period ?? analysisWeekEnd(request.cutoff), context = await prepareWeeklyAnalysis(store, config, week), repository = analyticsRepository(store);
+    const week = request.period ?? analysisWeekEnd(request.cutoff), context = await prepareWeeklyAnalysis(store, config, week, request.cutoff), repository = analyticsRepository(store);
     const eligible = store instanceof SqliteStore ? store.effectiveFactRefsAt(request.cutoff) : [];
     const all = repository.lookupFacts(eligible).filter(fact => fact.occurred_at.value && Date.parse(fact.occurred_at.value) >= Date.parse(context.range.from) && Date.parse(fact.occurred_at.value) < Date.parse(context.range.to));
     const snapshot = frozen(store, request, week, all.map(fact => fact.fact_ref), await workIds(store, 'analytics_prepare', week, request.cutoff));
@@ -74,6 +75,9 @@ export async function prepareWeeklyBundle(store: Store, config: BookkeepingConfi
     context.observation_candidates = [];
     const bundle: ReviewBundle = { schema_version: 1, bundle_id: '', kind: 'weekly', lane: request.lane, period: week, cutoff: request.cutoff, chunks: [{ schema_version: 1, chunk_id: 'weekly:' + snapshot.page.snapshot_id + ':' + snapshot.page.offset, events: [], context_events: [], body_bytes: 0 }], existing_facts: [], baselines: [], coverage: [], unfinished: [], analysis_context: context };
     const limit = config.limits.bundle_bytes;
+    const goals = await readGoalPageBaselines(config);
+    context.goal_page_baselines = goals.baselines;
+    bundle.unfinished.push(...goals.gaps);
     context.prepared_work_ids = [];
     while (Buffer.byteLength(canonical(bundle)) + 2048 > limit && context.previous_weeks.length) {
         context.previous_weeks.shift();

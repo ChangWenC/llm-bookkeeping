@@ -1,5 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { AnalyticsReviewEvent, AnalyticsReviewInput, AnalysisRevisionRef, BookkeepingConfig, FactArtifact, FactRef, GoalContract, MajorDecisionContract, ProfessionalFact, ReviewReceipt, SourceCoverage, WeeklyAnalysisResult, WeeklyAnalysisSnapshot, WeeklyObservation } from '../contracts/types.ts';
+import type { AnalyticsCatalog, AnalyticsDefinition, AnalyticsReviewEvent, AnalyticsReviewInput, AnalysisRevisionRef, BookkeepingConfig, FactArtifact, FactRef, GoalContract, MajorDecisionContract, ProfessionalFact, ReviewReceipt, SourceCoverage, WeeklyAnalysisResult, WeeklyAnalysisSnapshot, WeeklyObservation } from '../contracts/types.ts';
+import { activityReview, attributionOverlays, validatePairTargets } from '../analytics/reviews.ts';
+import { goalActiveAt, decisionActiveAt } from '../analytics/contracts.ts';
+import { analyticsPilotStats, type PilotActionEvent } from '../analytics/pilot.ts';
 import { canonical } from '../analytics/serialization.ts';
 import { analysisKey, factKey, cropProjection, observationFor, contentHash } from '../analytics/model.ts';
 interface StoredProfessionalFact {
@@ -33,6 +36,7 @@ export interface AnalyticsOutput {
         freshness_at: string;
     }[];
     overlays: Record<string, unknown>[];
+    analytics_catalog: AnalyticsCatalog;
     exclusions: {
         fact_ref: FactRef;
         reason: string;
@@ -55,6 +59,8 @@ export class AnalyticsRepository {
       CREATE TABLE IF NOT EXISTS analytics_notices(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_legacy(migration_key TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_reservations(id TEXT NOT NULL,revision INTEGER NOT NULL,json TEXT NOT NULL,PRIMARY KEY(id,revision));
+      CREATE TABLE IF NOT EXISTS analytics_definition_baselines(id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(id,revision));
+      CREATE TABLE IF NOT EXISTS analytics_action_events(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_state(key TEXT PRIMARY KEY,json TEXT NOT NULL);
     `);
     }
@@ -79,6 +85,8 @@ export class AnalyticsRepository {
             return;
         }
         const latest = this.latestRevision(ref.logical_id);
+        if (latest && this.target({ ...ref, revision: latest })?.kind !== kind)
+            throw new Error('Analytics target kind must remain stable');
         if (latest && ref.revision <= latest)
             throw new Error('Analytics target revision must increase');
         this.db.prepare('INSERT INTO analytics_targets VALUES(?,?,?,?,?)').run(ref.logical_id, ref.revision, kind, canonical(value), hash);
@@ -93,7 +101,7 @@ export class AnalyticsRepository {
     }
     reviews(): AnalyticsReviewEvent[] { return this.db.prepare("SELECT json FROM analytics_reviews WHERE status='applied' ORDER BY rowid").all().map(json<AnalyticsReviewEvent>); }
     reviewState(ref: AnalysisRevisionRef): AnalyticsReviewEvent | null {
-        return this.reviews().filter(event => analysisKey(event.target_ref) === analysisKey(ref)).at(-1) ?? null;
+        return activityReview(this.reviews(), ref);
     }
     confirmed(ref: AnalysisRevisionRef): boolean { return this.latestRevision(ref.logical_id) === ref.revision && this.reviewState(ref)?.action === 'confirm'; }
     private effectiveRecords(): StoredProfessionalFact[] {
@@ -129,33 +137,50 @@ export class AnalyticsRepository {
         return this.db.prepare("SELECT json FROM analytics_targets t WHERE kind='observation' AND revision=(SELECT MAX(revision) FROM analytics_targets n WHERE n.id=t.id) ORDER BY id").all().map(json<WeeklyObservation>).filter(observation => observation.evidence_refs.every(ref => live.has(factKey(ref))));
     }
     rawSnapshot(week: string): WeeklyAnalysisSnapshot | null { const row = this.db.prepare('SELECT json FROM analytics_snapshots WHERE week_end=? ORDER BY revision DESC LIMIT 1').get(week); return row ? json(row) : null; }
-    snapshots(): WeeklyAnalysisSnapshot[] {
+    snapshots(asOf = new Date().toISOString()): WeeklyAnalysisSnapshot[] {
+        const activeGoal = (ref: AnalysisRevisionRef) => { const goal = this.target(ref)?.value as GoalContract | undefined; return !!goal && goalActiveAt(goal, asOf, this.confirmed(ref)); };
         const current = new Set(this.facts().map(fact => factKey(fact.fact_ref)));
         return this.db.prepare('SELECT json FROM analytics_snapshots s WHERE revision=(SELECT MAX(revision) FROM analytics_snapshots n WHERE n.id=s.id) ORDER BY week_end,revision').all().map(json<WeeklyAnalysisSnapshot>).map(snapshot => {
             const observations = snapshot.observations.filter(observation => { const review = this.reviewState(observation.observation_ref); return observation.evidence_refs.every(ref => current.has(factKey(ref))) && review?.action !== 'reject' && review?.action !== 'retract'; }).map(observation => { const review = this.reviewState(observation.observation_ref); return { ...observation, summary: review?.action === 'correct' ? review.correction! : observation.summary, stage: review?.action === 'confirm' ? 'formal' as const : 'candidate' as const }; });
-            const changed = observations.length !== snapshot.observations.length || snapshot.capabilities.some(capability => capability.evidence_refs.some(ref => !current.has(factKey(ref)))) || snapshot.goal_gaps.some(gap => !this.confirmed(gap.goal_ref) || gap.evidence_refs.some(ref => !current.has(factKey(ref))));
+            const changed = observations.length !== snapshot.observations.length || snapshot.capabilities.some(capability => capability.evidence_refs.some(ref => !current.has(factKey(ref)))) || snapshot.goal_gaps.some(gap => !activeGoal(gap.goal_ref) || gap.evidence_refs.some(ref => !current.has(factKey(ref))));
             const action = snapshot.validation_action;
-            return { ...snapshot, observations, goal_gaps: snapshot.goal_gaps.filter(gap => this.confirmed(gap.goal_ref) && gap.evidence_refs.every(ref => current.has(factKey(ref)))), ...(changed ? { coverage_status: 'partial' as const, direction: 'unknown' as const, capabilities: snapshot.capabilities.map(capability => capability.evidence_refs.every(ref => current.has(factKey(ref))) ? capability : { ...capability, trend: 'unknown' as const, explanation: 'Evidence revision replaced/retracted; semantic recomputation pending', evidence_refs: [] }) } : {}), validation_action: action };
+            return { ...snapshot, observations, goal_gaps: snapshot.goal_gaps.filter(gap => activeGoal(gap.goal_ref) && gap.evidence_refs.every(ref => current.has(factKey(ref)))), ...(changed ? { coverage_status: 'partial' as const, direction: 'unknown' as const, capabilities: snapshot.capabilities.map(capability => capability.evidence_refs.every(ref => current.has(factKey(ref))) ? capability : { ...capability, trend: 'unknown' as const, explanation: 'Evidence revision replaced/retracted; semantic recomputation pending', evidence_refs: [] }) } : {}), validation_action: action };
         });
     }
     unresolvedHistory(): boolean { return this.readHistory().some((record: any) => record.result.unresolved > 0); }
-    confirmedGoals(config: BookkeepingConfig): GoalContract[] {
-        return this.db.prepare("SELECT json FROM analytics_targets WHERE kind='goal_contract' ORDER BY rowid").all().map(json<GoalContract>).filter(goal => config.goal_whitelist.includes(goal.contract_ref.logical_id) && this.confirmed(goal.contract_ref));
+    confirmedGoals(config: BookkeepingConfig, asOf = new Date().toISOString()): GoalContract[] {
+        return this.db.prepare("SELECT json FROM analytics_targets WHERE kind='goal_contract' ORDER BY rowid").all().map(json<GoalContract>).filter(goal => config.goal_whitelist.includes(goal.contract_ref.logical_id) && goalActiveAt(goal, asOf, this.confirmed(goal.contract_ref)));
     }
-    overlays(): Record<string, unknown>[] {
-        return this.observations().flatMap(observation => {
-            const review = this.reviewState(observation.observation_ref);
-            if (review?.action === 'reject' || review?.action === 'retract')
-                return [];
-            return observation.capability_ids.map(capability => ({ observation_ref: observation.observation_ref, capability_id: capability,
-                responsibility_basis: observation.responsibility_basis, evidence_refs: observation.evidence_refs,
-                confirmed: review?.action === 'confirm', stage: review?.action === 'confirm' ? 'formal' : 'candidate',
-                correction: review?.action === 'correct' ? review.correction : null }));
+    configureCatalog(config: BookkeepingConfig): void { this.transaction(() => this.syncCatalog(config)); }
+    private syncCatalog(config: BookkeepingConfig): void {
+        for (const [kind, definitions] of [['capability_definition', config.analytics_catalog?.capabilities ?? []], ['direction_definition', config.analytics_catalog?.directions ?? []]] as const) {
+            for (const definition of definitions) {
+                this.saveTarget(definition.definition_ref, kind, definition);
+                if (definition.status === 'formal')
+                    this.db.prepare('INSERT OR IGNORE INTO analytics_definition_baselines VALUES(?,?)').run(definition.definition_ref.logical_id, definition.definition_ref.revision);
+            }
+        }
+    }
+    catalog(config?: BookkeepingConfig): AnalyticsCatalog {
+        const definitions = (kind: string): AnalyticsDefinition[] => this.db.prepare('SELECT json FROM analytics_targets t WHERE kind=? AND revision=(SELECT MAX(revision) FROM analytics_targets n WHERE n.id=t.id) ORDER BY id').all(kind).map(json<AnalyticsDefinition>).map(definition => {
+            const baseline = this.db.prepare('SELECT 1 FROM analytics_definition_baselines WHERE id=? AND revision=?').get(definition.definition_ref.logical_id, definition.definition_ref.revision);
+            const review = this.reviewState(definition.definition_ref);
+            return { ...definition, status: review?.action === 'confirm' || (baseline && !review) ? 'formal' as const : 'candidate' as const };
         });
+        return { schema_version: 1, capabilities: definitions('capability_definition'), directions: definitions('direction_definition'), project_mappings: config?.analytics_catalog?.project_mappings ?? [] };
     }
+    overlays(): Record<string, unknown>[] { return attributionOverlays(this.observations(), this.catalog(), this.reviews()); }
     /** Caller has validated the semantic result; this participates in Store's existing transaction. */
     saveAnalysis(result: WeeklyAnalysisResult, batchId: string): void {
         const snapshot = result.snapshot;
+        const event = (suffix: string, action_ref: AnalysisRevisionRef, disposition: PilotActionEvent['disposition']) => {
+            const value: PilotActionEvent = { event_id: batchId + ':' + suffix, at: result.freshness_at, action_ref, disposition };
+            this.db.prepare('INSERT OR IGNORE INTO analytics_action_events VALUES(?,?)').run(value.event_id, canonical(value));
+        };
+        if (result.prior_action_disposition && !(result.prior_action_disposition.disposition === 'abandon' && snapshot.validation_action?.state === 'abandoned' && snapshot.validation_action.action_ref.logical_id === result.prior_action_disposition.action_ref.logical_id))
+            event('prior', result.prior_action_disposition.action_ref, result.prior_action_disposition.disposition);
+        if (snapshot.validation_action)
+            event('current', snapshot.validation_action.action_ref, snapshot.validation_action.state === 'active' ? 'active' : snapshot.validation_action.state === 'abandoned' ? 'abandon' : 'completed');
         for (const observation of snapshot.observations)
             this.saveTarget(observation.observation_ref, 'observation', { ...observation, stage: 'candidate' });
         if (snapshot.validation_action)
@@ -184,8 +209,9 @@ export class AnalyticsRepository {
         analysis_ref: AnalysisRevisionRef;
         freshness_at: string;
     }[] { return this.db.prepare('SELECT analysis_id,revision,MAX(at) AS at FROM analytics_freshness GROUP BY analysis_id,revision ORDER BY at').all().map((row: any) => ({ analysis_ref: { schema_version: 1, logical_id: row.analysis_id, revision: row.revision }, freshness_at: row.at })); }
-    ingest(batch: FactArtifact, config: BookkeepingConfig): AnalyticsOutput {
+    ingest(batch: FactArtifact, config: BookkeepingConfig, asOf = new Date().toISOString()): AnalyticsOutput {
         return this.transaction(() => {
+            this.syncCatalog(config);
             // Hash only professional transport fields. Original fact bodies never enter the Analytics ledger or output.
             const records: StoredProfessionalFact[] = batch.facts.map(fact => {
                 const projection = fact.analytics_projection.value ? cropProjection(fact.analytics_projection.value, config) : null;
@@ -223,14 +249,15 @@ export class AnalyticsRepository {
             }
             if (batch.analysis)
                 this.saveAnalysis(batch.analysis, batch.batch_id);
-            this.evaluateDecisions(config);
-            const output: AnalyticsOutput = { schema_version: 1, batch_id: batch.batch_id, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(), notices: this.notices(), freshness: this.freshness(), overlays: this.overlays(), exclusions: records.filter(fact => fact.reason && fact.action !== 'retract').map(fact => ({ fact_ref: fact.fact_ref, reason: fact.reason! })) };
+            this.evaluateDecisions(config, asOf);
+            const output: AnalyticsOutput = { schema_version: 1, batch_id: batch.batch_id, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(asOf), notices: this.notices(asOf), freshness: this.freshness(), overlays: this.overlays(), analytics_catalog: this.catalog(config), exclusions: records.filter(fact => fact.reason && fact.action !== 'retract').map(fact => ({ fact_ref: fact.fact_ref, reason: fact.reason! })) };
             this.db.prepare('INSERT INTO analytics_batches VALUES(?,?,?)').run(batch.batch_id, hash, canonical(output));
             return output;
         });
     }
-    applyReview(input: AnalyticsReviewInput, config: BookkeepingConfig, withinTransaction = false): ReviewReceipt[] {
+    applyReview(input: AnalyticsReviewInput, config: BookkeepingConfig, withinTransaction = false, asOf = new Date().toISOString()): ReviewReceipt[] {
         const operation = (): ReviewReceipt[] => {
+            this.syncCatalog(config);
             if (input.kind === 'capability_candidate') {
                 if (input.definition.status !== 'candidate')
                     throw new Error('New capability definition must be candidate');
@@ -261,6 +288,13 @@ export class AnalyticsRepository {
                     status = 'pending';
                     reason = 'Target revision not available';
                 }
+                else if (event.action === 'retract') {
+                    const original = this.db.prepare("SELECT json,status FROM analytics_reviews WHERE id=?").get(event.retracts_review_id ?? '') as any;
+                    if (!original || original.status !== 'applied' || analysisKey(JSON.parse(original.json).target_ref) !== analysisKey(event.target_ref)) {
+                        status = 'pending';
+                        reason = 'Retraction must bind one applied review on the exact same target';
+                    }
+                }
                 else if (this.latestRevision(event.target_ref.logical_id) !== event.target_ref.revision) {
                     status = 'stale';
                     reason = 'Review binds an older revision';
@@ -285,20 +319,29 @@ export class AnalyticsRepository {
                         reason = 'Decision requires an exact confirmed subject/goal contract';
                     }
                 }
+                if (status === 'applied' && event.action !== 'retract' && (event.selected_pairs?.length || (event.action === 'correct' && event.selected_pairs !== undefined))) {
+                    try {
+                        validatePairTargets(event, target?.kind === 'observation' ? target.value : null, this.catalog(config).capabilities);
+                    }
+                    catch (error) {
+                        status = 'pending';
+                        reason = String(error);
+                    }
+                }
                 this.db.prepare('INSERT INTO analytics_reviews VALUES(?,?,?,?)').run(event.review_id, canonical(event), status, reason);
                 receipts.push({ schema_version: 1, review_id: event.review_id, target_ref: event.target_ref, status, reason });
             }
-            this.evaluateDecisions(config);
+            this.evaluateDecisions(config, asOf);
             return receipts;
         };
         return withinTransaction ? operation() : this.transaction(operation);
     }
-    private evaluateDecisions(config: BookkeepingConfig): void {
-        const goals = this.confirmedGoals(config);
+    private evaluateDecisions(config: BookkeepingConfig, asOf: string): void {
+        const goals = this.confirmedGoals(config, asOf);
         const decisions = this.db.prepare("SELECT json FROM analytics_targets WHERE kind='decision_contract' ORDER BY rowid").all().map(json<MajorDecisionContract>).filter(decision => this.confirmed(decision.contract_ref));
         for (const decision of decisions) {
             const goal = goals.find(goal => analysisKey(goal.contract_ref) === analysisKey(decision.goal_ref));
-            if (!goal || goal.subject !== decision.subject)
+            if (!goal || !decisionActiveAt(decision, goal, asOf, { decision_confirmed: this.confirmed(decision.contract_ref), goal_confirmed: this.confirmed(goal.contract_ref) }))
                 continue;
             for (const fact of this.facts()) {
                 const verification = fact.projection.verification;
@@ -307,6 +350,8 @@ export class AnalyticsRepository {
                 if (fact.projection.subject !== decision.subject || verification.subject !== decision.subject || verification.name !== decision.trigger.name || verification.value !== decision.trigger.expected_value)
                     continue;
                 const time = Date.parse(verification.verified_at);
+                if (time > Date.parse(asOf))
+                    continue;
                 if (time < Date.parse(decision.valid_from) || time >= Date.parse(decision.valid_to) || (goal.deadline && time > Date.parse(goal.deadline)))
                     continue;
                 if (fact.projection.attribution.goal_target_version !== goal.target_version)
@@ -318,17 +363,23 @@ export class AnalyticsRepository {
             }
         }
     }
-    notices(): AnalyticsNotice[] {
+    noticeHistory(): AnalyticsNotice[] { return this.db.prepare('SELECT json FROM analytics_notices ORDER BY rowid').all().map(json<AnalyticsNotice>); }
+    notices(asOf = new Date().toISOString()): AnalyticsNotice[] {
         const facts = new Set(this.facts().map(fact => factKey(fact.fact_ref)));
-        return this.db.prepare('SELECT json FROM analytics_notices ORDER BY rowid').all().map(json<AnalyticsNotice>).filter(notice => {
+        return this.noticeHistory().filter(notice => {
             const decision = this.target(notice.decision_ref)?.value as MajorDecisionContract | undefined;
-            return facts.has(factKey(notice.fact_ref)) && this.confirmed(notice.decision_ref) && !!decision && this.confirmed(decision.goal_ref);
+            const goal = decision ? this.target(decision.goal_ref)?.value as GoalContract | undefined : undefined;
+            return Date.parse(notice.verified_at) <= Date.parse(asOf) && facts.has(factKey(notice.fact_ref)) && !!decision && !!goal && decisionActiveAt(decision, goal, asOf, { decision_confirmed: this.confirmed(notice.decision_ref), goal_confirmed: this.confirmed(decision.goal_ref) });
         });
+    }
+    pilot(config: BookkeepingConfig, asOf: string) {
+        const active = new Set(this.notices(asOf).map(notice => notice.notice_id));
+        return analyticsPilotStats(config, { as_of: asOf, coverage: this.coverage(), reviews: this.reviews(), notices: this.noticeHistory().map(notice => ({ notice_id: notice.notice_id, verified_at: notice.verified_at, active: active.has(notice.notice_id) })), actions: this.db.prepare('SELECT json FROM analytics_action_events ORDER BY rowid').all().map(json<PilotActionEvent>) });
     }
     historyRecord(key: string): any | null { const row = this.db.prepare('SELECT json FROM analytics_legacy WHERE migration_key=?').get(key); return row ? json(row) : null; }
     saveHistory(key: string, value: unknown): void { this.db.prepare('INSERT INTO analytics_legacy VALUES(?,?)').run(key, canonical(value)); }
     readHistory(): unknown[] { return this.db.prepare('SELECT json FROM analytics_legacy ORDER BY rowid').all().map(json); }
-    currentOutput(batchId: string): AnalyticsOutput { return { schema_version: 1, batch_id: batchId, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(), notices: this.notices(), freshness: this.freshness(), overlays: this.overlays(), exclusions: this.exclusions().map(item => ({ fact_ref: item.fact_ref, reason: item.reason })) }; }
+    currentOutput(batchId: string, config?: BookkeepingConfig, asOf = new Date().toISOString()): AnalyticsOutput { return { schema_version: 1, batch_id: batchId, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(asOf), notices: this.notices(asOf), freshness: this.freshness(), overlays: this.overlays(), analytics_catalog: this.catalog(config), exclusions: this.exclusions().map(item => ({ fact_ref: item.fact_ref, reason: item.reason })) }; }
     cockpitRegion(): string | null { const row = this.db.prepare("SELECT json FROM analytics_state WHERE key='cockpit_region'").get(); return row ? json<string>(row) : null; }
     setCockpitRegion(region: string): void { this.db.prepare("INSERT INTO analytics_state VALUES('cockpit_region',?) ON CONFLICT(key) DO UPDATE SET json=excluded.json").run(canonical(region)); }
     pendingCockpit(): {
@@ -346,7 +397,7 @@ export class AnalyticsRepository {
     }
 }
 /** Consumer-facing persistence operations expose no SQLite handle or transaction primitives. */
-export type AnalyticsPort = Pick<AnalyticsRepository, 'ingest' | 'facts' | 'lookupFacts' | 'exclusions' | 'coverage' | 'observations' | 'snapshots' | 'rawSnapshot' | 'unresolvedHistory' | 'confirmedGoals' | 'applyReview' | 'currentOutput' | 'cockpitRegion' | 'setCockpitRegion' | 'pendingCockpit' | 'setPendingCockpit' | 'target' | 'latestRevision'>;
+export type AnalyticsPort = Pick<AnalyticsRepository, 'ingest' | 'facts' | 'lookupFacts' | 'exclusions' | 'coverage' | 'observations' | 'snapshots' | 'rawSnapshot' | 'unresolvedHistory' | 'confirmedGoals' | 'applyReview' | 'currentOutput' | 'cockpitRegion' | 'setCockpitRegion' | 'pendingCockpit' | 'setPendingCockpit' | 'target' | 'latestRevision' | 'configureCatalog' | 'catalog' | 'pilot'>;
 export function getAnalyticsPort(store: unknown): AnalyticsPort {
     const provider = store as {
         analyticsPort?: () => AnalyticsPort;

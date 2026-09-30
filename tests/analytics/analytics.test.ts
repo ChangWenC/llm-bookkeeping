@@ -15,6 +15,7 @@ async function fixture(projectionMissing = false) {
     const c = await config();
     c.project_whitelist = ['a'];
     c.goal_whitelist = ['goal:parser'];
+    c.analytics_catalog = {schema_version:1,capabilities:[{schema_version:1,definition_ref:{schema_version:1,logical_id:'capability:parser',revision:1},label:'Parser verification',keywords:['parser'],status:'formal'}],directions:[],project_mappings:[]};
     const s = await createStore(c);
     const events = [event('professional', 'PRIVATE family and professional mixed content')];
     const batch = collection(events);
@@ -37,7 +38,7 @@ async function fixture(projectionMissing = false) {
 }
 function semantic(input: WeeklyAnalysisInput): WeeklyAnalysisResult { return { schema_version: 1, snapshot: { schema_version: 1, analysis_ref: input.analysis_ref!, week_end: input.week_end, coverage_status: input.coverage_status, observations: input.observation_candidates ?? [], capabilities: input.facts.length ? [{ schema_version: 1, capability_id: 'parser', trend: 'improving', explanation: 'Explicit verification evidence', evidence_refs: [input.facts[0].fact_ref] }] : [], goal_gaps: [], direction: 'unknown', patterns: ['Verification precedes publication'], validation_action: input.facts.length ? { schema_version: 1, action_ref: { schema_version: 1, logical_id: 'action:parser', revision: 1 }, subject: 'Roy', description: 'Verify one independent parser fixture', evidence_refs: [input.facts[0].fact_ref], state: 'active' } : null }, prior_action_disposition: null, proposed_confirmations: input.observation_candidates?.slice(0, 3).map(o => o.observation_ref) ?? [], freshness_at: at }; }
 async function acceptWeek(f: Awaited<ReturnType<typeof fixture>>, analysis?: WeeklyAnalysisResult) { const reviewer = createReviewer(f.s, f.c), b = (await reviewer.prepare({ kind: 'weekly', lane: 'history', period: week, cutoff: at }))[0]; const r = result(b, 'week:' + digest(canonical(analysis ?? b)), false); r.analysis = analysis ?? semantic(b.analysis_context!); const commit = await reviewer.accept(r); await f.s.markExportReady(commit.batch_id, f.c.data_dir + '/week.json'); return { b, commit, analysis: r.analysis }; }
-async function review(f: Awaited<ReturnType<typeof fixture>>, ref: AnalysisRevisionRef, action: 'confirm' | 'reject' | 'correct' | 'retract' = 'confirm', id = 'review:' + action + ':' + ref.logical_id + ':' + ref.revision) { return f.consumer.review({ schema_version: 1, kind: 'review', events: [{ schema_version: 1, review_id: id, target_ref: ref, action, correction: action === 'correct' ? 'Responsibility limited to verification' : null, evidence_refs: [], created_at: at }] }); }
+async function review(f: Awaited<ReturnType<typeof fixture>>, ref: AnalysisRevisionRef, action: 'confirm' | 'reject' | 'correct' | 'retract' = 'confirm', id = 'review:' + action + ':' + ref.logical_id + ':' + ref.revision) { return f.consumer.review({ schema_version: 1, kind: 'review', events: [{ schema_version: 1, review_id: id, target_ref: ref, action, correction: action === 'correct' ? 'Responsibility limited to verification' : null, evidence_refs: [], created_at: at, retracts_review_id: action === 'retract' ? 'review:confirm:' + ref.logical_id + ':' + ref.revision : null }] }); }
 test('ready professional ledger, capability semantics and typed weekly publication preserve privacy and manual cockpit', async () => {
     const f = await fixture();
     try {
@@ -74,7 +75,7 @@ test('confirm/reject/correct/retract bind exact observations; revised facts rebu
         const repo = analyticsRepository(f.s), old = repo.observations()[0];
         assert.equal((await review(f, old.observation_ref))[0].status, 'applied');
         assert.equal((await review(f, old.observation_ref))[0].status, 'already_applied');
-        assert.equal(repo.currentOutput('x').overlays[0].stage, 'formal');
+        assert.equal(repo.currentOutput('x').overlays[0].stage, 'candidate'); // Activity confirmation does not confirm attribution pairs.
         await review(f, old.observation_ref, 'correct');
         assert.equal(repo.currentOutput('x').overlays[0].stage, 'candidate');
         await review(f, old.observation_ref, 'reject');
@@ -100,8 +101,9 @@ test('confirm/reject/correct/retract bind exact observations; revised facts rebu
         assert.equal(newer.observation_ref.revision, 2);
         assert.equal(repo.currentOutput('x').overlays[0].confirmed, false);
         assert.equal((await review(f, old.observation_ref, 'confirm', 'stale-confirm'))[0].status, 'stale');
+        await review(f, newer.observation_ref);
         await review(f, newer.observation_ref, 'retract');
-        assert.equal(repo.currentOutput('x').overlays.length, 0);
+        assert.equal(repo.currentOutput('x').overlays[0].confirmed, false); // The exact activity confirmation is undone; evidence remains.
     }
     finally {
         f.s.close();

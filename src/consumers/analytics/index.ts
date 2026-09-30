@@ -7,6 +7,7 @@ import { getAnalyticsPort, type AnalyticsPort, type AnalyticsOutput } from '../.
 import { analysisWeekRange, addCalendarDays } from '../../time.ts';
 import { coverageStatus, factKey, analysisKey } from '../../analytics/model.ts';
 import { validateAnalyticsInput } from '../../analytics/validation.ts';
+import { capabilityMatches } from '../../analytics/reviews.ts';
 import { createSafeWikiWriter, readWikiTarget, syncDirectory, type WriterOptions } from '../../publish/files.ts';
 export const analyticsRepository = (store: Store): AnalyticsPort => getAnalyticsPort(store);
 export interface AnalyticsOptions {
@@ -47,23 +48,24 @@ async function immutableOutput(path: string, bytes: Buffer): Promise<void> {
     }
 }
 /** Current professional evidence is projected from immutable READY artifacts, independently of source/Wiki availability. */
-export async function prepareWeeklyAnalysis(store: Store, config: BookkeepingConfig, weekEnd: string): Promise<WeeklyAnalysisInput> {
+export async function prepareWeeklyAnalysis(store: Store, config: BookkeepingConfig, weekEnd: string, asOf = new Date().toISOString()): Promise<WeeklyAnalysisInput> {
     const repository = analyticsRepository(store);
+    repository.configureCatalog(config);
     for (const batch of await store.listReadyBatches('analytics'))
-        repository.ingest(batch, config);
+        repository.ingest(batch, config, asOf);
     const range = analysisWeekRange(weekEnd);
     const facts = repository.facts().filter(fact => fact.occurred_at.value && Date.parse(fact.occurred_at.value) >= Date.parse(range.from) && Date.parse(fact.occurred_at.value) < Date.parse(range.to));
     const coverage = repository.coverage().filter(record => Date.parse(record.query_range.from) < Date.parse(range.to) && Date.parse(record.query_range.to) > Date.parse(range.from));
-    const previous = repository.snapshots().filter(snapshot => snapshot.week_end < weekEnd && snapshot.week_end >= addCalendarDays(weekEnd, -28)).slice(-4);
+    const previous = repository.snapshots(asOf).filter(snapshot => snapshot.week_end < weekEnd && snapshot.week_end >= addCalendarDays(weekEnd, -28)).slice(-4);
     const latest = previous.at(-1);
-    const goals = repository.confirmedGoals(config).filter(goal => !goal.deadline || Date.parse(goal.deadline) >= Date.parse(range.from));
+    const goals = repository.confirmedGoals(config, asOf);
     const currentKeys = new Set(facts.map(fact => factKey(fact.fact_ref)));
     const excluded = repository.exclusions().some(item => item.reason !== 'Outside professional whitelist' && (!item.occurred_at.value || (Date.parse(item.occurred_at.value) >= Date.parse(range.from) && Date.parse(item.occurred_at.value) < Date.parse(range.to))));
     const previousSnapshot = repository.rawSnapshot(weekEnd);
     return { schema_version: 1, analysis_ref: { schema_version: 1, logical_id: 'weekly:' + weekEnd, revision: repository.latestRevision('weekly:' + weekEnd) + 1 }, ...(previousSnapshot ? { previous_snapshot: previousSnapshot } : {}), week_end: weekEnd, range, analysis_timezone: 'Europe/Amsterdam', facts, coverage,
         coverage_status: excluded || repository.unresolvedHistory() ? 'partial' : coverageStatus(config, coverage, range), previous_weeks: previous,
         prior_action: previousSnapshot?.validation_action?.state === 'active' ? previousSnapshot.validation_action : latest?.validation_action?.state === 'active' ? latest.validation_action : null,
-        confirmed_goal_refs: goals.map(goal => goal.contract_ref), confirmed_goals: goals,
+        confirmed_goal_refs: goals.map(goal => goal.contract_ref), confirmed_goals: goals, analytics_catalog: repository.catalog(config),
         observation_candidates: repository.observations().filter(observation => observation.evidence_refs.some(ref => currentKeys.has(factKey(ref)))) };
 }
 const START = '<!-- bookkeeping-analytics:begin -->';
@@ -78,13 +80,22 @@ function region(output: AnalyticsOutput): string {
     for (const snapshot of snapshots) {
         lines.push(`### 截至 ${snapshot.week_end}`, `覆盖：${snapshot.coverage_status}；快照 ${snapshot.analysis_ref.logical_id} r${snapshot.analysis_ref.revision}`, '');
         for (const observation of snapshot.observations) {
-            const overlay = output.overlays.find(item => analysisKey(item.observation_ref as any) === analysisKey(observation.observation_ref));
-            const state = overlay?.confirmed ? '已确认' : '待确认';
+            const overlays = output.overlays.filter(item => analysisKey(item.observation_ref as any) === analysisKey(observation.observation_ref));
+            const state = observation.stage === 'formal' ? '活动已确认' : '活动待确认';
             lines.push(`- ${observation.summary}（${observation.kind}；${state}；${observation.responsibility_basis}）`);
+            for (const overlay of overlays) {
+                const ref = overlay.capability_ref as {
+                    logical_id: string;
+                    revision: number;
+                };
+                lines.push(`  - ${overlay.label}：${overlay.contested ? '归因有争议' : overlay.confirmed ? '责任归因已确认' : '责任归因待确认'}；${overlay.stage === 'formal' ? '正式能力定义' : '候选能力定义'}（${ref.logical_id} r${ref.revision}）`);
+            }
         }
         lines.push('', '能力趋势：');
-        for (const capability of snapshot.capabilities)
-            lines.push(`- ${capability.capability_id}：${capability.trend}。${capability.explanation}`);
+        for (const capability of snapshot.capabilities) {
+            const definition = output.analytics_catalog.capabilities.find(item => capabilityMatches(item, capability.capability_id));
+            lines.push(`- ${definition?.label ?? capability.capability_id}：${capability.trend}。${capability.explanation}`);
+        }
         lines.push('', '目标差距：');
         for (const goal of snapshot.goal_gaps)
             lines.push(`- ${goal.description}（${goal.goal_ref.logical_id} r${goal.goal_ref.revision}）`);
@@ -150,7 +161,7 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
             for (const batch of batches) {
                 try {
                     const oldSnapshot = batch.analysis ? repository.rawSnapshot(batch.analysis.snapshot.week_end) : null;
-                    const output = repository.ingest(batch, config);
+                    const output = repository.ingest(batch, config, now());
                     if (batch.analysis && canonical(oldSnapshot) !== canonical(batch.analysis.snapshot))
                         reports.add('Weekly analysis changed; exact proposed confirmations remain user decisions');
                     if (output.exclusions.some(item => item.reason !== 'Outside professional whitelist'))
@@ -159,7 +170,7 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                     await options.fault?.('after_output', batch.batch_id);
                     for (const week of batch.analysis ? [] : batch.affected_weeks)
                         await store.enqueueWork({ schema_version: 1, work_id: `analytics-prepare:${batch.batch_id}:${week}`, kind: 'analytics_prepare', lane: 'history', state: 'pending', payload: { batch_id: batch.batch_id, week_end: addCalendarDays(week, 6) }, reason: 'External Codex semantic weekly review required', migration_key: null, updated_at: now() });
-                    const current = repository.currentOutput(batch.batch_id);
+                    const current = repository.currentOutput(batch.batch_id, config, now());
                     const cockpit = await publishCockpit(current);
                     if (cockpit.status !== 'complete') {
                         pending = cockpit.reason;
@@ -182,10 +193,21 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                     pending = String(error);
                 }
             }
+            // Expiration changes the current display even when no new fact batch arrives.
+            if (!batches.length && repository.cockpitRegion() !== null) {
+                try {
+                    const cockpit = await publishCockpit(repository.currentOutput('clock-refresh', config, now()));
+                    if (cockpit.status !== 'complete')
+                        pending = cockpit.reason;
+                }
+                catch (error) {
+                    pending = String(error);
+                }
+            }
             const display = await store.listWork('analytics_display', 'pending');
             if (display.length) {
                 try {
-                    const cockpit = await publishCockpit(repository.currentOutput('display'));
+                    const cockpit = await publishCockpit(repository.currentOutput('display', config, now()));
                     if (cockpit.status === 'complete')
                         for (const work of display)
                             await store.completeWork(work.work_id);
@@ -196,12 +218,12 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                     pending = String(error);
                 }
             }
-            return { schema_version: 1, target: 'analytics', status: pending ? 'pending' : 'complete', reason: pending ?? (reports.size ? [...reports].join('; ') : null) };
+            return { schema_version: 1, target: 'analytics', status: pending ? 'pending' : 'complete', reason: pending ?? (reports.size ? [...reports].join('; ') : null), analytics_pilot: repository.pilot(config, now()) };
         },
         async review(value: unknown): Promise<ReviewReceipt[]> {
             const input: AnalyticsReviewInput = validateAnalyticsInput(value);
-            const receipts = repository.applyReview(input, config);
-            const output = repository.currentOutput('review:' + digest(canonical(input)));
+            const receipts = repository.applyReview(input, config, false, now());
+            const output = repository.currentOutput('review:' + digest(canonical(input)), config, now());
             await immutableOutput(join(config.data_dir, 'analytics', 'reviews', digest(canonical(input)) + '.json'), Buffer.from(canonical({ schema_version: 1, input, receipts: receipts.map(receipt => ({ ...receipt, status: receipt.status === 'already_applied' ? 'applied' : receipt.status })) }) + '\n'));
             const cockpit = await publishCockpit(output);
             if (cockpit.status !== 'complete')

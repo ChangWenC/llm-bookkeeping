@@ -2,6 +2,7 @@ import type { AnalyticsReviewInput, FactRef, WeeklyAnalysisInput, WeeklyAnalysis
 import { array, record, string, utc, version, validateWeeklyAnalysisResult } from '../contracts/validation.ts';
 import { analysisKey, factKey } from './model.ts';
 import { canonical } from './serialization.ts';
+import { capabilityMatches } from './reviews.ts';
 function ref(value: unknown): void {
     const r = version(value, 'revision ref');
     string(r.logical_id, 'logical_id');
@@ -36,6 +37,24 @@ export function validateAnalyticsInput(value: unknown): AnalyticsReviewInput {
                 text(event.correction, 'correction');
             else if (event.correction !== null)
                 throw new Error('Only correction events may have correction text');
+            if (event.action === 'retract')
+                text(event.retracts_review_id, 'retracts_review_id');
+            else if (event.retracts_review_id != null)
+                throw new Error('Only retract can bind retracts_review_id');
+            if (event.selected_pairs !== undefined) {
+                const pairKeys = new Set<string>();
+                for (const item of array(event.selected_pairs, 'selected_pairs')) {
+                    const pair = version(item, 'attribution pair');
+                    ref(pair.observation_ref);
+                    ref(pair.capability_ref);
+                    const key = canonical(pair);
+                    if (pairKeys.has(key))
+                        throw new Error('Duplicate attribution pair');
+                    pairKeys.add(key);
+                }
+                if (event.action === 'retract' && pairKeys.size)
+                    throw new Error('Retraction binds the earlier review effect, not new pairs');
+            }
             if (ids.has(event.review_id))
                 throw new Error('Duplicate review ID');
             ids.add(event.review_id);
@@ -118,6 +137,8 @@ export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalys
             throw new Error('Capability attribution requires explicit responsibility evidence');
     }
     for (const capability of snapshot.capabilities) {
+        if (!input.analytics_catalog?.capabilities.some(definition => capabilityMatches(definition, capability.capability_id)))
+            throw new Error('Capability assessment requires a prepared definition from the exact catalogue');
         check(capability.evidence_refs);
         if (capability.trend !== 'unknown' && !capability.evidence_refs.length)
             throw new Error('Capability trend requires evidence');
