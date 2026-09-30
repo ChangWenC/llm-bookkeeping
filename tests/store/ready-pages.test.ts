@@ -25,5 +25,5 @@ test('evidence CLI route and all dispatch reach the independent consumer after A
  const calls:string[]=[];const c=await config();
  const services:any={consumers:['analytics','monthly','index','evidence'].map(target=>({target,consume:async()=>{calls.push(target);return {schema_version:1,target,status:'complete',processed:0,pending:[]};}}))};
  await executeCommand(parseArgs(['consume','--target','evidence']),c,services,'2026-09-30T12:00:00Z');assert.deepEqual(calls,['evidence']);calls.length=0;
- await executeCommand(parseArgs(['consume','--target','all']),c,services,'2026-09-30T12:00:00Z');assert.deepEqual(calls,['analytics','monthly','index','evidence']);
+ await executeCommand(parseArgs(['consume','--target','all']),c,services,'2026-09-30T12:00:00Z');assert.deepEqual(calls,['analytics','monthly','evidence','index']);
 });

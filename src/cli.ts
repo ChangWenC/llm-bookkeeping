@@ -262,7 +262,7 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
 
 async function consumeCommand(parsed: ParsedCommand, services: RuntimeServices) {
   const target = required(parsed.options, 'target');
-  const expected = target === 'all' ? ['analytics', 'monthly', 'index', 'evidence'] : [target];
+  const expected = target === 'all' ? ['analytics', 'monthly', 'evidence', 'index'] : [target];
   const outcomes = [];
   for (const name of expected) {
     const consumer = services.consumers.find(item => item.target === name);
