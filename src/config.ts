@@ -2,7 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, resolve, relative, dirname, basename, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { MIGRATION_HARD_LIMITS } from './contracts/migration-limits.ts';
-import { InputError, record, string, version, array, zone, utc, parseJsonPreservingIntegers } from './contracts/validation.ts';
+import { InputError, record, string, version, array, zone, utc, utcComparisonKey, parseJsonPreservingIntegers } from './contracts/validation.ts';
 import type { BookkeepingConfig, CollectionBudget, IndexCommands } from './contracts/types.ts';
 
 export const DEFAULT_LIMITS = Object.freeze({
@@ -107,18 +107,18 @@ export function validateConfig(value: unknown): BookkeepingConfig {
   if (config.analysis_timezone !== 'Europe/Amsterdam') throw new InputError('analysis_timezone: expected Europe/Amsterdam');
   utc(config.cutover_at, 'cutover_at');
   utc(config.live_start, 'live_start');
-  if (Date.parse(config.live_start) > Date.parse(config.cutover_at)) throw new InputError('live_start must not follow cutover_at');
+  if (utcComparisonKey(config.live_start) > utcComparisonKey(config.cutover_at)) throw new InputError('live_start must not follow cutover_at');
 
   const timeline = array(config.journal_timezone_timeline, 'journal_timezone_timeline');
   if (!timeline.length) throw new InputError('journal_timezone_timeline: at least one explicit entry required');
-  let previous = -Infinity;
+  let previous: string | null = null;
   for (const entry of timeline) {
     version(entry, 'timezone entry');
     utc(entry.effective_from, 'effective_from');
     zone(entry.timezone, 'timezone');
     string(entry.basis, 'basis');
-    const instant = Date.parse(entry.effective_from);
-    if (instant <= previous) throw new InputError('journal_timezone_timeline must be strictly increasing');
+    const instant = utcComparisonKey(entry.effective_from);
+    if (previous !== null && instant <= previous) throw new InputError('journal_timezone_timeline must be strictly increasing');
     previous = instant;
   }
 
