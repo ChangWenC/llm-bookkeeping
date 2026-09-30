@@ -19,7 +19,10 @@ export function canonicalDailyDate(path: string, bytes: Uint8Array | null = null
   // Explicit daily metadata permits older canonical stems, but topical/month/year
   // pages are never inferred as daily from their date alone.
   const header = frontmatter(bytes);
-  if (!/^type:\s*["']?(?:daily-journal|journal)["']?\s*$/m.test(header)) return null;
+  const dailyType = /^type:\s*["']?daily-journal["']?\s*$/m.test(header);
+  const journalType = /^type:\s*["']?journal["']?\s*$/m.test(header);
+  const tags = header.match(/^tags:\s*(.*(?:\n[ \t]+[^\n]*)*)/m)?.[1] ?? '';
+  if (!dailyType && !(journalType && /(?:^|[\s,\["'])daily-journal(?:$|[\s,\]"'])/.test(tags))) return null;
   return header.match(/^date:\s*["']?(\d{4}-\d{2}-\d{2})["']?\s*$/m)?.[1] ?? null;
 }
 export function retainedWindowStart(config: BookkeepingConfig, instant: Date): string {

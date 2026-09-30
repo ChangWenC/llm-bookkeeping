@@ -17,6 +17,7 @@ class FakeStore {
   work = new Map<string, WorkItem>();
   outbox = new Map<string, OutboxEntry>();
   accepts = 0;
+  acks = new Set<string>();
   constructor(patches: JournalPatch[] = []) { patches.forEach(patch => this.patches.set(patch.operation_id, patch)); }
   port(): Store { return this as unknown as Store; }
   async getFileIntent(id: string) { return structuredClone(this.intents.get(id) ?? null); }
@@ -30,7 +31,9 @@ class FakeStore {
   async completeWork(id: string) { this.work.get(id)!.state = 'complete'; }
   async listOutbox(status?: OutboxEntry['status']) { return [...this.outbox.values()].filter(entry => !status || entry.status === status); }
   async markExportReady(id: string, export_path: string) { Object.assign(this.outbox.get(id)!, { status: 'ready', export_path }); }
-  async listReadyBatches() { return [...this.outbox.values()].filter(entry => entry.status === 'ready').map(entry => entry.artifact); }
+  async listReadyBatches(consumer: string) { return [...this.outbox.values()].filter(entry => entry.status === 'ready' && !this.acks.has(`${consumer}:${entry.batch_id}`)).map(entry => entry.artifact); }
+  async acknowledgeConsumer(ack: { consumer: string; batch_id: string }) { this.acks.add(`${ack.consumer}:${ack.batch_id}`); }
+  async readEffectiveFacts() { return []; }
   async commitReview(): Promise<ReviewCommit> { const reused = this.accepts++ > 0; return { schema_version: 1, result_id: 'result:zero', batch_id: 'batch:zero', reused, facts: [], patches: [...this.patches.values()] }; }
   artifact(id = 'batch:zero') { this.outbox.set(id, { schema_version: 1, batch_id: id, status: 'pending', export_path: null,
     artifact: { schema_version: 1, batch_id: id, created_at: fixedNow().toISOString(), facts: [], coverage: [], affected_dates: ['2026-09-30'], affected_weeks: ['2026-10-04'] } }); }
@@ -216,9 +219,12 @@ test('monthly, weekly and project patches with archived dates publish normally; 
   store.work.set('archive:old', { schema_version: 1, work_id: 'archive:old', kind: 'archive', state: 'complete', lane: 'history', payload: { archived_dates: ['2026-07-31'] }, reason: null, migration_key: null, updated_at: fixedNow().toISOString() });
   const paths = ['wiki/personal/journals/reviews/回顾_2026_07.md', 'wiki/personal/synthesis/综合_self_analytics_current.md', 'wiki/projects/合成项目.md'];
   const ps = paths.map((path, index) => ({ ...patch(`op:non-daily-${index}`, path, ''), date: '2026-07-31', baseline_digest: 'absent' }));
+  const weeklyPath = 'wiki/personal/journals/周记_2026_07.md';
+  await seed(f.wiki, weeklyPath, '---\ntype: journal\ndate: 2026-07-31\n---\nweekly manual body\n');
+  ps.push({...patch('op:weekly-generic-type',weeklyPath),date:'2026-07-31'});
   const pinned = { ...patch('op:tagged', 'wiki/personal/journals/日记_2026_07_31.md', ''), date: '2026-07-31' };
   await seed(f.wiki, pinned.path, '---\ntags:\n  - pinned-daily\n---\nhuman daily\n'); ps.push(pinned);
   const outcomes = await createPublisher(store.port(), f.config, { now: fixedNow }).applyPatches(ps);
-  assert.deepEqual(outcomes.map(file => file.status), ['applied', 'applied', 'applied', 'applied']);
+  assert.deepEqual(outcomes.map(file => file.status), ['applied', 'applied', 'applied', 'applied', 'applied']);
   assert.equal((await store.listWork('journal_supplement')).length, 0);
 });

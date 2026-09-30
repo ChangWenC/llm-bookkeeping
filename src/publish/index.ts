@@ -1,6 +1,4 @@
-import { mkdir, open, rename, readFile, readdir, rm, lstat } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
-import { createInterface } from 'node:readline';
+import { mkdir, open, rename, readFile, rm } from 'node:fs/promises';
 import { join, dirname, isAbsolute } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { BookkeepingConfig, Store, Publisher, PublishResult, ReviewResult, JournalPatch, FileOutcome, FactArtifact } from '../contracts/types.ts';
@@ -32,7 +30,7 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     await store.enqueueWork({ schema_version: 1, work_id: `${kind}:${id}`, kind, lane: 'live', state: 'pending', payload, reason, migration_key: null, updated_at: now() });
   }
   async function queueConsumers(artifact: FactArtifact): Promise<void> {
-    const months = [...new Set([...artifact.affected_dates, ...artifact.affected_weeks].map(date => date.slice(0, 7)))].sort();
+    const months = [...new Set([...(artifact.affected_months ?? []), ...[...artifact.affected_dates, ...artifact.affected_weeks].map(date => date.slice(0, 7))])].sort();
     for (const consumer of ['analytics', 'monthly']) await enqueue('consumer', `${consumer}:${artifact.batch_id}`, { consumer, batch_id: artifact.batch_id,
       affected_dates: artifact.affected_dates, affected_weeks: artifact.affected_weeks, affected_months: months });
     for (const [kind, periods] of [['date', artifact.affected_dates], ['week', artifact.affected_weeks], ['month', months]] as const)
@@ -75,44 +73,29 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     }
     return { ready, pending };
   }
-  async function archivedDates(): Promise<Set<string>> {
-    const result = new Set<string>();
+  async function archivedDates(): Promise<{ dates: Set<string>; uncertain: Set<string> }> {
+    const dates = new Set<string>(), uncertain = new Set<string>();
     const add = (value: unknown): void => {
       if (Array.isArray(value)) { value.forEach(add); return; }
       if (!value || typeof value !== 'object') return;
       const record = value as Record<string, unknown>;
-      if (typeof record.date === 'string' && record.retention !== 'pinned' && validDate(record.date)) result.add(record.date);
-      for (const key of ['archived_dates', 'entries', 'records', 'journals']) {
-        if (key === 'archived_dates' && Array.isArray(record[key])) {
-          for (const date of record[key]) if (typeof date === 'string' && validDate(date)) result.add(date);
-        } else add(record[key]);
-      }
+      if (typeof record.date === 'string' && record.retention !== 'pinned' && validDate(record.date)) dates.add(record.date);
+      if (Array.isArray(record.archived_dates)) for (const date of record.archived_dates) if (typeof date === 'string' && validDate(date)) dates.add(date);
+      for (const key of ['entries', 'records', 'journals']) add(record[key]);
     };
     try { add(JSON.parse(await readFile(join(config.data_dir, 'retention', 'state.json'), 'utf8'))); }
-    catch (error) { if (!missing(error)) throw error; }
-    // Store work is reconstructible evidence; local retention state is only a projection.
+    catch (error) {
+      if (!missing(error)) await enqueue('retention_projection', hash(config.data_dir), { path: join(config.data_dir, 'retention', 'state.json') }, message(error));
+    }
     for (const work of await store.listWork('archive', 'complete')) add(work.payload);
-    const folder = join(config.wiki_root, 'wiki', 'personal', '_evidence', 'daily_journals');
-    async function scan(path: string): Promise<void> {
-      let entries;
-      try { entries = await readdir(path, { withFileTypes: true }); } catch (error) { if (missing(error)) return; throw error; }
-      for (const entry of entries) {
-        const file = join(path, entry.name);
-        if (entry.isSymbolicLink()) throw new Error('Symlink archive metadata rejected');
-        if (entry.isDirectory()) await scan(file);
-        else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-          for await (const line of createInterface({ input: createReadStream(file), crlfDelay: Infinity })) if (line.trim()) add(JSON.parse(line));
-        } else if (entry.isFile() && entry.name.endsWith('.json')) add(JSON.parse(await readFile(file, 'utf8')));
-      }
+    const { readArchiveRecords } = await import('../consumers/archive/records.ts');
+    const records = await readArchiveRecords(config);
+    for (const item of records) add(item.record);
+    for (const issue of records.issues) {
+      if (issue.date) uncertain.add(issue.date);
+      await enqueue('archive_record', hash(JSON.stringify(issue)), { ...issue }, issue.reason);
     }
-    // The configured archive location itself may not follow a symlink.
-    let parent = config.wiki_root;
-    for (const part of ['wiki', 'personal', '_evidence', 'daily_journals']) {
-      parent = join(parent, part);
-      try { if ((await lstat(parent)).isSymbolicLink()) throw new Error('Symlink archive metadata rejected'); } catch (error) { if (!missing(error)) throw error; }
-    }
-    await scan(folder);
-    return result;
+    return { dates, uncertain };
   }
   async function applyPatches(patches: JournalPatch[]): Promise<FileOutcome[]> {
     if (!patches.length) return [];
@@ -124,7 +107,7 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     }
     const outcomes: FileOutcome[] = [];
     try {
-      let archived: Set<string> | null = null;
+      let archived: { dates: Set<string>; uncertain: Set<string> } | null = null;
       for (const patch of patches) {
         let outcome: FileOutcome;
         try {
@@ -135,9 +118,9 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
             const target = await readWikiTarget(config.wiki_root, patch.path);
             const dailyDate = canonicalDailyDate(target.path, target.bytes);
             if (dailyDate !== null && dailyDate !== patch.date) throw new Error('Journal patch date differs from canonical daily target');
-            if (dailyDate !== null) archived ??= await archivedDates();
+            if (dailyDate !== null) { archived ??= await archivedDates(); if (archived.uncertain.has(patch.date)) throw new Error('Malformed archive record for this date remains pending'); }
             const retained = target.bytes !== null && retainedJournal(target.bytes);
-            const supplement = dailyDate !== null && ((archived!.has(patch.date) && !retained) || (target.bytes === null && patch.date < retainedWindowStart(config, options.now?.() ?? new Date())));
+            const supplement = dailyDate !== null && ((archived!.dates.has(patch.date) && !retained) || (target.bytes === null && patch.date < retainedWindowStart(config, options.now?.() ?? new Date())));
             if (supplement) {
               await enqueue('journal_supplement', patch.operation_id, { patch, reason: 'Archived or outside retained journal window' });
               outcome = fileOutcome(patch, 'noop', 'Facts retained; journal supplement queued without recreating daily Markdown');
@@ -186,8 +169,45 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     } finally { await lock.release(); }
     return outcomes;
   }
-  async function result(resultId: string | null, batchId: string | null, reused: boolean, exports: { ready: string[]; pending: string[] }, files: FileOutcome[]): Promise<PublishResult> {
-    const consumers: PublishResult['consumers'] = [];
+  async function monthlyOutputs(): Promise<PublishResult['consumers']> {
+    const batches = (await store.listReadyBatches('monthly-publish')).filter(batch => batch.monthly_review);
+    const displayBatches = await store.listReadyBatches('monthly-display');
+    if (!batches.length && !displayBatches.length) return [];
+    const { createMonthlyConsumer } = await import('../consumers/monthly/index.ts');
+    const monthly = createMonthlyConsumer(store, config, options);
+    const outcomes: PublishResult['consumers'] = [];
+    for (const batch of batches) {
+      let outcome;
+      try { outcome = await monthly.publishMonthlyReview(batch); }
+      catch (error) { outcome = { schema_version: 1 as const, target: 'monthly', status: 'pending' as const, reason: message(error) }; }
+      outcomes.push({ ...outcome, target: `monthly-publish:${batch.batch_id}` });
+    }
+    for (const batch of displayBatches) {
+      const months = [...new Set([...(batch.affected_months ?? []), ...[...batch.affected_dates, ...batch.affected_weeks].map(date => date.slice(0, 7))])];
+      let complete = true;
+      for (const month of months) {
+        const id = `${batch.batch_id}:${month}`;
+        await enqueue('monthly_display', id, { month, batch_id: batch.batch_id });
+        let outcome;
+        try { outcome = await monthly.refreshMonthlySupplements(month); }
+        catch (error) { outcome = { schema_version: 1 as const, target: 'monthly', status: 'pending' as const, reason: message(error) }; }
+        outcomes.push({ ...outcome, target: `monthly-display:${id}` });
+        if (outcome.status === 'complete') await store.completeWork(`monthly_display:${id}`);
+        else complete = false;
+      }
+      if (complete) await store.acknowledgeConsumer({ schema_version: 1, consumer: 'monthly-display', batch_id: batch.batch_id, acknowledged_at: now() });
+    }
+    return outcomes;
+  }
+  async function result(resultId: string | null, batchId: string | null, reused: boolean, exports: { ready: string[]; pending: string[] }, files: FileOutcome[], monthly: PublishResult['consumers']): Promise<PublishResult> {
+    // Monthly display writes happen after ordinary recovery and still belong in
+    // the per-file publication report, independently of their consumer status.
+    if (monthly.length) {
+      const seen = new Set(files.map(file => file.operation_id));
+      for (const intent of await store.listFileIntents()) if (!seen.has(intent.operation_id)) files.push(fileOutcome(intent,
+        intent.state === 'applied' ? 'applied' : intent.state === 'conflict' ? 'conflict' : 'pending', intent.reason));
+    }
+    const consumers: PublishResult['consumers'] = [...monthly];
     for (const target of ['analytics', 'monthly']) {
       const batches = await store.listReadyBatches(target);
       consumers.push({ schema_version: 1, target, status: batches.length || exports.pending.length ? 'pending' : 'complete',
@@ -199,7 +219,7 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
       export_status: exports.pending.length ? 'pending' : 'ready', files,
       consumers,
       pending: [...exports.pending.map(id => `export:${id}`), ...files.filter(file => ['pending', 'conflict'].includes(file.status)).map(file => `file:${file.operation_id}`),
-        ...consumers.filter(consumer => consumer.status === 'pending').map(consumer => `consumer:${consumer.target}`)] };
+        ...consumers.filter(consumer => consumer.status === 'pending' || consumer.status === 'partial').map(consumer => `consumer:${consumer.target}`)] };
   }
   return {
     exportFacts, applyPatches,
@@ -207,12 +227,14 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
       const commit = await store.commitReview(review);
       const exports = await exportFacts();
       const files = await recovery();
-      return result(commit.result_id, commit.batch_id, commit.reused, exports, files);
+      const monthly = await monthlyOutputs();
+      return result(commit.result_id, commit.batch_id, commit.reused, exports, files, monthly);
     },
     async resume(): Promise<PublishResult> {
       const exports = await exportFacts();
       const files = await recovery();
-      return result(null, null, true, exports, files);
+      const monthly = await monthlyOutputs();
+      return result(null, null, true, exports, files, monthly);
     },
   };
 }

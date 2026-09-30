@@ -1,0 +1,170 @@
+import { basename } from 'node:path';
+import type { ArchiveRequest, BookkeepingConfig, Store, FactRef, FileOutcome, WorkItem } from '../../contracts/types.ts';
+import { createSafeWikiWriter, acquireWikiLock, readWikiTarget, digestBytes } from '../../publish/index.ts';
+import { canonicalDailyDate, retainedJournal, retainedWindowStart, frontmatter } from '../../publish/journals.ts';
+import { archiveFolder, sha, checkMonth, monthlyPath, effectiveMonthFacts, listMarkdown, readArchiveRecords, type ArchiveReadIssue } from './records.ts';
+import type { WriterOptions } from '../../publish/files.ts';
+export { readArchiveRecords } from './records.ts';
+
+interface LinkPlan { path: string; digest: string; desired_base64: string; operation_id: string }
+interface ArchivePlan { month: string; date: string; path: string; source_digest: string; original_base64: string; archive_path: string; archive_base64: string; archive_operation: string; delete_operation: string; fact_refs: FactRef[]; links: LinkPlan[] }
+export interface ArchivePageOutcome { date: string; path: string; status: 'eligible' | 'retained' | 'applied' | 'noop' | 'pending' | 'conflict'; archive_path: string | null; reason: string | null }
+export interface ArchiveResult { schema_version: 1; month: string; mode: 'report' | 'apply'; status: 'complete' | 'partial' | 'pending'; pages: ArchivePageOutcome[]; reason: string | null; issues?: ArchiveReadIssue[] }
+export interface ArchiveOptions extends WriterOptions { faultArchive?: (stage: 'plan_saved' | 'archive_saved' | 'links_saved' | 'before_delete' | 'after_delete', path: string) => void | Promise<void> }
+const success = (outcome: FileOutcome) => outcome.status === 'applied' || outcome.status === 'noop';
+const dailyTargets = (path: string): Set<string> => {
+  const stem = path.replace(/\.md$/, '');
+  return new Set([basename(stem), stem, stem.replace(/^wiki\//, ''), stem.replace(/^wiki\/personal\//, ''), `${basename(stem)}.md`, path]);
+};
+function rewriteLinks(text: string, path: string, date: string, month: string): string {
+  const targets = dailyTargets(path);
+  return text.replace(/\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g, (whole, target: string, alias: string | undefined) => {
+    const original = target.split('#')[0];
+    if (!targets.has(original)) return whole;
+    return `[[回顾_${month.replaceAll('-', '_')}|${alias ?? `${date} 日记`}]]`;
+  });
+}
+function usableReview(bytes: Buffer | null, month: string): boolean {
+  if (!bytes) return false;
+  const text = bytes.toString('utf8').replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')
+    .replace(/<!-- bookkeeping:monthly-supplement:start[\s\S]*?<!-- bookkeeping:monthly-supplement:end -->/g, '')
+    .replace(/^\s*#+[^\n]*$/gm, '').replace(/<!--[\s\S]*?-->/g, '').trim();
+  return Boolean(text) && !/^\s*status:\s*(?:draft|pending)\s*$/m.test(frontmatter(bytes));
+}
+export function createArchiveService(store: Store, config: BookkeepingConfig, options: ArchiveOptions = {}) {
+  const writer = createSafeWikiWriter(store, config, options);
+  const now = () => options.now?.() ?? new Date();
+  async function queuePlan(plan: ArchivePlan): Promise<WorkItem> {
+    const item: WorkItem = { schema_version: 1, work_id: `archive-plan:${plan.month}:${sha(`${plan.path}:${plan.source_digest}`)}`, kind: 'archive_plan', lane: 'history', state: 'pending',
+      payload: plan as unknown as Record<string, unknown>, reason: null, migration_key: null, updated_at: now().toISOString() };
+    await store.enqueueWork(item); return item;
+  }
+  async function report(request: ArchiveRequest): Promise<ArchiveResult> {
+    checkMonth(request.month);
+    const pages: ArchivePageOutcome[] = [];
+    const issues = (await readArchiveRecords(config)).issues;
+    const retainedMonth = request.month >= retainedWindowStart(config, now()).slice(0, 7);
+    const review = await readWikiTarget(config.wiki_root, monthlyPath(request.month));
+    for (const path of await listMarkdown(config.wiki_root)) {
+      const target = await readWikiTarget(config.wiki_root, path), date = canonicalDailyDate(path, target.bytes);
+      if (!date?.startsWith(request.month)) continue;
+      const retained = retainedMonth || retainedJournal(target.bytes);
+      const issue = issues.find(issue => issue.date === date);
+      pages.push({ date, path, status: retained ? 'retained' : !issue && usableReview(review.bytes, request.month) ? 'eligible' : 'pending', archive_path: null,
+        reason: retained ? 'Retained window or pinned/intentional daily' : issue?.reason ?? (usableReview(review.bytes, request.month) ? null : 'Usable monthly review is required before deletion') });
+    }
+    return { schema_version: 1, month: request.month, mode: request.mode, status: pages.some(page => page.status === 'pending') ? 'pending' : issues.length ? 'partial' : 'complete', pages, reason: null, issues };
+  }
+  async function run(request: ArchiveRequest): Promise<ArchiveResult> {
+    checkMonth(request.month);
+    if (request.mode !== 'report' && request.mode !== 'apply') throw new Error('Archive mode must be report or apply');
+    if (request.mode === 'report') return report(request);
+    if (request.month >= retainedWindowStart(config, now()).slice(0, 7)) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages: [], reason: 'Current and preceding month are retained' };
+    const facts = await effectiveMonthFacts(store, request.month);
+    const issues = (await readArchiveRecords(config)).issues;
+    for (const issue of issues) await store.enqueueWork({ schema_version: 1, work_id: `archive-record-issue:${sha(JSON.stringify(issue))}`, kind: 'archive_record', lane: 'history', state: 'pending',
+      payload: { ...issue }, reason: issue.reason, migration_key: null, updated_at: now().toISOString() });
+    const lock = await acquireWikiLock(config.wiki_root);
+    if (!lock) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages: [], reason: 'Wiki writer is active' };
+    const pages: ArchivePageOutcome[] = [];
+    try {
+      const pendingPlans = (await store.listWork('archive_plan', 'pending')).filter(work => work.payload.month === request.month);
+      const byPath = new Map(pendingPlans.map(work => [String(work.payload.path), work]));
+      // Include plans whose source was already deleted just before a crash.
+      const paths = new Set([...await listMarkdown(config.wiki_root), ...byPath.keys()]);
+      for (const path of [...paths].sort()) {
+        let date: string | null = null, archivePath: string | null = null;
+        try {
+          const source = await readWikiTarget(config.wiki_root, path);
+          const prior = byPath.get(path);
+          date = canonicalDailyDate(path, source.bytes) ?? (prior?.payload.date as string | undefined) ?? null;
+          if (!date?.startsWith(request.month)) continue;
+          if (retainedJournal(source.bytes)) { pages.push({ date, path, status: 'retained', archive_path: null, reason: 'Pinned/intentional daily remains' }); continue; }
+          if (issues.some(issue => issue.date === date)) throw new Error('Malformed existing archive record for this date requires reconciliation');
+          const review = await readWikiTarget(config.wiki_root, monthlyPath(request.month));
+          if (!usableReview(review.bytes, request.month)) throw new Error('Usable monthly review is required before deletion');
+          let work = prior;
+          let plan: ArchivePlan;
+          if (work && (source.digest === work.payload.source_digest || source.bytes === null)) plan = work.payload as unknown as ArchivePlan;
+          else {
+            if (source.bytes === null) continue;
+            const refs = facts.filter(fact => fact.journal_date.value === date).map(({ fact_id, revision }) => ({ schema_version: 1 as const, fact_id, revision }));
+            const identity = sha(`${path}:${source.digest}`);
+            archivePath = `${archiveFolder}/v2/${request.month}/${identity}.json`;
+            const archiveRecord = { schema_version: 1, format: 'daily-journal-archive-v2', archive_id: `archive:${identity}`, date,
+              original_stem: basename(path, '.md'), source_path: path, original_digest: source.digest, original_bytes_base64: source.bytes.toString('base64'),
+              original_markdown: source.bytes.toString('utf8'), locator: `archive:${identity}:${date}`, fact_refs: refs, retention: 'archived', created_at: now().toISOString() };
+            const links: LinkPlan[] = [];
+            for (const other of await listMarkdown(config.wiki_root)) {
+              if (other === path) continue;
+              const snapshot = await readWikiTarget(config.wiki_root, other);
+              if (snapshot.bytes === null) continue;
+              const text = snapshot.bytes.toString('utf8'), desired = rewriteLinks(text, path, date, request.month);
+              if (desired !== text) {
+                if (!Buffer.from(text).equals(snapshot.bytes)) throw new Error(`Backlink page is not lossless UTF-8: ${other}`);
+                links.push({ path: other, digest: snapshot.digest, desired_base64: Buffer.from(desired).toString('base64'), operation_id: `archive-link:${identity}:${sha(`${other}:${snapshot.digest}`)}` });
+              }
+            }
+            plan = { month: request.month, date, path, source_digest: source.digest, original_base64: source.bytes.toString('base64'), archive_path: archivePath,
+              archive_base64: Buffer.from(JSON.stringify(archiveRecord) + '\n').toString('base64'), archive_operation: `archive-original:${identity}`,
+              delete_operation: `archive-delete:${identity}`, fact_refs: refs, links };
+            work = await queuePlan(plan);
+            await options.faultArchive?.('plan_saved', path);
+          }
+          archivePath = plan.archive_path;
+          const archived = await writer.writeLocked({ operation_id: plan.archive_operation, path: plan.archive_path, baseline_digest: 'absent', desired_bytes: Buffer.from(plan.archive_base64, 'base64'), fact_refs: plan.fact_refs }, lock);
+          if (!success(archived)) { pages.push({ date, path, status: archived.status, archive_path: archivePath, reason: archived.reason }); continue; }
+          // Canonical/date evidence is written only after actual saved archive output.
+          const archiveWork: WorkItem = { schema_version: 1, work_id: `archive:${plan.archive_operation}`, kind: 'archive', lane: 'history', state: 'complete',
+            payload: { date, archived_dates: [date], archive_path: plan.archive_path, source_path: path, source_digest: plan.source_digest, fact_refs: plan.fact_refs },
+            reason: null, migration_key: null, updated_at: now().toISOString() };
+          await store.enqueueWork(archiveWork);
+          await store.enqueueWork({ schema_version: 1, work_id: `archive-context:${plan.archive_operation}`, kind: 'archive_context', lane: 'history', state: 'pending',
+            payload: { month: plan.month, date, archive_path: plan.archive_path, locator: `archive:${sha(`${path}:${plan.source_digest}`)}:${date}`, fact_refs: plan.fact_refs },
+            reason: 'Unstructured original remains bounded extraction context; mapped fact refs are not new assertions', migration_key: null, updated_at: now().toISOString() });
+          await options.faultArchive?.('archive_saved', path);
+          let blocked: FileOutcome | null = null;
+          for (const link of plan.links) {
+            const outcome = await writer.writeLocked({ operation_id: link.operation_id, path: link.path, baseline_digest: link.digest, desired_bytes: Buffer.from(link.desired_base64, 'base64'), fact_refs: plan.fact_refs }, lock);
+            if (!success(outcome)) { blocked = outcome; break; }
+          }
+          if (blocked) { pages.push({ date, path, status: blocked.status, archive_path: archivePath, reason: `Backlink ${blocked.path}: ${blocked.reason}` }); continue; }
+          await options.faultArchive?.('links_saved', path);
+          // Re-enumerate after all backlink writes; even a successful old intent
+          // does not prove that a human has not reintroduced a daily backlink.
+          let remaining: string | null = null;
+          for (const other of await listMarkdown(config.wiki_root)) {
+            if (other === path) continue;
+            const snapshot = await readWikiTarget(config.wiki_root, other), text = snapshot.bytes?.toString('utf8') ?? '';
+            if (rewriteLinks(text, path, date, request.month) !== text) { remaining = other; break; }
+          }
+          if (remaining) throw new Error(`Unmigrated daily backlink remains: ${remaining}`);
+          await options.faultArchive?.('before_delete', path);
+          for (const link of plan.links) {
+            const latest = await readWikiTarget(config.wiki_root, link.path);
+            if (latest.digest !== digestBytes(Buffer.from(link.desired_base64, 'base64'))) throw new Error(`Migrated backlink page changed; deletion deferred: ${link.path}`);
+          }
+          for (const other of await listMarkdown(config.wiki_root)) {
+            if (other === path) continue;
+            const snapshot = await readWikiTarget(config.wiki_root, other), text = snapshot.bytes?.toString('utf8') ?? '';
+            if (rewriteLinks(text, path, date, request.month) !== text) throw new Error(`Daily backlink appeared before deletion: ${other}`);
+          }
+          const current = await readWikiTarget(config.wiki_root, path);
+          if (current.bytes !== null && (current.digest !== plan.source_digest || retainedJournal(current.bytes))) throw new Error('Source changed after preservation; deletion deferred');
+          const finalReview = await readWikiTarget(config.wiki_root, monthlyPath(request.month));
+          if (!usableReview(finalReview.bytes, request.month)) throw new Error('Monthly review changed or disappeared; deletion deferred');
+          const archiveCheck = await readWikiTarget(config.wiki_root, plan.archive_path);
+          if (archiveCheck.digest !== digestBytes(Buffer.from(plan.archive_base64, 'base64'))) throw new Error('Saved full archive changed or disappeared; deletion deferred');
+          const deleted = await writer.writeLocked({ operation_id: plan.delete_operation, path, baseline_digest: plan.source_digest, desired_bytes: null, fact_refs: plan.fact_refs }, lock);
+          if (!success(deleted)) { pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: deleted.reason }); continue; }
+          await options.faultArchive?.('after_delete', path);
+          await store.completeWork(work!.work_id);
+          pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: null });
+        } catch (error) { if (date) pages.push({ date, path, status: 'pending', archive_path: archivePath, reason: (error as Error).message }); else throw error; }
+      }
+      const pending = pages.filter(page => page.status === 'pending' || page.status === 'conflict');
+      return { schema_version: 1, month: request.month, mode: 'apply', status: pending.length ? pages.some(page => page.status === 'applied' || page.status === 'noop') ? 'partial' : 'pending' : issues.length ? 'partial' : 'complete', pages, reason: null, issues };
+    } finally { await lock.release(); }
+  }
+  return { run, report: (month: string) => report({ month, mode: 'report' }) };
+}
