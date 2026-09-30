@@ -19,6 +19,16 @@ const rangeCheck = (range: TimeRange) => { utc(range.from); utc(range.to); if (n
 const version = (value: any) => { if (value?.schema_version !== 1) throw new Error('Unsupported schema_version'); };
 const unique = (ids: string[], label: string) => { if (ids.some(id => !id) || new Set(ids).size !== ids.length) throw new Error('Duplicate or empty ' + label); };
 function enrichEvent(previous: SourceEvent, incoming: SourceEvent): SourceEvent {
+  const nativeCompatible=previous.source.message_id!==null&&canonical(previous.source)===canonical(incoming.source)&&previous.body===incoming.body&&(!previous.utc_time.value||!incoming.utc_time.value||normalized(previous.utc_time.value)===normalized(incoming.utc_time.value))&&(previous.role===incoming.role||previous.role==='unknown'||incoming.role==='unknown');
+  if(nativeCompatible){
+    for(const key of ['sender_id','real_sender_id'])if(previous.context[key]!==undefined&&incoming.context[key]!==undefined&&String(previous.context[key])!==String(incoming.context[key]))throw new Error('Conflicting known sender');
+    const retainedContext={...previous.context,...incoming.context};
+    if(previous.context.context_only===false||incoming.context.context_only===false)retainedContext.context_only=false;
+    const candidate={...incoming,physical_order:previous.physical_order,generation:previous.generation,time_precision:previous.time_precision==='unknown'?incoming.time_precision:previous.time_precision,context:retainedContext};
+    if(previous.utc_time.value&&incoming.utc_time.value&&previous.original_time.value!==null)candidate.original_time=previous.original_time;
+    if(previous.journal_timezone.value===incoming.journal_timezone.value&&previous.journal_date.value===incoming.journal_date.value)candidate.journal_timezone_basis=previous.journal_timezone_basis;
+    previous={...previous,context:retainedContext};incoming=candidate;
+  }
   const merged=structuredClone(previous);
   const nullable=['original_time','utc_time','wire_timezone','journal_timezone','journal_date'] as const;
   for(const key of nullable){const a=previous[key];const b=incoming[key];if(a.value===null&&b.value!==null)(merged as any)[key]=b;else if(b.value!==null&&a.value!==b.value){if(['utc_time','original_time'].includes(key)&&a.value?.endsWith('Z')&&b.value.endsWith('Z')&&normalized(a.value)===normalized(b.value))continue;throw new Error('Conflicting known event '+key);}}
@@ -121,7 +131,7 @@ export class SqliteStore implements Store {
   async listEvents(query: EventQuery): Promise<SourceEvent[]> {
     rangeCheck(query.range); const limit = query.limit ?? 1000; if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid event limit');
     const params: any[] = [normalized(query.range.from),normalized(query.range.to)]; let clause = 'time>=? AND time<?';
-    if (!query.include_context) clause += " AND classification='main'";
+    if (!query.include_context) clause += " AND classification='main' AND COALESCE(json_extract(json,'$.context.context_only'),0)!=1";
     if (query.lane) { clause += ' AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=events.id AND l.lane=?)'; params.push(query.lane); }
     if (query.after) { const cursor = this.db.prepare('SELECT time,ordering,id FROM events WHERE id=?').get(query.after) as any; if (!cursor) throw new Error('Unknown event cursor'); clause += ' AND (time,ordering,id)>(?,?,?)'; params.push(cursor.time,cursor.ordering,cursor.id); }
     params.push(limit); return this.db.prepare(`SELECT json FROM events WHERE ${clause} ORDER BY time,ordering,id LIMIT ?`).all(...params).map(parse<SourceEvent>);
@@ -143,7 +153,7 @@ export class SqliteStore implements Store {
     return this.db.prepare('SELECT start_byte,end_byte FROM reviewed_spans WHERE kind=? AND lane=? AND source_id=? ORDER BY start_byte,end_byte').all(kind,lane,sourceId) as any[];
   }
   async getReviewableEvents(query: EventQuery, kind: string): Promise<SourceEvent[]> {
-    rangeCheck(query.range); return this.db.prepare("SELECT e.json FROM events e WHERE e.time>=? AND e.time<? AND e.classification='main' AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane=?) ORDER BY e.time,e.ordering,e.id LIMIT ?").all(normalized(query.range.from),normalized(query.range.to),query.lane!,kind,query.lane!,query.limit ?? 1000).map(parse<SourceEvent>);
+    rangeCheck(query.range); return this.db.prepare("SELECT e.json FROM events e WHERE e.time>=? AND e.time<? AND e.classification='main' AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane=?) ORDER BY e.time,e.ordering,e.id LIMIT ?").all(normalized(query.range.from),normalized(query.range.to),query.lane!,kind,query.lane!,query.limit ?? 1000).map(parse<SourceEvent>);
   }
   getContextEvents(event: SourceEvent): SourceEvent[] {
     if(!event.utc_time.value)return [];
@@ -159,7 +169,7 @@ export class SqliteStore implements Store {
     if (frontier >= total) this.db.prepare('INSERT OR IGNORE INTO reviewed_sources VALUES(?,?,?)').run(kind,lane,sourceId);
   }
   private coverageReview(coverage: SourceCoverage, kind: string, explicitEmpty: boolean): SourceCoverage {
-    const events = this.db.prepare("SELECT e.id FROM events e WHERE json_extract(e.json,'$.source.provider')=? AND json_extract(e.json,'$.source.account_id')=? AND (? IS NULL OR json_extract(e.json,'$.source.conversation_id')=?) AND e.classification IN ('main','unknown') AND (e.time IS NULL OR (e.time>=? AND e.time<?)) AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?)").all(coverage.provider,coverage.account_id,coverage.conversation_id,coverage.conversation_id,normalized(coverage.query_range.from),normalized(coverage.query_range.to),coverage.lane) as any[];
+    const events = this.db.prepare("SELECT e.id FROM events e WHERE json_extract(e.json,'$.source.provider')=? AND json_extract(e.json,'$.source.account_id')=? AND (? IS NULL OR json_extract(e.json,'$.source.conversation_id')=?) AND e.classification IN ('main','unknown') AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND (e.time IS NULL OR (e.time>=? AND e.time<?)) AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?)").all(coverage.provider,coverage.account_id,coverage.conversation_id,coverage.conversation_id,normalized(coverage.query_range.from),normalized(coverage.query_range.to),coverage.lane) as any[];
     const done = events.filter(e => this.db.prepare('SELECT 1 FROM reviewed_sources WHERE kind=? AND lane=? AND source_id=?').get(kind,coverage.lane,e.id)).length;
     const any = events.some(e=>this.db.prepare('SELECT 1 FROM reviewed_spans WHERE kind=? AND lane=? AND source_id=? LIMIT 1').get(kind,coverage.lane,e.id));
     const status = events.length ? done === events.length ? 'complete' : (done || any) ? 'partial' : 'pending' : explicitEmpty && coverage.capture_status === 'complete' && !coverage.gaps.length ? 'complete' : 'pending';

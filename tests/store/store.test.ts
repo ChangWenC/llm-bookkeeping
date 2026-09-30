@@ -84,3 +84,13 @@ test('unknown metadata can enrich monotonically; conflicting original content is
 test('microsecond range boundaries remain precise and projection cannot cite unrelated evidence',async()=>{
  const c=await config();const s=await createStore(c);const events=[event('nano-a','A','2026-09-30T09:00:00.000001Z'),event('nano-b','B','2026-09-30T09:00:00.000002Z')];await s.saveCollection(collection(events));assert.deepEqual((await s.listEvents({range:{schema_version:1,from:'2026-09-30T09:00:00.000001Z',to:'2026-09-30T09:00:00.000002Z'}})).map(e=>e.event_id),['nano-a']);const b=bundle([events[0]]);await s.saveBundle(b);const bad=result(b);bad.candidates[0].analytics_projection.value!.event_refs=[{schema_version:1,event_id:'nano-b'}];await assert.rejects(s.commitReview(bad),/projection evidence outside/);assert.equal((await s.status()).facts,0);s.close();
 });
+
+test('proved native import/live transport metadata merges in both orders and context-only requires explicit inrange release',async()=>{
+ for(const first of ['import','live']){
+ const c=await config();const s=await createStore(c);const imported=event('native');imported.context={source_format:'export',owner_id:'Roy',context_only:true};imported.physical_order='file:offset:1';imported.original_time=value('1790769600');
+ const live=event('native');live.context={identity_verified:true,sender_id:'Roy',context_only:false};live.physical_order='timestamp:native:1';live.time_precision='second';
+ const a=first==='import'?imported:live;const b=first==='import'?live:imported;await s.saveCollection(collection([a],'live','first'));if(first==='import')assert.deepEqual(await s.listEvents({range}),[]);await s.saveCollection(collection([b],'live','second'));
+ assert.equal((await s.status()).events,1);assert.deepEqual(await s.listWork('event_conflict'),[]);assert.equal((await s.listEvents({range}))[0].context.context_only,false);assert.ok((await s.listEvents({range}))[0].context.identity_verified);
+ await s.saveCollection(collection([{...live,context:{...live.context,sender_id:'Other'}}],'live','sender-conflict'));assert.equal((await s.listWork('event_conflict')).length,1);s.close();
+ }
+});
