@@ -1,6 +1,7 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, resolve, relative, dirname, basename, join, sep } from 'node:path';
 import { homedir } from 'node:os';
+import { MIGRATION_HARD_LIMITS } from './contracts/migration-limits.ts';
 import { InputError, record, string, version, array, zone, utc, parseJsonPreservingIntegers } from './contracts/validation.ts';
 import type { BookkeepingConfig, CollectionBudget, IndexCommands } from './contracts/types.ts';
 
@@ -99,6 +100,14 @@ export function validateConfig(value: unknown): BookkeepingConfig {
     for (const lane of ['live', 'history']) {
       const budget = record(budgets[lane], `collection_budgets.${lane}`);
       for (const key of ['max_duration_ms', 'max_bytes', 'max_directory_entries']) positiveBudget(budget[key], `${lane}.${key}`);
+    }
+  }
+  if (config.migration_limits !== undefined) {
+    const limits = record(config.migration_limits, 'migration_limits');
+    for (const [key, value] of Object.entries(limits)) {
+      if (!(key in MIGRATION_HARD_LIMITS)) throw new InputError('Unknown migration limit: ' + key);
+      positiveBudget(value, 'migration_limits.' + key);
+      if (value > MIGRATION_HARD_LIMITS[key as keyof typeof MIGRATION_HARD_LIMITS]) throw new InputError('Migration limit exceeds hard limit: ' + key);
     }
   }
   if (config.index_commands !== undefined) {

@@ -209,11 +209,13 @@ export interface JournalTimezoneEntry extends Versioned { effective_from: string
 export interface PublicCliCommand extends Versioned { executable: string; args: string[]; timeout_ms?: number }
 export interface IndexCommands extends Versioned { lint: PublicCliCommand; build_index: PublicCliCommand; qmd: PublicCliCommand }
 export interface PageTargetsManifest extends Versioned { paths: string[] }
+export interface MigrationLimits { max_bytes?: number; max_records?: number; max_record_bytes?: number; max_duration_ms?: number }
 export interface BookkeepingConfig extends Versioned {
   wiki_root: string; data_dir: string; journal_timezone: string; analysis_timezone: 'Europe/Amsterdam';
   cutover_at: string; live_start: string; journal_timezone_timeline: JournalTimezoneEntry[]; providers: ProviderConfig[];
   limits: { chunk_events: number; chunk_body_bytes: number; bundle_bytes: number; bundles_per_round: number };
   index_commands?: IndexCommands;
+  migration_limits?: MigrationLimits;
   collection_budgets?: { live: CollectionBudget; history: CollectionBudget };
   project_whitelist: string[]; goal_whitelist: string[];
 }

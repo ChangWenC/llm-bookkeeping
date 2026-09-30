@@ -97,7 +97,7 @@ export async function createRuntime(config: BookkeepingConfig, command?: string,
         if (!(error instanceof UnavailableError)) throw error;
         // Migration retains history and needs_review when its optional projection port is absent.
       }
-      const migration = module.createMigrationService(store, config, { analytics });
+      const migration = module.createMigrationService(store, config, { analytics, budget: config.migration_limits });
       services.importManifest = input => migration.importManifest(input);
       services.migrateManifest = input => migration.migrateManifest(input);
     }

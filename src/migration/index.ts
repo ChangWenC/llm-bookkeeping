@@ -1,3 +1,4 @@
+import { MIGRATION_HARD_LIMITS } from '../contracts/migration-limits.ts';
 import { isAbsolute, resolve, relative, basename } from 'node:path';
 import type { Store, BookkeepingConfig, Manifest, WorkItem, FactRevision, LegacyImportBatch, SourceCheckpoint, CollectionBatch } from '../contracts/types.ts';
 import { zone, utc, date } from '../contracts/validation.ts';
@@ -30,7 +31,7 @@ function entryCheck(entry:MigrationEntry){
 export function createMigrationService(store:Store,config:BookkeepingConfig,options:{analytics?:LegacyAnalyticsPort;budget?:Partial<Budget>}={}):MigrationService {
   const budget={...defaults,...options.budget};
   for(const n of Object.values(budget))if(!Number.isSafeInteger(n)||n<1)throw new Error('invalid_migration_budget');
-  if(budget.max_bytes>256*1024*1024||budget.max_records>100000||budget.max_record_bytes>4*1024*1024||budget.max_duration_ms>90000)throw new Error('migration_budget_above_hard_limit');
+  if(Object.entries(budget).some(([key,value])=>value>MIGRATION_HARD_LIMITS[key as keyof typeof MIGRATION_HARD_LIMITS]))throw new Error('migration_budget_above_hard_limit');
   async function run(manifest:Manifest,kind:'import'|'migration'):Promise<MigrationReport>{
     if(manifest.schema_version!==1||manifest.kind!==kind||!manifest.manifest_id||!Array.isArray(manifest.entries))throw new Error('invalid_manifest');
     const report:MigrationReport={schema_version:1,manifest_id:manifest.manifest_id,kind,entries:[],budget,bytes_read:0,records:0,capture_status:'unknown'};
@@ -78,7 +79,7 @@ export function createMigrationService(store:Store,config:BookkeepingConfig,opti
     if(entry.format==='chatlab-jsonl'&&record?._type==='header'){checkpoint.meta.header=record;frame.checkpoint=checkpoint;}
     let wireZone:string|undefined;
     if(entry.source_timezone){try{zone(entry.source_timezone,'source_timezone');wireZone=entry.source_timezone;}catch{result.pending.push('unknown_iana_source_timezone');}}
-    else result.pending.push('source_timezone_unknown');
+
     const metadata={account_id:entry.account_id,conversation_id:entry.conversation_id,owner_id:entry.owner_id,conversation_type:entry.conversation_type,self_ids:entry.self_ids,source_timezone:wireZone,locator:'sealed:'+entry.source_file_id,provider:entry.provider??'wechat',known_range:entry.known_range,identity_verified:entry.identity_verified,coverage_verified:false};
     const isHeader=entry.format==='chatlab-jsonl'&&record?._type!=='message';
     let bytes:string;
@@ -87,6 +88,7 @@ export function createMigrationService(store:Store,config:BookkeepingConfig,opti
     else if(entry.format==='chatlab-json')bytes=JSON.stringify({chatlab:checkpoint.meta.chatlab,messages:[normalRecord]});
     else bytes=JSON.stringify(normalRecord)+'\n';
     let parsed:ReturnType<typeof parseChatExport>;try{parsed=frame.invalid?{events:[],gaps:[gap('invalid_import_record',entry.path)],members:[],metadata:{}}:parseChatExport(bytes,entry.format.startsWith('chatlab')?entry.format:'legacy-jsonl',metadata,config);}catch{parsed={events:[],gaps:[gap('unsupported_identity_time_or_import_record',entry.path)],members:[],metadata:{}};}
+    if(!isHeader&&!entry.source_timezone&&parsed.events.some(event=>event.utc_time.value===null)) parsed.gaps.push(gap('source_timezone_unknown',entry.path));
     if(!isHeader&&entry.format.startsWith('chatlab')&&!record)parsed.gaps.push(gap('chatlab_record_not_object',entry.path));
     if(!entry.identity_verified)result.pending.push('import_self_identity_unverified');
     if(entry.pagination?.limit_hit||entry.pagination?.truncated||entry.pagination?.duplicate_page||entry.pagination?.cursor_verified===false)parsed.gaps.push(gap('export_pagination_or_truncation_unknown',entry.path));

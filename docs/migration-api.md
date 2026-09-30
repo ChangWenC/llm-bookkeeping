@@ -46,3 +46,5 @@
 重跑依赖事务中的稳定 migration_key 与独立 import cursor。Analytics 后续 reconciliation 可用同封存资料加新的显式 mappings/projections 重新运行，产生独立 reconciliation key；原历史与已保存事实不覆盖。队列中的预算/未知映射欠账不会阻塞 live lane；完成转换并不代表 backlog、微信来源覆盖或真实自动化验收完成。
 
 运行 `npm run typecheck`、`node --test test/migration.test.ts`、`npm test`。本轮只使用临时合成资料与 SQLite；未读取真实私人源、修改旧年度 JSONL或执行生产迁移。生产 manifest 准备、一致快照、抽样恢复、真实覆盖与两轮 scheduled daily 仍由协调者验收。
+
+CLI config `migration_limits` accepts optional positive integers `max_bytes`, `max_records`, `max_record_bytes`, `max_duration_ms`. Defaults remain 8 MiB / 2000 / 256 KiB / 30 seconds. Hard maxima are 256 MiB / 100000 / 4 MiB / 90 seconds. For a larger single legacy state object, set `max_record_bytes: 524288`; original state is retained whole, without invented splitting.

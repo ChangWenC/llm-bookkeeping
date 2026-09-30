@@ -41,6 +41,8 @@ def shape(value):
     if value.startswith("'"): return {'const': value[1:-1]}
     if value.startswith('{'): return properties(value[1:-1])
     if value in names: return {'$ref': '#/$defs/' + value}
+    if value == 'MigrationLimits':
+        return {'type': 'object', 'properties': {key: {'type': 'integer', 'minimum': 1, 'maximum': maximum} for key, maximum in [('max_bytes',268435456),('max_records',100000),('max_record_bytes',4194304),('max_duration_ms',90000)]}, 'additionalProperties': False}
     if value == 'CollectionBudget':
         return {'type': 'object', 'properties': {key: {'type': 'integer', 'minimum': 1} for key in ['max_duration_ms', 'max_bytes', 'max_directory_entries']}, 'required': ['max_duration_ms', 'max_bytes', 'max_directory_entries']}
     return {}

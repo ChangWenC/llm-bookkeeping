@@ -2898,6 +2898,32 @@
         "index_commands": {
           "$ref": "#/$defs/IndexCommands"
         },
+        "migration_limits": {
+          "type": "object",
+          "properties": {
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 268435456
+            },
+            "max_records": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "max_record_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4194304
+            },
+            "max_duration_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90000
+            }
+          },
+          "additionalProperties": false
+        },
         "collection_budgets": {
           "type": "object",
           "properties": {
