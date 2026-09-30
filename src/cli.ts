@@ -130,9 +130,11 @@ function commandRange(options: ParsedCommand['options']): TimeRange {
 async function recordCollectionFailure(
   services: RuntimeServices, config: BookkeepingConfig, adapter: SourceAdapter,
   lane: Lane, query: TimeRange, cutoff: string, reason: string, partial: boolean,
+  accountOverride?: string,
 ): Promise<void> {
   const accounts = config.providers.filter(provider => provider.provider === adapter.provider);
-  const accountIds = adapter.account_id ? [adapter.account_id] : accounts.map(provider => provider.account_id);
+  const accountId = accountOverride ?? adapter.account_id;
+  const accountIds = accountId ? [accountId] : accounts.map(provider => provider.account_id);
   if (!accountIds.length) accountIds.push('unknown');
   const coverage: SourceCoverage[] = accountIds.map(account => ({
     schema_version: 1,
@@ -294,20 +296,48 @@ async function manifestCommand(parsed: ParsedCommand, services: RuntimeServices)
 
 async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string) {
   const source = required(parsed.options, 'source');
-  const adapter = services.adapters.find(item => item.provider === source);
-  if (!adapter) throw new InputError(`Unknown source ${source}`);
-  if (!adapter.replay) unavailable(`replay ${source}`);
-  let batches = 0;
-  const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
-  for await (const batch of adapter.replay(commandRange(parsed.options), context)) {
-    await services.store.saveCollection(batch);
-    batches++;
-  }
+  const adapters = services.adapters.filter(item => item.provider === source);
+  if (!adapters.length) throw new InputError(`Unknown source ${source}`);
   const range = commandRange(parsed.options);
+  const configured = config.providers.filter(item => item.enabled && item.provider === source);
+  let batches = 0;
+  const recapture = [];
+  for (const [index, adapter] of adapters.entries()) {
+    // Runtime factories preserve configured provider order; adapters may also
+    // expose an explicit account identity (e.g. native WeChat).
+    const accountId = adapter.account_id ?? (configured.length === adapters.length ? configured[index].account_id : undefined);
+    let saved = 0;
+    let completeCapture = true;
+    try {
+      if (!adapter.replay) throw new Error(`Source adapter does not support recapture: ${source}`);
+      const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
+      for await (const batch of adapter.replay(range, context)) {
+        await services.store.saveCollection(batch);
+        saved++;
+        batches++;
+        // Finishing the iterator proves execution ended, not that discovery or
+        // capture covered the requested scope. Preserve the adapter's gaps.
+        const complete = batch.coverage.length > 0 && batch.coverage.every(item => item.capture_status === 'complete' && item.gaps.length === 0);
+        completeCapture &&= complete;
+      }
+      if (!saved) {
+        await recordCollectionFailure(services, config, adapter, 'history', range, cutoff, 'Recapture returned no coverage evidence', false, accountId);
+      }
+      recapture.push({ provider: source, account_id: accountId ?? null, execution_status: 'complete',
+        capture_status: saved ? completeCapture ? 'complete' : 'partial' : 'unknown', batches: saved });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // A source outage cannot prevent review of already durable events. A
+      // failure to persist that outage still fails execution rather than hiding it.
+      await recordCollectionFailure(services, config, adapter, 'history', range, cutoff, reason, saved > 0, accountId);
+      recapture.push({ provider: source, account_id: accountId ?? null, execution_status: saved ? 'partial' : 'unavailable',
+        capture_status: saved ? 'partial' : 'unavailable', batches: saved, reason });
+    }
+  }
   const replayKey = typeof parsed.options['replay-key'] === 'string' ? parsed.options['replay-key']
     : 'range:' + createHash('sha256').update(JSON.stringify([source, utcComparisonKey(range.from), utcComparisonKey(range.to)])).digest('hex');
   const work = await services.store.requestSemanticReplay({ schema_version: 1, replay_key: replayKey, source, range, cutoff });
-  return { schema_version: 1, source, batches, range, replay_id: work.work_id, cutoff: work.payload.cutoff, review_state: work.state,
+  return { schema_version: 1, source, batches, range, recapture, replay_id: work.work_id, cutoff: work.payload.cutoff, review_state: work.state,
     next_prepare: `prepare --kind daily --lane history --replay-id ${work.work_id} --output DIR` };
 }
 

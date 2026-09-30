@@ -53,4 +53,19 @@ test('actual CLI source recapture queues explicit semantic replay and publishes 
     store.close();
     assert.equal((await prepare(['--replay-id', requested.replay_id])).material.length, 0);
     assert.equal((await cli(replayArgs)).review_state, 'complete');
+    // Source disappearance must not block explicit re-review of cached original
+    // events, nor reopen an already completed stable job.
+    await rm(sources, { recursive: true, force: true });
+    const unavailable = await cli([...replayArgs, '--replay-key', 'offline-cached-review']);
+    assert.equal(unavailable.review_state, 'pending');
+    assert(unavailable.recapture.every((item: any) => item.capture_status !== 'complete'));
+    const offline = await prepare(['--replay-id', unavailable.replay_id]);
+    assert.equal(offline.material[0].chunks[0].events[0].event_id, originalBundle.chunks[0].events[0].event_id);
+    assert.equal(offline.material[0].existing_facts[0].revision, 2);
+    const offlineStore = await createStore(c);
+    assert((await offlineStore.listCoverage(range)).some(item => item.capture_status !== 'complete' && item.gaps.length > 0));
+    offlineStore.close();
+    const completedOffline = await cli(replayArgs);
+    assert.equal(completedOffline.review_state, 'complete');
+    assert.equal(completedOffline.cutoff, requested.cutoff);
 });

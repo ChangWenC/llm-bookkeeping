@@ -6,6 +6,37 @@ import { createReviewer } from '../../src/review/index.ts';
 import { executeCommand, parseArgs } from '../../src/cli.ts';
 import { config, event, collection, bundle, result, range } from '../store/fixtures.ts';
 
+test('replay source failures remain durable while every account recaptures and cached events remain reviewable', async () => {
+    const c = await config(), store = await createStore(c), reviewer = createReviewer(store, c);
+    await store.saveCollection(collection()); const first = bundle(); await store.saveBundle(first);
+    const accepted = result(first); accepted.pages = []; await store.commitReview(accepted);
+    let peerCalled = false;
+    const services: any = { store, reviewer, adapters: [
+        { provider: 'synthetic', account_id: 'failed-account', async *replay() { throw new Error('Synthetic source offline'); } },
+        { provider: 'synthetic', account_id: 'partial-account', async *replay() { yield collection(undefined, 'history', 'partial-recapture'); throw new Error('Synthetic interruption after capture'); } },
+        { provider: 'synthetic', account_id: 'peer-account', async *replay() { peerCalled = true; yield collection(undefined, 'history', 'peer-recapture'); } },
+    ] };
+    const receipt: any = await executeCommand(parseArgs(['replay', '--source', 'synthetic', '--from', range.from, '--to', range.to]), c, services, range.to);
+    assert(peerCalled); assert.equal(receipt.batches, 2);
+    assert.deepEqual(receipt.recapture.map((item: any) => item.execution_status), ['unavailable', 'partial', 'complete']);
+    const failures = (await store.listCoverage(range)).filter(item => item.gaps.some(gap => gap.reason.startsWith('Synthetic')));
+    assert(failures.some(item => item.account_id === 'failed-account' && item.capture_status === 'unavailable'));
+    assert(failures.some(item => item.account_id === 'partial-account' && item.capture_status === 'partial'));
+    assert(!failures.some(item => item.account_id === 'peer-account'));
+    const prepared = await reviewer.prepare({ kind: 'daily', lane: 'history', cutoff: range.to, replay_id: receipt.replay_id });
+    assert.equal(prepared[0].chunks[0].events[0].event_id, first.chunks[0].events[0].event_id);
+    // With no cached material the job still exists, but cannot claim capture or
+    // a quiet reviewed scope just because the iterator failed before yielding.
+    const empty: any = await executeCommand(parseArgs(['replay', '--source', 'synthetic', '--from', '2026-10-01T00:00:00Z', '--to', '2026-10-02T00:00:00Z']), c,
+        { store, reviewer, adapters: services.adapters.slice(0, 1) }, '2026-10-02T00:00:00Z');
+    assert.equal(empty.review_state, 'pending'); assert.equal(empty.recapture[0].capture_status, 'unavailable');
+    const noMaterial = await reviewer.prepare({ kind: 'daily', lane: 'history', cutoff: empty.cutoff, replay_id: empty.replay_id });
+    assert(noMaterial.every(b => b.chunks.every(chunk => chunk.events.length === 0)));
+    assert(noMaterial.every(b => b.unfinished.length > 0));
+    assert.equal((await store.getSemanticReplay(empty.replay_id))!.state, 'pending');
+    store.close();
+});
+
 test('public replay durably prepares reviewed original events with current facts, without reopening ordinary review', async () => {
     const c = await config(), store = await createStore(c), reviewer = createReviewer(store, c);
     await store.saveCollection(collection()); const first = bundle(); await store.saveBundle(first);
