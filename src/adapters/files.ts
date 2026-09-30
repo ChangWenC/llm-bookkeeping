@@ -44,7 +44,8 @@ interface FileCursor {
   history_end: number;
   size: number;
   header_hash: string;
-  anchor: string;
+  anchor: string | null;
+  anchor_length?: number;
   inode: string;
   excluded: boolean;
   account_id?: string;
@@ -358,6 +359,8 @@ export class FileAdapter implements SourceAdapter {
         const base = old ?? (live?.cursor as unknown as FileCursor | undefined);
         let generation = existing?.generation ?? live?.generation ?? "0";
         let rewritten = false;
+        let verifiedAnchor: string | null = null;
+        const gaps: CoverageGap[] = [];
         if (base && (eof < base.offset || base.header_hash !== headerHash)) {
           rewritten = true;
           generation = hash(
@@ -365,11 +368,24 @@ export class FileAdapter implements SourceAdapter {
           ).slice(0, 20);
           old = undefined;
         } else if (base?.anchor && base.offset > 0 && base.offset <= eof) {
+          const expectedLength = Math.min(128, base.offset);
           const anchor = await read(
             Math.max(0, base.offset - 128),
-            Math.min(128, base.offset),
+            expectedLength,
           );
-          if (hash(anchor) !== base.anchor) {
+          if (anchor.length !== expectedLength) {
+            gaps.push(gap("anchor_verification_budget_pending", p));
+          } else if (base.anchor === hash(Buffer.alloc(0))) {
+            // Older code saved hash(empty) when its read budget was exhausted.
+            // This is missing evidence, never evidence of a rewritten source.
+            gaps.push(gap("legacy_anchor_unproven", p));
+          } else if (hash(anchor) === base.anchor) {
+            verifiedAnchor = base.anchor;
+          } else if (base.anchor_length !== expectedLength) {
+            // An old checkpoint did not record whether its hash covered the full
+            // requested range. A mismatch may be an old short read.
+            gaps.push(gap("legacy_anchor_length_unproven", p));
+          } else {
             rewritten = true;
             generation = hash(
               `${generation}:${headerHash}:${eof}:${inode}:${hash(anchor)}`,
@@ -381,7 +397,6 @@ export class FileAdapter implements SourceAdapter {
           identity.classification === "subagent" ||
           identity.classification === "automation" ||
           this.excluded(identity.cwd, identity.metadata);
-        const gaps: CoverageGap[] = [];
         if (!identity.id) gaps.push(gap("session_identity_unknown", p));
         if (rewritten)
           gaps.push(gap("source_truncated_or_rewritten_new_generation", p));
@@ -534,9 +549,27 @@ export class FileAdapter implements SourceAdapter {
           );
         if (d.directories.length || d.files.length)
           gaps.push(gap("discovery_remaining"));
-        const anchor = offset
-          ? await read(Math.max(0, offset - 128), Math.min(128, offset))
-          : Buffer.alloc(0);
+        const anchorLength = Math.min(128, offset);
+        let anchor: string | null = null;
+        if (anchorLength) {
+          const anchorStart = offset - anchorLength;
+          if (anchorStart >= readStart && offset <= readStart + buffer.length)
+            anchor = hash(buffer.subarray(anchorStart - readStart, offset - readStart));
+          else if (offset <= head.length)
+            anchor = hash(head.subarray(anchorStart, offset));
+          else if (offset === base?.offset && verifiedAnchor)
+            anchor = verifiedAnchor;
+          else if (offset === base?.offset && base.anchor_length === anchorLength &&
+              base.anchor && base.anchor !== hash(Buffer.alloc(0)))
+            // No bytes advanced when validation ran out of budget. Retain the
+            // previous complete witness so a later full comparison remains useful.
+            anchor = base.anchor;
+          else {
+            const bytes = await read(anchorStart, anchorLength);
+            if (bytes.length === anchorLength) anchor = hash(bytes);
+          }
+          if (!anchor) gaps.push(gap("checkpoint_anchor_unknown", p));
+        }
         const fragmentId = hash(
           `${this.provider}:${this.source.account_id}:${identity.id}:${generation}:${readStart}:${hash(buffer)}`,
         );
@@ -558,7 +591,8 @@ export class FileAdapter implements SourceAdapter {
               history_end: historyEnd,
               size: eof,
               header_hash: headerHash,
-              anchor: hash(anchor),
+              anchor,
+              anchor_length: anchor ? anchorLength : 0,
               inode,
               excluded: false,
               pending_line_base64: suffix.toString("base64"),

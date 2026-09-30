@@ -46,7 +46,10 @@ async function fixture(t: test.TestContext, splitLine = false) {
     checkpoints = [...updated.values()];
     return batches;
   }
-  return { file, request, collect, captured, checkpoint: (lane: string) => checkpoints.find(checkpoint => checkpoint.locator === file && checkpoint.lane === lane)! };
+  return { file, root, request, collect, captured,
+    replaceCheckpoints: (update: (values: SourceCheckpoint[]) => SourceCheckpoint[]) => { checkpoints = update(checkpoints); },
+    checkpoint: (lane: string) => checkpoints.find(checkpoint => checkpoint.locator === file && checkpoint.lane === lane)!,
+  };
 }
 
 async function deadlineAfterBlocks<T>(blocks: number, action: () => Promise<T>) {
@@ -83,4 +86,78 @@ test("tail deadline inside a JSONL record assigns the full boundary line to hist
   await source.collect();
   assert.ok([...source.captured.values()].includes("synthetic split-boundary"));
   assert.equal(source.checkpoint("live").cursor.history_end, 0);
+});
+
+test("exhausted first-tail byte budget derives a complete anchor without changing native event identity next round", async t => {
+  const source = await fixture(t);
+  const handle = await open(source.file, "r+");
+  await handle.write(row("native-budget-tail"), 10 * MiB - 256, "utf8");
+  await handle.close();
+  source.request.budget.max_bytes = MiB;
+  const first = await source.collect();
+  const native = first.flatMap(batch => batch.events).find(event => event.source.message_id === "native-budget-tail")!;
+  assert.ok(native);
+  assert.equal(source.checkpoint("live").cursor.anchor_length, 128);
+  for (let round = 0; round < 3; round++) {
+    const next = await source.collect();
+    assert.equal(source.checkpoint("live").generation, native.generation);
+    assert.ok(next.every(batch => batch.events.every(event => event.source.message_id !== "native-budget-tail")));
+    assert.ok(next.flatMap(batch => batch.coverage).every(coverage => !coverage.gaps.some(gap => gap.reason === "source_truncated_or_rewritten_new_generation")));
+  }
+});
+
+test("short anchor comparison and legacy empty/short witnesses stay pending without a false generation", async t => {
+  const source = await fixture(t);
+  await source.collect();
+  const generation = source.checkpoint("live").generation;
+  const fullAnchor = source.checkpoint("live").cursor.anchor;
+  source.request.budget.max_bytes = 64 * 1024 + 17;
+  const short = await source.collect();
+  assert.equal(source.checkpoint("live").generation, generation);
+  assert.equal(source.checkpoint("live").cursor.anchor, fullAnchor);
+  assert.ok(short.flatMap(batch => batch.coverage).some(coverage => coverage.gaps.some(gap => gap.reason === "anchor_verification_budget_pending")));
+  source.request.budget.max_bytes = 64 * MiB;
+  for (const witness of ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "synthetic-old-short-hash"]) {
+    source.replaceCheckpoints(values => values.map(checkpoint => checkpoint.locator !== source.file ? checkpoint : {
+      ...checkpoint, cursor: { ...checkpoint.cursor, anchor: witness, anchor_length: undefined },
+    }));
+    const repaired = await source.collect();
+    assert.equal(source.checkpoint("live").generation, generation);
+    assert.equal(source.checkpoint("live").cursor.anchor, fullAnchor);
+    assert.equal(source.checkpoint("live").cursor.anchor_length, 128);
+    assert.ok(repaired.every(batch => batch.events.length === 0));
+    assert.ok(repaired.flatMap(batch => batch.coverage).some(coverage => coverage.gaps.some(gap => gap.reason.startsWith("legacy_anchor_"))));
+  }
+  const complete = await source.collect();
+  assert.equal(source.checkpoint("live").generation, generation);
+  assert.ok(complete.flatMap(batch => batch.coverage).every(coverage => !coverage.gaps.some(gap => gap.reason.includes("anchor"))));
+});
+
+test("last of multiple files at provider byte limit saves only complete anchors and does not duplicate native IDs", async t => {
+  const source = await fixture(t);
+  const peer = await open(join(source.root, "peer.jsonl"), "w");
+  await peer.write(Buffer.alloc(10 * MiB, 10));
+  await peer.write(JSON.stringify({ type: "session_meta", payload: { id: "synthetic-peer", source: "vscode" } }) + "\n", 0, "utf8");
+  await peer.write(row("native-peer-tail"), 10 * MiB - 256, "utf8");
+  await peer.close();
+  source.request.budget.max_bytes = 9 * MiB + 2 * 64 * 1024;
+  const first = await source.collect();
+  const identities = new Set(first.flatMap(batch => batch.events).map(event => event.event_id));
+  assert.equal(source.checkpoint("live").cursor.anchor_length, 128);
+  source.request.budget.max_bytes = 64 * MiB;
+  const next = await source.collect();
+  assert.ok(next.flatMap(batch => batch.events).every(event => !identities.has(event.event_id)));
+  assert.ok(next.flatMap(batch => batch.checkpoints).filter(checkpoint => checkpoint.locator !== "@discovery").every(checkpoint => checkpoint.generation === "0" && checkpoint.cursor.anchor_length === 128));
+});
+
+test("a complete anchor mismatch still opens a generation for a same-size source rewrite", async t => {
+  const source = await fixture(t);
+  await source.collect();
+  assert.equal(source.checkpoint("live").cursor.anchor_length, 128);
+  const handle = await open(source.file, "r+");
+  await handle.write("synthetic footer changed\n", 10 * MiB - 64, "utf8");
+  await handle.close();
+  const next = await source.collect();
+  assert.notEqual(source.checkpoint("live").generation, "0");
+  assert.ok(next.flatMap(batch => batch.coverage).some(coverage => coverage.gaps.some(gap => gap.reason === "source_truncated_or_rewritten_new_generation")));
 });
