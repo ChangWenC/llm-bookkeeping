@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "result_id": "result:zero",
+  "bundle_id": "bundle:zero",
+  "chunks": [
+    {
+      "schema_version": 1,
+      "chunk_id": "chunk:zero",
+      "status": "complete",
+      "reviewed_event_ids": [],
+      "zero_facts": true,
+      "reason": null
+    }
+  ],
+  "candidates": [],
+  "pages": [],
+  "created_at": "2026-09-30T12:00:00Z"
+}

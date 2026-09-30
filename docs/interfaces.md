@@ -35,3 +35,13 @@ Authoritative contracts are `src/contracts/types.ts`; no business implementation
 ## CLI and configuration
 
 `BookkeepingConfig` uses required absolute `wiki_root` and `data_dir`, fixed `analysis_timezone: Europe/Amsterdam`, fixed UTC cutover/live-start, explicit providers/whitelists and bounded review limits. CLI consumes the above ports, never invokes an LLM, and outputs one JSON value to stdout with diagnostics on stderr. Exit 0 means command executed, including ordinary pending/partial; exit 1 means unavailable/execution failure; exit 2 means invalid args/input.
+
+## Durable patches and migration
+
+`listPendingPatches()` returns accepted journal operations that have not reached applied/noop, including conflicts. `markPatchStatus(operation_id,status,reason?)` durably marks their publication independently of fact/chunk review. Thus a crash between `commitReview` and `saveFileIntent` still resumes from the original stable operation.
+
+`importLegacy(LegacyImportBatch): Promise<LegacyImportResult>` is the sole migration write port: stable `migration_key`, immutable legacy facts, explicit verified/unresolved ID mappings, and typed pending work. It is transactional and idempotent; identical key with different content conflicts. Unresolved mappings never transfer confirmations or silently merge facts. Migration modules do not access SQL directly.
+
+## Analytics privacy projection
+
+Every fact candidate/revision carries `analytics_projection: UnknownValue<AnalyticsProjection>`. A non-null projection contains only its professional summary, cropped scopes, subject, evidence refs and attribution; consumers never derive Analytics text from the original mixed fact content. Null projection with reason is pending/excluded, including historical missing projections. Source adapters do not construct this semantic projection. Reviewer authors the projection; store copies it immutably to the application-allocated revision. A replacement never inherits the prior projection or prior confirmation.

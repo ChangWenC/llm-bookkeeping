@@ -1,0 +1,2065 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-bookkeeping.local/contracts-v1.schema.json",
+  "title": "Bookkeeping version 1 records",
+  "description": "Runtime semantic validation additionally checks IDs, dates, explicit zero facts, refs, limits and bundle membership.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/SourceEvent"
+    },
+    {
+      "$ref": "#/$defs/SourceCoverage"
+    },
+    {
+      "$ref": "#/$defs/ReviewBundle"
+    },
+    {
+      "$ref": "#/$defs/ReviewResult"
+    },
+    {
+      "$ref": "#/$defs/FactRevision"
+    },
+    {
+      "$ref": "#/$defs/JournalPatch"
+    },
+    {
+      "$ref": "#/$defs/FactArtifact"
+    },
+    {
+      "$ref": "#/$defs/PublishResult"
+    },
+    {
+      "$ref": "#/$defs/BookkeepingConfig"
+    },
+    {
+      "$ref": "#/$defs/Manifest"
+    }
+  ],
+  "$defs": {
+    "Versioned": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "schema_version"
+      ]
+    },
+    "UnknownValue": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "value",
+        "reason"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TimeRange": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "from",
+        "to"
+      ]
+    },
+    "EventRef": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "block_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id"
+      ]
+    },
+    "FactRef": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "fact_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "fact_id",
+        "revision"
+      ]
+    },
+    "SourceIdentity": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "provider": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "block_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "provider",
+        "account_id",
+        "conversation_id",
+        "message_id",
+        "block_id"
+      ]
+    },
+    "SourceEvent": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "role": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "channel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fragment_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "physical_order": {
+          "type": "string"
+        },
+        "original_time": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "time_precision": {
+          "enum": [
+            "second",
+            "millisecond",
+            "microsecond",
+            "day",
+            "unknown"
+          ]
+        },
+        "utc_time": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "wire_timezone": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "journal_timezone": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "journal_timezone_basis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "journal_date": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "classification": {
+          "enum": [
+            "main",
+            "subagent",
+            "automation",
+            "unknown"
+          ]
+        },
+        "context": {
+          "type": "object"
+        },
+        "locator": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "source",
+        "role",
+        "kind",
+        "channel",
+        "body",
+        "fragment_ref",
+        "physical_order",
+        "original_time",
+        "time_precision",
+        "utc_time",
+        "wire_timezone",
+        "journal_timezone",
+        "journal_timezone_basis",
+        "journal_date",
+        "classification",
+        "context",
+        "locator",
+        "generation"
+      ]
+    },
+    "CoverageGap": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resumable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "range",
+        "reason",
+        "locator",
+        "resumable"
+      ]
+    },
+    "SourceCoverage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "coverage_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lane": {
+          "enum": [
+            "live",
+            "history"
+          ]
+        },
+        "query_range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "read_ranges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TimeRange"
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageGap"
+          }
+        },
+        "capture_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable",
+            "disabled",
+            "unknown"
+          ]
+        },
+        "review_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "pending",
+            "not_applicable"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "coverage_id",
+        "provider",
+        "account_id",
+        "conversation_id",
+        "lane",
+        "query_range",
+        "cutoff",
+        "read_ranges",
+        "gaps",
+        "capture_status",
+        "review_status"
+      ]
+    },
+    "SourceCheckpoint": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "checkpoint_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "lane": {
+          "enum": [
+            "live",
+            "history"
+          ]
+        },
+        "locator": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "object"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "checkpoint_id",
+        "provider",
+        "lane",
+        "locator",
+        "generation",
+        "cursor",
+        "updated_at"
+      ]
+    },
+    "RawFragment": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "fragment_id": {
+          "type": "string"
+        },
+        "locator": {
+          "type": "string"
+        },
+        "bytes_base64": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "fragment_id",
+        "locator",
+        "bytes_base64",
+        "sha256"
+      ]
+    },
+    "CollectionBatch": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "batch_id": {
+          "type": "string"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceEvent"
+          }
+        },
+        "fragments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RawFragment"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCoverage"
+          }
+        },
+        "checkpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCheckpoint"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "batch_id",
+        "events",
+        "fragments",
+        "coverage",
+        "checkpoints"
+      ]
+    },
+    "PageBaseline": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "path": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "path",
+        "digest",
+        "content"
+      ]
+    },
+    "ReviewChunk": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "chunk_id": {
+          "type": "string"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceEvent"
+          }
+        },
+        "context_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceEvent"
+          }
+        },
+        "body_bytes": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "chunk_id",
+        "events",
+        "context_events",
+        "body_bytes"
+      ]
+    },
+    "ReviewBundle": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "bundle_id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "daily",
+            "weekly",
+            "monthly"
+          ]
+        },
+        "lane": {
+          "enum": [
+            "live",
+            "history"
+          ]
+        },
+        "period": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "chunks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewChunk"
+          }
+        },
+        "existing_facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "baselines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageBaseline"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCoverage"
+          }
+        },
+        "unfinished": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageGap"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "bundle_id",
+        "kind",
+        "lane",
+        "period",
+        "cutoff",
+        "chunks",
+        "existing_facts",
+        "baselines",
+        "coverage",
+        "unfinished"
+      ]
+    },
+    "AnalyticsProjection": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "summary": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subject": {
+          "type": "string"
+        },
+        "event_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventRef"
+          }
+        },
+        "attribution": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "summary",
+        "scope",
+        "subject",
+        "event_refs",
+        "attribution"
+      ]
+    },
+    "FactCandidate": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "candidate_id": {
+          "type": "string"
+        },
+        "chunk_id": {
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "keep",
+            "add",
+            "replace",
+            "retract"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "journal_date": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "fact",
+            "inference",
+            "recommendation",
+            "legacy_record"
+          ]
+        },
+        "analytics_projection": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/AnalyticsProjection"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "event_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventRef"
+          }
+        },
+        "target_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "attribution": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "candidate_id",
+        "chunk_id",
+        "disposition",
+        "content",
+        "subject",
+        "occurred_at",
+        "journal_date",
+        "kind",
+        "analytics_projection",
+        "event_refs",
+        "target_refs",
+        "scope",
+        "attribution"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "fact_id"
+            ]
+          },
+          {
+            "required": [
+              "revision"
+            ]
+          },
+          {
+            "required": [
+              "operation_id"
+            ]
+          }
+        ]
+      }
+    },
+    "ChunkReview": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "chunk_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "deferred"
+          ]
+        },
+        "reviewed_event_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "zero_facts": {
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "chunk_id",
+        "status",
+        "reviewed_event_ids",
+        "zero_facts",
+        "reason"
+      ]
+    },
+    "JournalSuggestion": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "suggestion_id": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "baseline_digest": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "append",
+            "replace"
+          ]
+        },
+        "old_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_text": {
+          "type": "string"
+        },
+        "candidate_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "suggestion_id",
+        "date",
+        "path",
+        "baseline_digest",
+        "mode",
+        "old_text",
+        "new_text",
+        "candidate_ids"
+      ]
+    },
+    "ReviewResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "result_id": {
+          "type": "string"
+        },
+        "bundle_id": {
+          "type": "string"
+        },
+        "chunks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChunkReview"
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactCandidate"
+          }
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalSuggestion"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "result_id",
+        "bundle_id",
+        "chunks",
+        "candidates",
+        "pages",
+        "created_at"
+      ]
+    },
+    "FactRevision": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "fact_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "number"
+        },
+        "event_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventRef"
+          }
+        },
+        "content": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "journal_date": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "fact",
+            "inference",
+            "recommendation",
+            "legacy_record"
+          ]
+        },
+        "analytics_projection": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/AnalyticsProjection"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "action": {
+          "enum": [
+            "assert",
+            "replace",
+            "retract"
+          ]
+        },
+        "target_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "attribution": {
+          "type": "object"
+        },
+        "recorded_at": {
+          "type": "string"
+        },
+        "legacy_locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "fact_id",
+        "revision",
+        "event_refs",
+        "content",
+        "subject",
+        "occurred_at",
+        "journal_date",
+        "kind",
+        "analytics_projection",
+        "action",
+        "target_refs",
+        "scope",
+        "attribution",
+        "recorded_at"
+      ]
+    },
+    "JournalPatch": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "baseline_digest": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "append",
+            "replace"
+          ]
+        },
+        "old_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_text": {
+          "type": "string"
+        },
+        "fact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation_id",
+        "date",
+        "path",
+        "baseline_digest",
+        "mode",
+        "old_text",
+        "new_text",
+        "fact_refs"
+      ]
+    },
+    "FactArtifact": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "batch_id": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCoverage"
+          }
+        },
+        "affected_dates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "affected_weeks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "batch_id",
+        "created_at",
+        "facts",
+        "coverage",
+        "affected_dates",
+        "affected_weeks"
+      ]
+    },
+    "FileOutcome": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "applied",
+            "noop",
+            "pending",
+            "conflict"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation_id",
+        "path",
+        "status",
+        "reason"
+      ]
+    },
+    "ConsumerOutcome": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "target": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "pending",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "target",
+        "status",
+        "reason"
+      ]
+    },
+    "PublishResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "result_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fact_commit": {
+          "enum": [
+            "committed",
+            "already_committed",
+            "pending",
+            "failed"
+          ]
+        },
+        "batch_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "export_status": {
+          "enum": [
+            "ready",
+            "pending",
+            "failed"
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileOutcome"
+          }
+        },
+        "consumers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConsumerOutcome"
+          }
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "result_id",
+        "fact_commit",
+        "batch_id",
+        "export_status",
+        "files",
+        "consumers",
+        "pending"
+      ]
+    },
+    "FileIntent": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "baseline_digest": {
+          "type": "string"
+        },
+        "desired_digest": {
+          "type": "string"
+        },
+        "desired_bytes_base64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backup_bytes_base64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "applied",
+            "pending",
+            "conflict"
+          ]
+        },
+        "fact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation_id",
+        "path",
+        "baseline_digest",
+        "desired_digest",
+        "desired_bytes_base64",
+        "backup_bytes_base64",
+        "state",
+        "fact_refs",
+        "created_at",
+        "reason"
+      ]
+    },
+    "OutboxEntry": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "batch_id": {
+          "type": "string"
+        },
+        "artifact": {
+          "$ref": "#/$defs/FactArtifact"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "ready"
+          ]
+        },
+        "export_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "batch_id",
+        "artifact",
+        "status",
+        "export_path"
+      ]
+    },
+    "ConsumerAck": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "consumer": {
+          "type": "string"
+        },
+        "batch_id": {
+          "type": "string"
+        },
+        "acknowledged_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "consumer",
+        "batch_id",
+        "acknowledged_at"
+      ]
+    },
+    "WorkItem": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "lane": {
+          "enum": [
+            "live",
+            "history"
+          ]
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "complete",
+            "deferred"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "migration_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "work_id",
+        "kind",
+        "lane",
+        "state",
+        "payload",
+        "reason",
+        "migration_key",
+        "updated_at"
+      ]
+    },
+    "LegacyIdMapping": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "verified",
+            "unresolved"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_id",
+        "target_id",
+        "confidence",
+        "reason"
+      ]
+    },
+    "LegacyImportBatch": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "migration_key": {
+          "type": "string"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "mappings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegacyIdMapping"
+          }
+        },
+        "work": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkItem"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "migration_key",
+        "facts",
+        "mappings",
+        "work"
+      ]
+    },
+    "LegacyImportResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "migration_key": {
+          "type": "string"
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "imported_facts": {
+          "type": "number"
+        },
+        "unresolved": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "migration_key",
+        "reused",
+        "imported_facts",
+        "unresolved"
+      ]
+    },
+    "ReviewCommit": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "result_id": {
+          "type": "string"
+        },
+        "batch_id": {
+          "type": "string"
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "patches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalPatch"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "result_id",
+        "batch_id",
+        "reused",
+        "facts",
+        "patches"
+      ]
+    },
+    "ProviderConfig": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "provider": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "options": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "provider",
+        "enabled",
+        "roots",
+        "account_id",
+        "options"
+      ]
+    },
+    "JournalTimezoneEntry": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "effective_from": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "basis": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "effective_from",
+        "timezone",
+        "basis"
+      ]
+    },
+    "BookkeepingConfig": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "wiki_root": {
+          "type": "string"
+        },
+        "data_dir": {
+          "type": "string"
+        },
+        "journal_timezone": {
+          "type": "string"
+        },
+        "analysis_timezone": {
+          "const": "Europe/Amsterdam"
+        },
+        "cutover_at": {
+          "type": "string"
+        },
+        "live_start": {
+          "type": "string"
+        },
+        "journal_timezone_timeline": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalTimezoneEntry"
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderConfig"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "chunk_events": {
+              "type": "number"
+            },
+            "chunk_body_bytes": {
+              "type": "number"
+            },
+            "bundle_bytes": {
+              "type": "number"
+            },
+            "bundles_per_round": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "chunk_events",
+            "chunk_body_bytes",
+            "bundle_bytes",
+            "bundles_per_round"
+          ]
+        },
+        "project_whitelist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "goal_whitelist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "wiki_root",
+        "data_dir",
+        "journal_timezone",
+        "analysis_timezone",
+        "cutover_at",
+        "live_start",
+        "journal_timezone_timeline",
+        "providers",
+        "limits",
+        "project_whitelist",
+        "goal_whitelist"
+      ]
+    },
+    "Manifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "manifest_id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "import",
+            "migration"
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "manifest_id",
+        "kind",
+        "entries"
+      ]
+    }
+  }
+}

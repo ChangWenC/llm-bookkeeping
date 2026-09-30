@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "result_id": "result:correction",
+  "fact_commit": "committed",
+  "batch_id": "batch:correction",
+  "export_status": "ready",
+  "files": [
+    {
+      "schema_version": 1,
+      "operation_id": "operation:1",
+      "path": "personal/daily/2026-09-30.md",
+      "status": "conflict",
+      "reason": "Manual content differs from baseline"
+    }
+  ],
+  "consumers": [],
+  "pending": [
+    "Resolve manual content conflict"
+  ]
+}

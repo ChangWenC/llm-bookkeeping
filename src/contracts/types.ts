@@ -46,11 +46,12 @@ export interface ReviewBundle extends Versioned {
   chunks: ReviewChunk[]; existing_facts: FactRevision[]; baselines: PageBaseline[];
   coverage: SourceCoverage[]; unfinished: CoverageGap[];
 }
+export interface AnalyticsProjection extends Versioned { summary: string; scope: string[]; subject: string; event_refs: EventRef[]; attribution: Record<string, unknown> }
 /** Model-produced IDs are local candidate IDs; the application allocates permanent IDs. */
 export interface FactCandidate extends Versioned {
   candidate_id: string; chunk_id: string; disposition: 'keep' | 'add' | 'replace' | 'retract';
   content: string; subject: string; occurred_at: UnknownValue<string>; journal_date: UnknownValue<string>;
-  kind: FactKind; event_refs: EventRef[]; target_refs: FactRef[];
+  kind: FactKind; analytics_projection: UnknownValue<AnalyticsProjection>; event_refs: EventRef[]; target_refs: FactRef[];
   scope: string[]; attribution: Record<string, unknown>;
 }
 export interface ChunkReview extends Versioned {
@@ -68,6 +69,7 @@ export interface ReviewResult extends Versioned {
 export interface FactRevision extends Versioned {
   fact_id: string; revision: number; event_refs: EventRef[]; content: string; subject: string;
   occurred_at: UnknownValue<string>; journal_date: UnknownValue<string>; kind: FactKind;
+  analytics_projection: UnknownValue<AnalyticsProjection>;
   action: 'assert' | 'replace' | 'retract'; target_refs: FactRef[]; scope: string[];
   attribution: Record<string, unknown>; recorded_at: string; legacy_locator?: string | null;
 }
@@ -101,6 +103,9 @@ export interface WorkItem extends Versioned {
   work_id: string; kind: string; lane: Lane; state: 'pending' | 'complete' | 'deferred';
   payload: Record<string, unknown>; reason: string | null; migration_key: string | null; updated_at: string;
 }
+export interface LegacyIdMapping extends Versioned { source_id: string; target_id: string | null; confidence: 'verified' | 'unresolved'; reason: string | null }
+export interface LegacyImportBatch extends Versioned { migration_key: string; facts: FactRevision[]; mappings: LegacyIdMapping[]; work: WorkItem[] }
+export interface LegacyImportResult extends Versioned { migration_key: string; reused: boolean; imported_facts: number; unresolved: number }
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
 export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
@@ -138,6 +143,9 @@ export interface Store {
   listPendingChunks(range: TimeRange, lane: Lane): Promise<ReviewChunk[]>;
   getReviewResult(result_id: string): Promise<ReviewResult | null>;
   commitReview(result: ReviewResult): Promise<ReviewCommit>;
+  listPendingPatches(): Promise<JournalPatch[]>;
+  markPatchStatus(operation_id: string, status: FileStatus, reason?: string | null): Promise<void>;
+  importLegacy(batch: LegacyImportBatch): Promise<LegacyImportResult>;
   readEffectiveFacts(query: FactQuery): Promise<FactRevision[]>;
   listOutbox(status?: 'pending' | 'ready'): Promise<OutboxEntry[]>;
   markExportReady(batch_id: string, export_path: string): Promise<void>;
