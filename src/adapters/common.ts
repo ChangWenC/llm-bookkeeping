@@ -40,100 +40,81 @@ export function parseLossless(text: string): any {
   }
   return JSON.parse(out);
 }
-export function parseTime(
-  raw: unknown,
-  zone?: string,
-): {
+type ParsedTime = {
   utc: string | null;
   wire: string | null;
   precision: SourceEvent["time_precision"];
   reason: string | null;
-} {
-  if (
-    typeof raw === "number" ||
-    (typeof raw === "string" && /^\d{10}(?:\.\d+)?$/.test(raw))
-  ) {
-    const ms = Number(raw) * 1000;
-    return Number.isFinite(ms)
-      ? {
-          utc: new Date(ms).toISOString(),
-          wire: "UTC",
-          precision: Number.isInteger(Number(raw)) ? "second" : "millisecond",
-          reason: null,
-        }
-      : { utc: null, wire: null, precision: "unknown", reason: "invalid_time" };
+};
+function fractionPrecision(fraction: string | undefined): ParsedTime["precision"] {
+  if (!fraction) return "second";
+  if (fraction.length <= 3) return "millisecond";
+  if (fraction.length <= 6) return "microsecond";
+  return "nanosecond";
+}
+function exactFractionUtc(seconds: number, fraction?: string): string {
+  return new Date(seconds).toISOString().slice(0, 19) +
+    "." + (fraction ?? "000") + "Z";
+}
+function comparableUtc(value: string): string {
+  const match = value.match(/^(.*?)(?:\.(\d{1,9}))?Z$/);
+  return match ? match[1] + "." + (match[2] ?? "").padEnd(9, "0") + "Z" : value;
+}
+/** Resolve the whole second with Date/Intl, retaining ISO fractional digits as text. */
+export function parseTime(raw: unknown, zone?: string): ParsedTime {
+  if (typeof raw === "number" ||
+      (typeof raw === "string" && /^\d{10}(?:\.\d+)?$/.test(raw))) {
+    const text = typeof raw === "number" && String(raw).includes("e")
+      ? raw.toFixed(9).replace(/0+$/, "").replace(/\.$/, "") : String(raw);
+    const epoch = text.match(/^(-?\d+)(?:\.(\d{1,9}))?$/);
+    if (!epoch)
+      return { utc: null, wire: null, precision: "unknown", reason: "invalid_time" };
+    let whole = BigInt(epoch[1]);
+    let fraction = epoch[2];
+    if (text.startsWith("-") && fraction && BigInt(fraction) !== 0n) {
+      whole--;
+      fraction = (10n ** BigInt(fraction.length) - BigInt(fraction)).toString().padStart(fraction.length, "0");
+    }
+    const seconds = Number(whole) * 1000;
+    if (!Number.isFinite(seconds) || !Number.isFinite(new Date(seconds).getTime()))
+      return { utc: null, wire: null, precision: "unknown", reason: "invalid_time" };
+    return {
+      utc: exactFractionUtc(seconds, fraction), wire: "UTC",
+      precision: fractionPrecision(fraction), reason: null,
+    };
   }
   if (typeof raw !== "string")
-    return {
-      utc: null,
-      wire: null,
-      precision: "unknown",
-      reason: "missing_time",
-    };
-  const minutePrecision =
-    /^\d{4}-\d{2}-\d{2}[ T]\d\d:\d\d(?:Z|[+-]\d\d:?\d\d)?$/.test(raw);
+    return { utc: null, wire: null, precision: "unknown", reason: "missing_time" };
+  const match = raw.match(
+    /^(\d{4}-\d{2}-\d{2})[ T](\d\d:\d\d)(?::(\d\d)(?:\.(\d{1,9}))?)?(Z|[+-]\d\d:?\d\d)?$/,
+  );
   const hasOffset = /(Z|[+-]\d\d:?\d\d)$/.test(raw);
-  if (hasOffset) {
-    const n = Date.parse(raw);
-    return {
-      utc: Number.isFinite(n) ? new Date(n).toISOString() : null,
-      wire: raw.match(/(Z|[+-]\d\d:?\d\d)$/)?.[1] ?? null,
-      precision: minutePrecision
-        ? ("minute" as SourceEvent["time_precision"])
-        : /\.\d{4,}/.test(raw)
-          ? "microsecond"
-          : raw.includes(".")
-            ? "millisecond"
-            : "second",
-      reason: Number.isFinite(n) ? null : "invalid_time",
-    };
+  if (!match)
+    return { utc: null, wire: hasOffset ? raw.match(/(Z|[+-]\d\d:?\d\d)$/)?.[1] ?? null : zone ?? null,
+      precision: "unknown", reason: hasOffset ? "invalid_time" : "invalid_local_time" };
+  const [, day, clock, second, fraction, offset] = match;
+  const precision = second ? fractionPrecision(fraction) : "minute";
+  const target = `${day}T${clock}:${second ?? "00"}`;
+  const base = Date.parse(target + "Z");
+  if (!Number.isFinite(base) || new Date(base).toISOString().slice(0, 19) !== target)
+    return { utc: null, wire: offset ?? zone ?? null, precision, reason: offset ? "invalid_time" : "invalid_local_time" };
+  if (offset) {
+    const seconds = Date.parse(target + offset);
+    return Number.isFinite(seconds)
+      ? { utc: exactFractionUtc(seconds, fraction), wire: offset, precision, reason: null }
+      : { utc: null, wire: offset, precision, reason: "invalid_time" };
   }
   if (!zone)
-    return {
-      utc: null,
-      wire: null,
-      precision: minutePrecision
-        ? ("minute" as SourceEvent["time_precision"])
-        : "unknown",
-      reason: "missing_wire_timezone",
-    };
-  const match = raw.match(
-    /^(\d{4}-\d{2}-\d{2})[ T](\d\d:\d\d)(?::(\d\d)(?:\.(\d+))?)?$/,
-  );
-  if (!match)
-    return {
-      utc: null,
-      wire: zone,
-      precision: "unknown",
-      reason: "invalid_local_time",
-    };
-  const target = `${match[1]}T${match[2]}:${match[3] ?? "00"}`;
-  const base = Date.parse(target + "Z");
-  // Search possible offsets and reject DST ambiguous/nonexistent wall clocks.
+    return { utc: null, wire: null, precision, reason: "missing_wire_timezone" };
   const found: number[] = [];
-  for (let offset = -14 * 60; offset <= 14 * 60; offset += 15) {
-    const t = base - offset * 60000;
-    if (localClock(new Date(t), zone) === target) found.push(t);
+  for (let minutes = -14 * 60; minutes <= 14 * 60; minutes += 15) {
+    const seconds = base - minutes * 60000;
+    if (localClock(new Date(seconds), zone) === target) found.push(seconds);
   }
   return {
-    utc:
-      found.length === 1
-        ? new Date(
-            found[0] + Number("0." + (match[4] ?? "0")) * 1000,
-          ).toISOString()
-        : null,
-    wire: zone,
-    precision: !match[3]
-      ? ("minute" as SourceEvent["time_precision"])
-      : match[4]
-        ? "millisecond"
-        : "second",
-    reason:
-      found.length === 1
-        ? null
-        : found.length
-          ? "ambiguous_local_time"
-          : "nonexistent_local_time",
+    utc: found.length === 1 ? exactFractionUtc(found[0], fraction) : null,
+    wire: zone, precision,
+    reason: found.length === 1 ? null : found.length ? "ambiguous_local_time" : "nonexistent_local_time",
   };
 }
 function localClock(d: Date, zone: string): string {
@@ -173,10 +154,10 @@ export function event(
 ): SourceEvent {
   const t = parseTime(input.time, input.wireZone);
   const timeline = [...config.journal_timezone_timeline].sort((a, b) =>
-    a.effective_from.localeCompare(b.effective_from),
+    comparableUtc(a.effective_from).localeCompare(comparableUtc(b.effective_from)),
   );
   const entry = t.utc
-    ? timeline.filter((e) => e.effective_from <= t.utc!).at(-1)
+    ? timeline.filter((e) => comparableUtc(e.effective_from) <= comparableUtc(t.utc!)).at(-1)
     : null;
   const zone =
     entry?.timezone ?? (timeline.length ? null : config.journal_timezone);
