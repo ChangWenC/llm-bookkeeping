@@ -151,8 +151,12 @@ export async function prepareMonthlyBundle(store: Store, config: BookkeepingConf
             explicitIssues.push(gap('Explicit monthly page unavailable: ' + String(error)));
         }
     }
-    const atCutoff = new Set(store.effectiveFactRefsAt(request.cutoff).map(factKey));
-    const snapshot = frozen(store, request, month, context.facts.filter(fact => atCutoff.has(factKey(fact))).map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), await workIds(store, 'prepare_monthly', month, request.cutoff), await workIds(store, 'archive_context', month, request.cutoff));
+    // The initial material must come from the effective view at cutoff. A
+    // revision withdrawn later is absent from today's context but still belongs
+    // to an earlier snapshot. Continuations keep their already frozen refs.
+    const atCutoff = request.fact_snapshot ? [] : store.lookupFactRevisions(store.effectiveFactRefsAt(request.cutoff))
+        .filter(fact => (fact.journal_date.value ?? fact.occurred_at.value?.slice(0, 10))?.startsWith(month));
+    const snapshot = frozen(store, request, month, atCutoff.map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), await workIds(store, 'prepare_monthly', month, request.cutoff), await workIds(store, 'archive_context', month, request.cutoff));
     context.facts_page = snapshot.page;
     const material = new Map(store.lookupFactRevisions(snapshot.refs).map(fact => [factKey(fact), fact])), coverage = context.coverage;
     context.facts = [];
