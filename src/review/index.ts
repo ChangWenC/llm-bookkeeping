@@ -135,6 +135,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             });
             const coverage = (await store.listCoverage(range)).filter(c => c.lane === request.lane);
             const unfinished = coverage.flatMap(c => c.gaps);
+            unfinished.push(...store.getClassificationGaps(range).map(item => gap(item.reason, null, item.locator)));
             const requestedBaselines: PageBaseline[] = [];
             if (request.page_paths && (!Array.isArray(request.page_paths) || request.page_paths.some(path => typeof path !== 'string')))
                 throw new Error('page_paths must be an array of explicit Wiki paths');

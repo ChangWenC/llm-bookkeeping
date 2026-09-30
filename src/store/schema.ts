@@ -12,6 +12,10 @@ export function initializeSchema(db: DatabaseSync): void {
       CREATE TABLE IF NOT EXISTS fragments(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,json TEXT NOT NULL,time TEXT,classification TEXT NOT NULL,ordering TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS event_time ON events(time,ordering,id);
+      CREATE INDEX IF NOT EXISTS codex_source_user ON events(
+        json_extract(json,'$.source.account_id'),json_extract(json,'$.source.conversation_id'),
+        json_extract(json,'$.locator'),json_extract(json,'$.generation'),ordering,id)
+        WHERE json_extract(json,'$.source.provider')='codex' AND json_extract(json,'$.role')='user';
       CREATE TABLE IF NOT EXISTS event_lanes(event_id TEXT NOT NULL REFERENCES events(id),lane TEXT NOT NULL,PRIMARY KEY(event_id,lane));
       CREATE TABLE IF NOT EXISTS coverage(id TEXT PRIMARY KEY,json TEXT NOT NULL,from_time TEXT NOT NULL,to_time TEXT NOT NULL,lane TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checkpoints(id TEXT PRIMARY KEY,json TEXT NOT NULL,provider TEXT NOT NULL,lane TEXT NOT NULL);

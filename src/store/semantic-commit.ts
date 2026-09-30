@@ -37,6 +37,12 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         if (!row)
             throw new Error('Unknown review bundle');
         const bundle = parse<ReviewBundle>(row);
+        for (const event of bundle.chunks.flatMap(chunk => [...chunk.events, ...chunk.context_events])) {
+            const id = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
+            const current = store.db.prepare('SELECT classification FROM events WHERE id=?').get(id) as any;
+            if (current && current.classification !== 'main')
+                throw new Error('Prepared source classification changed; prepare a fresh bundle');
+        }
         validateReviewResult(result);
         const completedSemantic = result.chunks.some(chunk => chunk.status === 'complete');
         if (bundle.analysis_context && completedSemantic && !result.analysis)

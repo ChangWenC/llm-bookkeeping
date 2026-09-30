@@ -13,6 +13,8 @@ import { AnalyticsRepository, type AnalyticsPort } from './analytics.ts';
 const parse = <T>(row: any): T => JSON.parse(row.json);
 export { weekFor } from './domain.ts';
 import { refKey, utc, normalized, rangeCheck, version, unique, enrichEvent, factWeek, weekFor } from './domain.ts';
+import { correctCodexClassification, type ClassificationCorrection } from './codex-automation.ts';
+import type { RawFragment } from '../contracts/types.ts';
 export interface StoreOptions {
     onTransactionStep?: (step: string) => void;
 }
@@ -63,6 +65,60 @@ export class SqliteStore implements Store {
         }
         this.db.prepare(sql ?? `INSERT INTO ${table}(id,json) VALUES(?,?)`).run(...(params ?? [id, json]));
     }
+    private sourceFragment(event: SourceEvent): RawFragment | null {
+        const row = event.fragment_ref && this.db.prepare('SELECT json FROM fragments WHERE id=?').get(event.fragment_ref);
+        return row ? parse<RawFragment>(row) : null;
+    }
+    private resolveCodexEvent(event: SourceEvent, peers: SourceEvent[] = []): ClassificationCorrection {
+        if (event.source.provider !== 'codex' || !['main', 'unknown'].includes(event.classification))
+            return { event, reason: null };
+        const sameSource = (other: SourceEvent) => other.role === 'user' && other.physical_order < event.physical_order
+            && other.source.provider === event.source.provider && other.source.account_id === event.source.account_id
+            && other.source.conversation_id === event.source.conversation_id && other.locator === event.locator
+            && other.generation === event.generation;
+        let anchor: SourceEvent | null = null;
+        if (event.role === 'assistant') {
+            const row = this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')='codex' AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND json_extract(json,'$.locator')=? AND json_extract(json,'$.generation')=? AND json_extract(json,'$.role')='user' AND ordering<? ORDER BY ordering DESC,id DESC LIMIT 1")
+                .get(event.source.account_id, event.source.conversation_id, event.locator, event.generation, event.physical_order);
+            anchor = row ? parse<SourceEvent>(row) : null;
+            for (const peer of peers)
+                if (sameSource(peer) && (!anchor || peer.physical_order > anchor.physical_order)) anchor = peer;
+        }
+        return correctCodexClassification(event, this.sourceFragment(event), anchor, anchor ? this.sourceFragment(anchor) : null);
+    }
+    private persistCodexCorrection(previous: SourceEvent, correction: ClassificationCorrection): void {
+        if (canonical(previous) !== canonical(correction.event))
+            this.db.prepare('UPDATE events SET json=?,classification=? WHERE id=?').run(canonical(correction.event), correction.event.classification, previous.event_id);
+        if (correction.reason)
+            this.putWork({ schema_version: 1, work_id: 'codex-turn:' + digest(previous.event_id), kind: 'event_classification', lane: 'live', state: 'pending', payload: { event_id: previous.event_id }, reason: correction.reason, migration_key: null, updated_at: new Date().toISOString() });
+        else if (correction.event.classification === 'automation') {
+            const work = this.db.prepare('SELECT json FROM work WHERE id=?').get('codex-turn:' + digest(previous.event_id));
+            if (work) {
+                const item = parse<WorkItem>(work);
+                this.putWork({ ...item, state: 'complete' });
+            }
+        }
+    }
+    // Only the bounded SQL page selected by a caller is reconciled. Original
+    // fragments, accepted results and fact revisions are never rewritten.
+    private reconcileCodexPage(events: SourceEvent[]): SourceEvent[] {
+        if (!events.some(event => event.source.provider === 'codex' && ['main', 'unknown'].includes(event.classification))) return events;
+        return this.transaction(() => events.map(event => {
+            const correction = this.resolveCodexEvent(event);
+            this.persistCodexCorrection(event, correction);
+            return correction.event;
+        }));
+    }
+    private reconcilePreparedSource(event: SourceEvent): void {
+        const id = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
+        const row = this.db.prepare('SELECT json FROM events WHERE id=?').get(id);
+        if (row) this.reconcileCodexPage([parse<SourceEvent>(row)]);
+    }
+    getClassificationGaps(range: TimeRange): { reason: string; locator: string | null }[] {
+        rangeCheck(range);
+        return this.db.prepare("SELECT w.json AS json,e.json AS event_json FROM work w JOIN events e ON json_extract(w.json,'$.payload.event_id')=e.id WHERE w.state='pending' AND json_extract(w.json,'$.kind')='event_classification' AND e.time>=? AND e.time<? ORDER BY w.rowid LIMIT 32")
+            .all(normalized(range.from), normalized(range.to)).map((row: any) => ({ reason: parse<WorkItem>(row).reason ?? 'Codex source turn unresolved', locator: JSON.parse(row.event_json).locator }));
+    }
     async saveCollection(batch: CollectionBatch): Promise<void> {
         version(batch);
         unique(batch.events.map(e => e.event_id), 'event IDs');
@@ -82,7 +138,9 @@ export class SqliteStore implements Store {
                 this.immutable('fragments', fragment.fragment_id, fragment);
             }
             this.options.onTransactionStep?.('collection_fragments');
-            for (const event of batch.events) {
+            for (const captured of batch.events) {
+                const correction = this.resolveCodexEvent(captured, batch.events);
+                const event = correction.event;
                 version(event);
                 if (event.utc_time.value)
                     utc(event.utc_time.value);
@@ -91,7 +149,9 @@ export class SqliteStore implements Store {
                 const old = this.db.prepare('SELECT json FROM events WHERE id=?').get(event.event_id) as any;
                 if (old) {
                     try {
-                        const enriched = enrichEvent(parse<SourceEvent>(old), event);
+                        const previousEvent = parse<SourceEvent>(old);
+                        const previousCorrection = this.resolveCodexEvent(previousEvent, batch.events);
+                        const enriched = enrichEvent(previousCorrection.event, event);
                         this.db.prepare('UPDATE events SET json=?,time=?,classification=? WHERE id=?').run(canonical(enriched), enriched.utc_time.value ? normalized(enriched.utc_time.value) : null, enriched.classification, event.event_id);
                         if (enriched.utc_time.value && enriched.journal_date.value && enriched.classification !== 'unknown') {
                             const work = this.db.prepare('SELECT json FROM work WHERE id=?').get('event-gap:' + digest(event.event_id));
@@ -108,6 +168,7 @@ export class SqliteStore implements Store {
                 }
                 else
                     this.db.prepare('INSERT INTO events VALUES(?,?,?,?,?)').run(event.event_id, canonical(event), event.utc_time.value ? normalized(event.utc_time.value) : null, event.classification, event.physical_order);
+                this.persistCodexCorrection(event, correction);
                 const lanes = batch.coverage.filter(c => c.provider === event.source.provider && c.account_id === event.source.account_id && (!c.conversation_id || c.conversation_id === event.source.conversation_id)).map(c => c.lane);
                 for (const lane of new Set(lanes.length ? lanes : batch.checkpoints.map(c => c.lane)))
                     this.db.prepare('INSERT OR IGNORE INTO event_lanes VALUES(?,?)').run(event.event_id, lane);
@@ -156,7 +217,8 @@ export class SqliteStore implements Store {
             params.push(cursor.time, cursor.ordering, cursor.id);
         }
         params.push(limit);
-        return this.db.prepare(`SELECT json FROM events WHERE ${clause} ORDER BY time,ordering,id LIMIT ?`).all(...params).map(parse<SourceEvent>);
+        const events = this.db.prepare(`SELECT json FROM events WHERE ${clause} ORDER BY time,ordering,id LIMIT ?`).all(...params).map(parse<SourceEvent>);
+        return this.reconcileCodexPage(events).filter(event => query.include_context || event.classification === 'main');
     }
     async listCoverage(range: TimeRange): Promise<SourceCoverage[]> {
         rangeCheck(range);
@@ -187,7 +249,8 @@ export class SqliteStore implements Store {
     }
     async getReviewableEvents(query: EventQuery, kind: string): Promise<SourceEvent[]> {
         rangeCheck(query.range);
-        return this.db.prepare("SELECT e.json FROM events e WHERE e.time>=? AND e.time<? AND e.classification='main' AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane=?) ORDER BY e.time,e.ordering,e.id LIMIT ?").all(normalized(query.range.from), normalized(query.range.to), query.lane!, kind, query.lane!, query.limit ?? 1000).map(parse<SourceEvent>);
+        const events = this.db.prepare("SELECT e.json FROM events e WHERE e.time>=? AND e.time<? AND e.classification='main' AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane=?) ORDER BY e.time,e.ordering,e.id LIMIT ?").all(normalized(query.range.from), normalized(query.range.to), query.lane!, kind, query.lane!, query.limit ?? 1000).map(parse<SourceEvent>);
+        return this.reconcileCodexPage(events).filter(event => event.classification === 'main');
     }
     getContextEvents(event: SourceEvent): SourceEvent[] {
         if (!event.utc_time.value)
@@ -196,12 +259,14 @@ export class SqliteStore implements Store {
         const group = event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true;
         if (group) {
             const anchor = Date.parse(event.utc_time.value);
-            return this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main' ORDER BY ABS(julianday(time)-julianday(?)),time,ordering,id LIMIT 12")
+            const events = this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main' ORDER BY ABS(julianday(time)-julianday(?)),time,ordering,id LIMIT 12")
                 .all(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(new Date(anchor - 20 * 60000).toISOString()), normalized(new Date(anchor + 20 * 60000).toISOString()), originalId, normalized(event.utc_time.value))
                 .map(parse<SourceEvent>).sort((a, b) => normalized(a.utc_time.value!).localeCompare(normalized(b.utc_time.value!)) || a.physical_order.localeCompare(b.physical_order));
+            return this.reconcileCodexPage(events).filter(event => event.classification === 'main');
         }
-        return this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND (time,ordering,id)<(?,?,?) AND id!=? AND classification='main' ORDER BY time DESC,ordering DESC,id DESC LIMIT 3")
+        const events = this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND (time,ordering,id)<(?,?,?) AND id!=? AND classification='main' ORDER BY time DESC,ordering DESC,id DESC LIMIT 3")
             .all(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(event.utc_time.value), event.physical_order, originalId, originalId).map(parse<SourceEvent>).reverse();
+        return this.reconcileCodexPage(events).filter(event => event.classification === 'main');
     }
     isContextTruncated(event: SourceEvent): boolean {
         if (!event.utc_time.value || !(event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true))
@@ -265,6 +330,12 @@ export class SqliteStore implements Store {
         return foldFacts(rows);
     }
     async commitReview(result: ReviewResult): Promise<ReviewCommit> {
+        const bundle = await this.getBundle(result.bundle_id);
+        // Reconcile the bounded prepared material before entering the semantic
+        // transaction. Already accepted results keep their original reuse path.
+        if (bundle && !this.db.prepare('SELECT 1 FROM results WHERE bundle_id=?').get(bundle.bundle_id))
+            for (const event of bundle.chunks.flatMap(chunk => [...chunk.events, ...chunk.context_events]))
+                this.reconcilePreparedSource(event);
         return commitSemanticReview({ db: this.db, options: this.options, journalTimezone: this.journalTimezone, transaction: fn => this.transaction(fn), effective: () => this.effective(), allocateId: namespace => this.allocateId(namespace), putWork: item => this.putWork(item), markUnit: (event, kind, lane) => this.markUnit(event, kind, lane), coverageReview: (coverage, kind, empty) => this.coverageReview(coverage, kind, empty), analyticsHistoryRepository: () => this.analyticsHistoryRepository(), markFactMaterialRead: (id, refs) => this.markFactMaterialRead(id, refs) }, result);
     }
     async listPendingPatches(): Promise<JournalPatch[]> { return this.db.prepare("SELECT json FROM patches WHERE status='pending' ORDER BY rowid").all().map(parse<JournalPatch>); }
