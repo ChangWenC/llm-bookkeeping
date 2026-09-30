@@ -89,8 +89,15 @@ export async function createRuntime(config: BookkeepingConfig, command?: string,
     }
     if (command === 'import' || command === 'migrate') {
       const module = await loadModule('./migration/index.ts');
-      const historyModule = await loadModule('./store/history.ts');
-      const migration = module.createMigrationService(store, config, { analytics: historyModule.createAnalyticsHistoryPort(store, config) });
+      let analytics;
+      try {
+        const historyModule = await loadModule('./store/history.ts');
+        analytics = historyModule.createAnalyticsHistoryPort(store, config);
+      } catch (error) {
+        if (!(error instanceof UnavailableError)) throw error;
+        // Migration retains history and needs_review when its optional projection port is absent.
+      }
+      const migration = module.createMigrationService(store, config, { analytics });
       services.importManifest = input => migration.importManifest(input);
       services.migrateManifest = input => migration.migrateManifest(input);
     }
