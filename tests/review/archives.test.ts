@@ -9,7 +9,7 @@ import { config, result } from '../store/fixtures.ts';
 const cutoff = '2026-10-05T00:00:00Z';
 async function archive(s: any, c: any, id: string, body: string, date = '2026-09-01') {
     const path = 'wiki/personal/journals/archives/v2/2026-09/' + id + '.json';
-    const record = { schema_version: 1, format: 'daily-journal-archive-v2', date, source_path: 'wiki/personal/journals/' + id + '.md', original_digest: digest(Buffer.from(body)), original_bytes_base64: Buffer.from(body).toString('base64'), locator: 'archive:' + id, fact_refs: [] };
+    const record = { schema_version: 1, format: 'daily-journal-archive-v2', date, source_path: 'wiki/personal/journals/' + id + '.md', original_digest: digest(Buffer.from(body)), original_bytes_base64: Buffer.from(body).toString('base64'), locator: `archive:${digest('wiki/personal/journals/' + id + '.md:' + digest(Buffer.from(body)))}:${date}`, fact_refs: [] };
     await mkdir(dirname(join(c.wiki_root, path)), { recursive: true });
     await writeFile(join(c.wiki_root, path), canonical(record));
     await s.enqueueWork({ schema_version: 1, work_id: id, kind: 'archive_context', lane: 'history', state: 'pending', payload: { month: '2026-09', date, archive_path: path, locator: record.locator, fact_refs: [] }, reason: null, migration_key: null, updated_at: '2026-09-30T10:00:00Z' });

@@ -80,6 +80,8 @@ async function readArchive(config: BookkeepingConfig, item: WorkItem, maxBytes: 
     const original = Buffer.from(record.original_bytes_base64, 'base64');
     if (original.toString('base64') !== record.original_bytes_base64 || digest(original) !== record.original_digest)
         throw new Error('Archive original bytes/digest mismatch');
+    if (record.locator !== `archive:${digest(record.source_path + ':' + record.original_digest)}:${record.date}`)
+        throw new Error('Archive original identity does not match the queued immutable locator');
     await resolveWikiPath(config.wiki_root, record.source_path);
     const fact_refs = Array.isArray(record.fact_refs) ? record.fact_refs : [];
     if (canonical(fact_refs) !== canonical(item.payload.fact_refs ?? []))
