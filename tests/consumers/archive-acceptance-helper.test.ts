@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runArchiveAcceptance } from '../../tools/archive-acceptance.ts';
+import { runArchiveReview9Acceptance } from '../../tools/archive-review9-acceptance.ts';
 import { config as base } from '../../test/fixtures/basic.ts';
 test('controlled-clock archive helper confines writes, preserves full originals and aliases, repeats without deletion duplicates', async t => {
   const baseDir = '/private/tmp/bookkeeping-acceptance'; await mkdir(baseDir, { recursive: true });
@@ -22,4 +23,26 @@ test('controlled-clock archive helper confines writes, preserves full originals 
   assert.ok((await readFile(retained, 'utf8')).includes('保留合成原文'));
   await writeFile(path, JSON.stringify({ ...config, wiki_root: '/private/tmp/outside-helper' }));
   await assert.rejects(runArchiveAcceptance(path, '2026-10-01T12:00:00Z'), /descendants/);
+});
+test('review9 helper uses only isolated copies, creates an explicit synthetic missing review and checks crash recovery plus root log', async t => {
+  const baseDir = '/private/tmp/bookkeeping-acceptance'; await mkdir(baseDir, { recursive: true });
+  const root = await mkdtemp(join(baseDir, 'synthetic-review9-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const wiki = join(root, 'wiki'), config = { ...base, wiki_root: wiki, data_dir: join(root, 'data') };
+  const journals = join(wiki, 'wiki/personal/journals'); await mkdir(journals, { recursive: true });
+  for (const day of ['01', '02']) await writeFile(join(journals, `日记_2026_08_${day}.md`), `---\ntype: journal\njournal_class: daily-active\n---\n完整合成原文 ${day} [[日记_2026_08_${day === '01' ? '02' : '01'}|互链原描述]]\n`);
+  const retained = join(journals, '日记_2026_08_03.md'), retainedBytes = '---\npinned: true # intentional handwritten\n---\n原样保留合成手写页。\n';
+  await writeFile(retained, retainedBytes);
+  await writeFile(join(wiki, 'log.md'), '# 日志\n原有人工正文。[[日记_2026_08_01|原日志描述]]\n');
+  const path = join(root, 'config.json'); await writeFile(path, JSON.stringify(config));
+  const result = await runArchiveReview9Acceptance(path, '2026-10-01T12:00:00Z');
+  assert.equal(result.quoted_draft_deferred, 2); assert.equal(result.missing_review_deferred, 2);
+  assert.equal(result.preserved_and_deleted, 2); assert.equal(result.retained, 1);
+  assert.equal(result.review_precondition, 'acceptance-only-synthetic-review');
+  assert.equal(result.production_writes, false); assert.equal(result.scheduled_evidence, false);
+  assert.equal(await readFile(retained, 'utf8'), retainedBytes);
+  assert.ok((await readFile(join(wiki, 'log.md'), 'utf8')).includes('原有人工正文。[[回顾_2026_08|原日志描述]]'));
+  await assert.rejects(runArchiveReview9Acceptance(path, '2026-10-02T12:00:00Z'), /2026-10-01/);
+  await writeFile(path, JSON.stringify({ ...config, data_dir: '/private/tmp/outside-review9' }));
+  await assert.rejects(runArchiveReview9Acceptance(path, '2026-10-01T12:00:00Z'), /descendants/);
 });
