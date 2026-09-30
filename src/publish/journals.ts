@@ -10,7 +10,7 @@ export function retainedJournal(bytes: Uint8Array | null): boolean {
   if (/^\s*(?:pinned:\s*true|retention:\s*["']?pinned["']?|intentional-journal:\s*true|intentional_journal:\s*true)\s*$/m.test(header)) return true;
   if (/^\s*journal_class:\s*["']?(?:pinned-daily|intentional-journal)["']?\s*$/m.test(header)) return true;
   const classification = header.match(/^\s*journal_class:\s*["']?([^"'\r\n]*?)["']?\s*$/m)?.[1]?.trim();
-  if (classification !== undefined && classification !== 'daily-journal') return true;
+  if (classification !== undefined && !['daily-active', 'daily-reconstructed', 'daily-journal'].includes(classification)) return true;
   const explicitType = header.match(/^\s*type:\s*["']?([^"'\r\n]*?)["']?\s*$/m)?.[1]?.trim();
   if (explicitType !== undefined && !['journal', 'daily-journal'].includes(explicitType)) return true;
   const tags = header.match(/^tags:\s*(.*(?:\n[ \t]+[^\n]*)*)/m)?.[1] ?? '';

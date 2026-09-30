@@ -50,3 +50,13 @@ test('authorized monthly backlink replacement uses its desired review digest and
   await assert.rejects(access(daily), { code: 'ENOENT' });
   assert.ok((await readFile(f.monthly, 'utf8')).includes('[[回顾_2026_07|当天合成工作]]'));
 });
+
+test('ordinary daily-active and daily-reconstructed journal classes remain archivable', async t => {
+  const f = await fixture(t);
+  const active = await f.daily('20', '---\ntype: journal\njournal_class: daily-active\ntags: [journal]\n---\n\n合成普通日记。\n');
+  const reconstructed = await f.daily('21', '---\ntype: journal\njournal_class: daily-reconstructed\ntags: [journal]\n---\n\n合成重建日记。\n');
+  const service = createArchiveService(f.store, f.config, { now: () => new Date('2026-09-30T12:00:00Z') });
+  assert.ok((await service.report('2026-07')).pages.every(page => page.status !== 'retained'));
+  assert.ok((await service.run({ month: '2026-07', mode: 'apply' })).pages.every(page => page.status === 'applied'));
+  await assert.rejects(access(active)); await assert.rejects(access(reconstructed));
+});
