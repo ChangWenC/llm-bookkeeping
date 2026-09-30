@@ -8,6 +8,7 @@ export function frontmatter(bytes: Uint8Array | null): string {
 export function retainedJournal(bytes: Uint8Array | null): boolean {
   const header = frontmatter(bytes);
   if (/^\s*(?:pinned:\s*true|retention:\s*["']?pinned["']?|intentional-journal:\s*true|intentional_journal:\s*true)\s*$/m.test(header)) return true;
+  if (/^\s*journal_class:\s*["']?(?:pinned-daily|intentional-journal)["']?\s*$/m.test(header)) return true;
   const tags = header.match(/^tags:\s*(.*(?:\n[ \t]+[^\n]*)*)/m)?.[1] ?? '';
   return /(?:^|[\s,\["'])\b(?:pinned-daily|intentional-journal)\b(?:$|[\s,\]"'])/.test(tags);
 }
