@@ -8,7 +8,7 @@ import { acquireWikiLock, assertWikiLockHeld, type WikiLock } from './lock.ts';
 export const digestBytes = (bytes: Uint8Array | null): string => bytes === null ? 'absent' : createHash('sha256').update(bytes).digest('hex');
 export type FaultStage = 'before_intent' | 'after_intent' | 'before_target' | 'after_target' | 'after_file_registered' | 'after_export_rename';
 export interface WriterOptions { now?: () => Date; fault?: (stage: FaultStage, operation: string) => void | Promise<void> }
-export interface SafeWriteRequest { operation_id: string; path: string; baseline_digest: string; desired_bytes: Uint8Array | null; fact_refs?: FactRef[] }
+export interface SafeWriteRequest { operation_id: string; path: string; baseline_digest: string; desired_bytes: Uint8Array | null; fact_refs?: FactRef[]; archive_delete_verified?: boolean }
 export interface TargetSnapshot { path: string; absolute: string; bytes: Buffer | null; digest: string }
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 
@@ -75,7 +75,7 @@ export class SafeWikiWriter {
     if (existing) {
       const normalized = await resolveWikiPath(this.config.wiki_root, request.path);
       if (existing.path !== normalized.path || existing.desired_digest !== digestBytes(request.desired_bytes)) return outcome(existing, 'conflict', 'Operation ID reused with different target or bytes');
-      return this.recoverLocked(existing, lock);
+      return this.recoverLocked(existing, lock, request.archive_delete_verified);
     }
     const target = await readWikiTarget(this.config.wiki_root, request.path);
     const parts = target.path.split(sep);
@@ -89,9 +89,9 @@ export class SafeWikiWriter {
     await this.options.fault?.('before_intent', intent.operation_id);
     await this.store.saveFileIntent(intent);
     await this.options.fault?.('after_intent', intent.operation_id);
-    return this.recoverLocked(intent, lock);
+    return this.recoverLocked(intent, lock, request.archive_delete_verified);
   }
-  async recoverLocked(intent: FileIntent, lock: WikiLock): Promise<FileOutcome> {
+  async recoverLocked(intent: FileIntent, lock: WikiLock, archiveDeleteVerified = false): Promise<FileOutcome> {
     await this.assertLock(lock);
     // Completed writes remain noops even when a person edited the file afterwards.
     if (intent.state === 'applied') {
@@ -106,6 +106,11 @@ export class SafeWikiWriter {
       await this.register(intent);
       return outcome(intent, 'noop');
     }
+    // A saved deletion is not evidence that its semantic prerequisites still
+    // hold. Only ArchiveService, after checking them under this lock, may delete.
+    // An already absent target above can still repair post-unlink registration.
+    if (intent.operation_id.startsWith('archive-delete:') && desired === null && !archiveDeleteVerified)
+      return outcome(intent, 'pending', 'Archive deletion requires dependency revalidation');
     if (target.digest !== intent.baseline_digest) {
       await this.store.updateFileIntent(intent.operation_id, 'conflict', 'Target is neither saved old nor desired content');
       return outcome(intent, 'conflict', 'Target is neither saved old nor desired content; draft and backup retained');

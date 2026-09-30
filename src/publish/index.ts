@@ -170,6 +170,28 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
         catch (error) { outcomes.push(fileOutcome(intent, 'pending', message(error))); }
       }
     } finally { await lock.release(); }
+    // Retry semantic deletion owners only AFTER releasing the ordinary writer
+    // lock. ArchiveService takes the same lock and rechecks every dependency.
+    const deferred = outcomes.filter(outcome => outcome.status === 'pending' && outcome.operation_id.startsWith('archive-delete:'));
+    if (deferred.length) {
+      const plans = await store.listWork('archive_plan');
+      const months = new Set(plans.filter(work => deferred.some(outcome => outcome.operation_id === work.payload.delete_operation && outcome.path === work.payload.path))
+        .map(work => String(work.payload.month)));
+      const { createArchiveService } = await import('../consumers/archive/index.ts');
+      for (const month of months) {
+        try {
+          const archived = await createArchiveService(store, config, options).run({ month, mode: 'apply' });
+          for (const outcome of deferred) {
+            const plan = plans.find(work => work.payload.month === month && work.payload.delete_operation === outcome.operation_id && work.payload.path === outcome.path);
+            if (!plan) continue;
+            const intent = await store.getFileIntent(outcome.operation_id);
+            const page = archived.pages.find(page => page.path === outcome.path);
+            if (intent?.state === 'applied') { outcome.status = 'applied'; outcome.reason = null; }
+            else outcome.reason = page?.reason ?? archived.reason ?? outcome.reason;
+          }
+        } catch (error) { for (const outcome of deferred) if (plans.some(work => work.payload.month === month && work.payload.delete_operation === outcome.operation_id)) outcome.reason = message(error); }
+      }
+    }
     return outcomes;
   }
   async function monthlyOutputs(): Promise<PublishResult['consumers']> {

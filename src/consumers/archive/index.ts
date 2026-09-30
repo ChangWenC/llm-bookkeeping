@@ -246,7 +246,7 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           if (finalReview.digest !== expectedReviewDigest || !usableReview(finalReview.bytes, request.month)) throw new Error('Monthly review changed or disappeared; deletion deferred');
           const archiveCheck = await readWikiTarget(config.wiki_root, plan.archive_path);
           if (archiveCheck.digest !== digestBytes(Buffer.from(plan.archive_base64, 'base64'))) throw new Error('Saved full archive changed or disappeared; deletion deferred');
-          const deleted = await writer.writeLocked({ operation_id: plan.delete_operation, path, baseline_digest: deleteDigest, desired_bytes: null, fact_refs: plan.fact_refs }, lock);
+          const deleted = await writer.writeLocked({ operation_id: plan.delete_operation, path, baseline_digest: deleteDigest, desired_bytes: null, fact_refs: plan.fact_refs, archive_delete_verified: true }, lock);
           if (!success(deleted)) { pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: deleted.reason }); continue; }
           await options.faultArchive?.('after_delete', path);
           await store.completeWork(work!.work_id);
