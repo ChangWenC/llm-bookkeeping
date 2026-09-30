@@ -63,8 +63,9 @@ test('archive blocks missing or unusable monthly body and refuses retained month
 
 test('archive resumes crash before original FileIntent and after deletion without losing saved source', async t => {
   const f = await fixture(t), path = daily('2026-07-15'); await f.seed(path, 'original\n'); await f.seed(review('2026-07'), '# 回顾\n真实合成摘要\n');
-  const before = await createArchiveService(f.store, f.config, { now, faultArchive(stage) { if (stage === 'plan_saved') throw new Error('synthetic crash before original intent'); } }).run({ month: '2026-07', mode: 'apply' });
-  assert.equal(before.status, 'pending'); assert.equal((await f.store.listWork('archive_plan', 'pending')).length, 1);
+  const before = await createArchiveService(f.store, f.config, { now, fault(stage, operation) { if (stage === 'before_intent' && operation.startsWith('archive-original:')) throw new Error('synthetic crash before original intent'); } }).run({ month: '2026-07', mode: 'apply' });
+  assert.equal(before.status, 'pending'); assert.equal((await f.store.listWork('archive_snapshot', 'pending')).length, 1);
+  assert.equal((await f.store.listFileIntents()).length, 0);
   const deleted = await createArchiveService(f.store, f.config, { now, faultArchive(stage) { if (stage === 'after_delete') throw new Error('synthetic crash after delete'); } }).run({ month: '2026-07', mode: 'apply' });
   assert.equal(deleted.status, 'pending'); await assert.rejects(readFile(join(f.wiki, path)), { code: 'ENOENT' });
   const resumed = await createArchiveService(f.store, f.config, { now }).run({ month: '2026-07', mode: 'apply' }); assert.equal(resumed.pages[0].status, 'noop');

@@ -31,6 +31,8 @@ All commands accept `--config /absolute/config.json`.
 
 Backup must use SQLite consistency API/VACUUM INTO, not copy a live DB. Restore always targets a new directory and must not overwrite production. Archive starts with one-month report and applies only after complete preserved originals, usable review, exact backlink transition and lock-held digest checks. Recovery compares complete desired/old bytes; it never resets the whole Wiki or database over later manual edits.
 
+Archive freezes and saves all eligible initial original bytes before any backlink migration. Cross-linked daily sources retain their pre-migration originals across crashes; deletion baselines may advance only through matching applied same-month archive-link intents, never arbitrary newer manual bytes. Failed preservation delays related link targets, while independent pages can still archive.
+
 ## Acceptance and cutover
 
 Report code, synthetic and real acceptance independently. Use SPEC's complete matrix, including bounded 2GB tails, source identity variants, timezone/DST, zero facts/partial review, transaction/export/file interruption, writer conflicts, old archive effective folding, Analytics revision privacy, migration, real WeChat and consistent backup.

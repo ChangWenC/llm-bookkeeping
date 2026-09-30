@@ -7,10 +7,11 @@ import type { WriterOptions } from '../../publish/files.ts';
 export { readArchiveRecords } from './records.ts';
 
 interface LinkPlan { path: string; digest: string; desired_base64: string; operation_id: string }
-interface ArchivePlan { month: string; date: string; path: string; source_digest: string; original_base64: string; archive_path: string; archive_base64: string; archive_operation: string; delete_operation: string; fact_refs: FactRef[]; links: LinkPlan[] }
+interface ArchiveSnapshot { month: string; date: string; path: string; source_digest: string; original_base64: string; archive_path: string; archive_base64: string; archive_operation: string; fact_refs: FactRef[] }
+interface ArchivePlan extends ArchiveSnapshot { delete_operation: string; links: LinkPlan[] }
 export interface ArchivePageOutcome { date: string; path: string; status: 'eligible' | 'retained' | 'applied' | 'noop' | 'pending' | 'conflict'; archive_path: string | null; reason: string | null }
 export interface ArchiveResult { schema_version: 1; month: string; mode: 'report' | 'apply'; status: 'complete' | 'partial' | 'pending'; pages: ArchivePageOutcome[]; reason: string | null; issues?: ArchiveReadIssue[] }
-export interface ArchiveOptions extends WriterOptions { faultArchive?: (stage: 'plan_saved' | 'archive_saved' | 'links_saved' | 'before_delete' | 'after_delete', path: string) => void | Promise<void> }
+export interface ArchiveOptions extends WriterOptions { faultArchive?: (stage: 'snapshots_saved' | 'plan_saved' | 'archive_saved' | 'links_saved' | 'before_delete' | 'after_delete', path: string) => void | Promise<void> }
 const success = (outcome: FileOutcome) => outcome.status === 'applied' || outcome.status === 'noop';
 const dailyTargets = (path: string): Set<string> => {
   const stem = path.replace(/\.md$/, '');
@@ -38,6 +39,32 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
     const item: WorkItem = { schema_version: 1, work_id: `archive-plan:${plan.month}:${sha(`${plan.path}:${plan.source_digest}`)}`, kind: 'archive_plan', lane: 'history', state: 'pending',
       payload: plan as unknown as Record<string, unknown>, reason: null, migration_key: null, updated_at: now().toISOString() };
     await store.enqueueWork(item); return item;
+  }
+  async function authorizedDigest(snapshot: ArchiveSnapshot, plans: WorkItem[]): Promise<string> {
+    const allowed = new Map(plans.filter(work => work.payload.month === snapshot.month).flatMap(work =>
+      ((work.payload.links ?? []) as LinkPlan[]).filter(link => link.path === snapshot.path).map(link => [link.operation_id, link] as const)));
+    let digest = snapshot.source_digest;
+    for (const intent of await store.listFileIntents(['applied'])) {
+      if (!allowed.has(intent.operation_id) || !intent.operation_id.startsWith('archive-link:') || intent.path !== snapshot.path || intent.baseline_digest !== digest) continue;
+      const link = allowed.get(intent.operation_id)!;
+      if (link.digest !== intent.baseline_digest || digestBytes(Buffer.from(link.desired_base64, 'base64')) !== intent.desired_digest) throw new Error('Archive backlink intent differs from saved exact plan');
+      if (intent.backup_bytes_base64 === null || intent.desired_bytes_base64 === null ||
+        digestBytes(Buffer.from(intent.backup_bytes_base64, 'base64')) !== digest ||
+        digestBytes(Buffer.from(intent.desired_bytes_base64, 'base64')) !== intent.desired_digest) throw new Error('Corrupt authorized archive backlink intent');
+      digest = intent.desired_digest;
+    }
+    return digest;
+  }
+  async function deletedByMonth(path: string, month: string): Promise<boolean> {
+    for (const work of await store.listWork('archive_plan')) {
+      if (work.payload.month !== month || work.payload.path !== path) continue;
+      const plan = work.payload as unknown as ArchivePlan;
+      const intent = await store.getFileIntent(plan.delete_operation);
+      if (intent?.state !== 'applied' || intent.path !== path || intent.desired_digest !== 'absent' || intent.desired_bytes_base64 !== null) continue;
+      const archive = await readWikiTarget(config.wiki_root, plan.archive_path);
+      if (archive.digest === digestBytes(Buffer.from(plan.archive_base64, 'base64'))) return true;
+    }
+    return false;
   }
   async function report(request: ArchiveRequest): Promise<ArchiveResult> {
     checkMonth(request.month);
@@ -72,7 +99,67 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
       const byPath = new Map(pendingPlans.map(work => [String(work.payload.path), work]));
       // Include plans whose source was already deleted just before a crash.
       const paths = new Set([...await listMarkdown(config.wiki_root), ...byPath.keys()]);
+      const snapshots = new Map<string, ArchiveSnapshot>();
+      const snapshotWork = new Map<string, WorkItem>();
+      const skipped = new Set<string>();
+      const priorSnapshots = (await store.listWork('archive_snapshot', 'pending')).filter(work => work.payload.month === request.month);
+      const allPlans = await store.listWork('archive_plan');
+      for (const work of priorSnapshots) {
+        const path = String(work.payload.path); paths.add(path);
+        if (!byPath.has(path)) {
+          const completed = allPlans.find(plan => plan.payload.month === request.month && plan.payload.path === path && plan.payload.source_digest === work.payload.source_digest);
+          if (completed) byPath.set(path, completed);
+        }
+      }
+      // Freeze every source BEFORE any backlink mutation. Otherwise archiving A
+      // can rewrite B before B's complete original has been preserved.
       for (const path of [...paths].sort()) {
+        try {
+          const source = await readWikiTarget(config.wiki_root, path);
+          const prior = byPath.get(path);
+          const date = canonicalDailyDate(path, source.bytes) ?? (prior?.payload.date as string | undefined);
+          if (!date?.startsWith(request.month) || retainedJournal(source.bytes)) continue;
+          if (issues.some(issue => issue.date === date)) throw new Error('Malformed existing archive record for this date requires reconciliation');
+          const review = await readWikiTarget(config.wiki_root, monthlyPath(request.month));
+          if (!usableReview(review.bytes, request.month)) throw new Error('Usable monthly review is required before deletion');
+          const saved = priorSnapshots.find(work => work.payload.path === path);
+          let snapshot = saved?.payload as unknown as ArchiveSnapshot | undefined;
+          if (!snapshot && prior) snapshot = prior.payload as unknown as ArchivePlan;
+          if (snapshot && source.bytes !== null && source.digest !== await authorizedDigest(snapshot, allPlans)) throw new Error('Source differs from frozen original and authorized backlink changes; deletion deferred');
+          if (!snapshot) {
+            if (source.bytes === null) continue;
+            const refs = facts.filter(fact => fact.journal_date.value === date).map(({ fact_id, revision }) => ({ schema_version: 1 as const, fact_id, revision }));
+            const identity = sha(`${path}:${source.digest}`);
+            const archiveRecord = { schema_version: 1, format: 'daily-journal-archive-v2', archive_id: `archive:${identity}`, date,
+              original_stem: basename(path, '.md'), source_path: path, original_digest: source.digest, original_bytes_base64: source.bytes.toString('base64'),
+              original_markdown: source.bytes.toString('utf8'), locator: `archive:${identity}:${date}`, fact_refs: refs, retention: 'archived', created_at: now().toISOString() };
+            snapshot = { month: request.month, date, path, source_digest: source.digest, original_base64: source.bytes.toString('base64'),
+              archive_path: `${archiveFolder}/v2/${request.month}/${identity}.json`, archive_base64: Buffer.from(JSON.stringify(archiveRecord) + '\n').toString('base64'),
+              archive_operation: `archive-original:${identity}`, fact_refs: refs };
+          }
+          const work: WorkItem = saved ?? { schema_version: 1, work_id: `archive-snapshot:${snapshot.archive_operation}`, kind: 'archive_snapshot', lane: 'history', state: 'pending',
+            payload: snapshot as unknown as Record<string, unknown>, reason: null, migration_key: null, updated_at: now().toISOString() };
+          await store.enqueueWork(work);
+          snapshots.set(path, snapshot); snapshotWork.set(path, work);
+        } catch (error) {
+          const source = await readWikiTarget(config.wiki_root, path), date = canonicalDailyDate(path, source.bytes) ?? (byPath.get(path)?.payload.date as string | undefined);
+          if (!date?.startsWith(request.month)) throw error;
+          skipped.add(path); pages.push({ date, path, status: 'pending', archive_path: null, reason: (error as Error).message });
+        }
+      }
+      // Persist complete original version files for all frozen sources first.
+      for (const [path, snapshot] of snapshots) {
+        try {
+          const output = await writer.writeLocked({ operation_id: snapshot.archive_operation, path: snapshot.archive_path, baseline_digest: 'absent',
+            desired_bytes: Buffer.from(snapshot.archive_base64, 'base64'), fact_refs: snapshot.fact_refs }, lock);
+          if (!success(output)) throw new Error(output.reason ?? 'Full original preservation is pending');
+          const actual = await readWikiTarget(config.wiki_root, snapshot.archive_path);
+          if (actual.digest !== digestBytes(Buffer.from(snapshot.archive_base64, 'base64'))) throw new Error('Saved full original differs from frozen snapshot');
+        } catch (error) { skipped.add(path); pages.push({ date: snapshot.date, path, status: 'pending', archive_path: snapshot.archive_path, reason: (error as Error).message }); }
+      }
+      await options.faultArchive?.('snapshots_saved', request.month);
+      for (const path of [...paths].sort()) {
+        if (skipped.has(path)) continue;
         let date: string | null = null, archivePath: string | null = null;
         try {
           const source = await readWikiTarget(config.wiki_root, path);
@@ -85,15 +172,14 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           if (!usableReview(review.bytes, request.month)) throw new Error('Usable monthly review is required before deletion');
           let work = prior;
           let plan: ArchivePlan;
-          if (work && (source.digest === work.payload.source_digest || source.bytes === null)) plan = work.payload as unknown as ArchivePlan;
+          const snapshot = snapshots.get(path);
+          if (!snapshot) continue;
+          const expectedSource = await authorizedDigest(snapshot, await store.listWork('archive_plan'));
+          if (source.bytes !== null && source.digest !== expectedSource) throw new Error('Source changed after initial snapshot; deletion deferred');
+          if (work) plan = work.payload as unknown as ArchivePlan;
           else {
             if (source.bytes === null) continue;
-            const refs = facts.filter(fact => fact.journal_date.value === date).map(({ fact_id, revision }) => ({ schema_version: 1 as const, fact_id, revision }));
-            const identity = sha(`${path}:${source.digest}`);
-            archivePath = `${archiveFolder}/v2/${request.month}/${identity}.json`;
-            const archiveRecord = { schema_version: 1, format: 'daily-journal-archive-v2', archive_id: `archive:${identity}`, date,
-              original_stem: basename(path, '.md'), source_path: path, original_digest: source.digest, original_bytes_base64: source.bytes.toString('base64'),
-              original_markdown: source.bytes.toString('utf8'), locator: `archive:${identity}:${date}`, fact_refs: refs, retention: 'archived', created_at: now().toISOString() };
+            const identity = sha(`${path}:${snapshot.source_digest}`);
             const links: LinkPlan[] = [];
             for (const other of await listMarkdown(config.wiki_root)) {
               if (other === path) continue;
@@ -101,13 +187,12 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
               if (snapshot.bytes === null) continue;
               const text = snapshot.bytes.toString('utf8'), desired = rewriteLinks(text, path, date, request.month);
               if (desired !== text) {
+                if (skipped.has(other)) throw new Error(`Backlink source has no preserved original: ${other}`);
                 if (!Buffer.from(text).equals(snapshot.bytes)) throw new Error(`Backlink page is not lossless UTF-8: ${other}`);
                 links.push({ path: other, digest: snapshot.digest, desired_base64: Buffer.from(desired).toString('base64'), operation_id: `archive-link:${identity}:${sha(`${other}:${snapshot.digest}`)}` });
               }
             }
-            plan = { month: request.month, date, path, source_digest: source.digest, original_base64: source.bytes.toString('base64'), archive_path: archivePath,
-              archive_base64: Buffer.from(JSON.stringify(archiveRecord) + '\n').toString('base64'), archive_operation: `archive-original:${identity}`,
-              delete_operation: `archive-delete:${identity}`, fact_refs: refs, links };
+            plan = { ...snapshot, delete_operation: `archive-delete:${identity}`, links };
             work = await queuePlan(plan);
             await options.faultArchive?.('plan_saved', path);
           }
@@ -142,6 +227,7 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           await options.faultArchive?.('before_delete', path);
           for (const link of plan.links) {
             const latest = await readWikiTarget(config.wiki_root, link.path);
+            if (latest.bytes === null && await deletedByMonth(link.path, request.month)) continue;
             if (latest.digest !== digestBytes(Buffer.from(link.desired_base64, 'base64'))) throw new Error(`Migrated backlink page changed; deletion deferred: ${link.path}`);
           }
           for (const other of await listMarkdown(config.wiki_root)) {
@@ -150,17 +236,19 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
             if (rewriteLinks(text, path, date, request.month) !== text) throw new Error(`Daily backlink appeared before deletion: ${other}`);
           }
           const current = await readWikiTarget(config.wiki_root, path);
-          if (current.bytes !== null && (current.digest !== plan.source_digest || retainedJournal(current.bytes))) throw new Error('Source changed after preservation; deletion deferred');
+          const deleteDigest = await authorizedDigest(snapshot, await store.listWork('archive_plan'));
+          if (current.bytes !== null && (current.digest !== deleteDigest || retainedJournal(current.bytes))) throw new Error('Source changed after preservation; deletion deferred');
           const finalReview = await readWikiTarget(config.wiki_root, monthlyPath(request.month));
           const reviewLink = plan.links.find(link => link.path === monthlyPath(request.month));
           const expectedReviewDigest = reviewLink ? digestBytes(Buffer.from(reviewLink.desired_base64, 'base64')) : review.digest;
           if (finalReview.digest !== expectedReviewDigest || !usableReview(finalReview.bytes, request.month)) throw new Error('Monthly review changed or disappeared; deletion deferred');
           const archiveCheck = await readWikiTarget(config.wiki_root, plan.archive_path);
           if (archiveCheck.digest !== digestBytes(Buffer.from(plan.archive_base64, 'base64'))) throw new Error('Saved full archive changed or disappeared; deletion deferred');
-          const deleted = await writer.writeLocked({ operation_id: plan.delete_operation, path, baseline_digest: plan.source_digest, desired_bytes: null, fact_refs: plan.fact_refs }, lock);
+          const deleted = await writer.writeLocked({ operation_id: plan.delete_operation, path, baseline_digest: deleteDigest, desired_bytes: null, fact_refs: plan.fact_refs }, lock);
           if (!success(deleted)) { pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: deleted.reason }); continue; }
           await options.faultArchive?.('after_delete', path);
           await store.completeWork(work!.work_id);
+          await store.completeWork(snapshotWork.get(path)!.work_id);
           pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: null });
         } catch (error) { if (date) pages.push({ date, path, status: 'pending', archive_path: archivePath, reason: (error as Error).message }); else throw error; }
       }
