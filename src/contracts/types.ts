@@ -37,7 +37,7 @@ export interface RawFragment extends Versioned { fragment_id: string; locator: s
 export interface CollectionBatch extends Versioned {
   batch_id: string; events: SourceEvent[]; fragments: RawFragment[]; coverage: SourceCoverage[]; checkpoints: SourceCheckpoint[];
 }
-export interface PageBaseline extends Versioned { path: string; digest: string; content: string | null }
+export interface PageBaseline extends Versioned { path: string; digest: string; content: string | null; context_excerpt?: boolean; excerpt_reason?: string | null }
 export interface ReviewChunk extends Versioned {
   chunk_id: string; events: SourceEvent[]; context_events: SourceEvent[]; body_bytes: number;
 }
@@ -189,7 +189,7 @@ export interface LegacyImportResult extends Versioned { migration_key: string; r
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
 export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
-export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string }
+export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[] }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }
 export interface CollectionBudget { max_duration_ms: number; max_bytes: number; max_directory_entries: number }
 export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig }

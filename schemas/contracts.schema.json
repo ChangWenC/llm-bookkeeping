@@ -700,6 +700,19 @@
               "type": "null"
             }
           ]
+        },
+        "context_excerpt": {
+          "type": "boolean"
+        },
+        "excerpt_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
