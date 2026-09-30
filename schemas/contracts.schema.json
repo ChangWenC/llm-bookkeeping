@@ -1436,6 +1436,12 @@
           "items": {
             "$ref": "#/$defs/PageBaseline"
           }
+        },
+        "prepared_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -1475,6 +1481,12 @@
             "partial",
             "unknown"
           ]
+        },
+        "completed_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

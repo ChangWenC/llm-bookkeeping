@@ -113,10 +113,12 @@ export interface ReviewReceipt extends Versioned {
 export interface MonthlyReviewInput extends Versioned {
   month: string; range: TimeRange; facts: FactRevision[]; coverage: SourceCoverage[];
   coverage_status: AnalysisCoverageStatus; manual_baselines: PageBaseline[];
+  prepared_work_ids?: string[];
 }
 export interface MonthlyReviewResult extends Versioned {
   month: string; summary: string; fact_refs: FactRef[];
   supplement_text: string; coverage_status: AnalysisCoverageStatus;
+  completed_work_ids?: string[];
 }
 export interface ReviewBundle extends Versioned {
   bundle_id: string; kind: ReviewKind; lane: Lane; period: string | null; cutoff: string;
