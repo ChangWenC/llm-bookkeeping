@@ -32,7 +32,12 @@ test('CLI typed weekly/monthly/pages publish and all consumers share actual SQLi
   };
   const store = await createStore(c);
   try {
-    const initial = bundle(); await store.saveCollection(collection()); await store.saveBundle(initial);
+    const initial = bundle(), initialCollection = collection();
+    initialCollection.coverage[0].query_range = { ...range, to: '2026-09-30T12:00:00Z' };
+    initialCollection.coverage[0].read_ranges = [initialCollection.coverage[0].query_range];
+    initialCollection.coverage[0].cutoff = '2026-09-30T12:00:00Z';
+    initial.coverage = initialCollection.coverage;
+    await store.saveCollection(initialCollection); await store.saveBundle(initial);
     const daily = result(initial); daily.pages = [];
     daily.candidates[0].content = 'PRIVATE synthetic household detail and parser work';
     await publish(daily);
@@ -44,7 +49,11 @@ test('CLI typed weekly/monthly/pages publish and all consumers share actual SQLi
     const weekly = result(w, 'weekly-cli', false);
     const context = w.analysis_context!;
     weekly.analysis = { schema_version: 1, snapshot: { schema_version: 1, analysis_ref: context.analysis_ref!, week_end: context.week_end, coverage_status: context.coverage_status, observations: context.observation_candidates ?? [], capabilities: [], goal_gaps: [], direction: 'unknown', patterns: ['已投影的合成证据'], validation_action: null }, prior_action_disposition: null, proposed_confirmations: context.observation_candidates?.slice(0, 3).map(item => item.observation_ref) ?? [], freshness_at: '2026-10-05T00:00:00Z' };
-    await publish(weekly); await cli(['consume', '--target', 'all']);
+    await publish(weekly);
+    const weeklyArtifact = (await store.listOutbox()).find(entry => entry.artifact.analysis)!.artifact;
+    assert.deepEqual(weeklyArtifact.affected_dates, []); assert.deepEqual(weeklyArtifact.affected_weeks, []); assert.deepEqual(weeklyArtifact.affected_months, []);
+    assert.ok(!(await store.listWork('monthly_display', 'pending')).some(work => work.payload.month === '2026-10'));
+    await cli(['consume', '--target', 'all']);
     assert.equal(analyticsRepository(store).snapshots().length, 1);
     const oldObservation = analyticsRepository(store).observations()[0];
     const reviewPath = join(root, 'confirmation.json');
