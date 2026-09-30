@@ -8,7 +8,7 @@ import { readPageBaseline } from './baselines.ts';
 import { coverageStatus, factKey } from '../analytics/model.ts';
 import { addArchiveContexts } from './archives.ts';
 const gap = (reason: string): CoverageGap => ({ schema_version: 1, range: null, reason, locator: null, resumable: true });
-function frozen(store: Store, request: PrepareRequest, period: string, initial: FactRef[], work_ids: string[]): {
+function frozen(store: Store, request: PrepareRequest, period: string, initial: FactRef[], work_ids: string[], context_work_ids: string[] = []): {
     refs: FactRef[];
     work_ids: string[];
     page: FactsPage;
@@ -22,7 +22,7 @@ function frozen(store: Store, request: PrepareRequest, period: string, initial: 
         throw new Error('Continuation requires frozen fact_snapshot');
     let id = request.fact_snapshot;
     if (!id)
-        id = store.freezeFactMaterial(request.kind as 'weekly' | 'monthly', period, request.cutoff, initial.sort((a, b) => factKey(a).localeCompare(factKey(b))), work_ids);
+        id = store.freezeFactMaterial(request.kind as 'weekly' | 'monthly', period, request.cutoff, initial.sort((a, b) => factKey(a).localeCompare(factKey(b))), work_ids, context_work_ids);
     const snapshot = store.getFactMaterial(id);
     if (!snapshot || snapshot.kind !== request.kind || snapshot.period !== period || snapshot.cutoff !== request.cutoff)
         throw new Error('Fact snapshot scope/cutoff mismatch; prepare only this page again');
@@ -148,7 +148,7 @@ export async function prepareMonthlyBundle(store: Store, config: BookkeepingConf
         }
     }
     const atCutoff = new Set(store.effectiveFactRefsAt(request.cutoff).map(factKey));
-    const snapshot = frozen(store, request, month, context.facts.filter(fact => atCutoff.has(factKey(fact))).map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), await workIds(store, 'prepare_monthly', month, request.cutoff));
+    const snapshot = frozen(store, request, month, context.facts.filter(fact => atCutoff.has(factKey(fact))).map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), await workIds(store, 'prepare_monthly', month, request.cutoff), await workIds(store, 'archive_context', month, request.cutoff));
     context.facts_page = snapshot.page;
     const material = new Map(store.lookupFactRevisions(snapshot.refs).map(fact => [factKey(fact), fact])), coverage = context.coverage;
     context.facts = [];

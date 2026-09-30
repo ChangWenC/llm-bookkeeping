@@ -245,7 +245,7 @@ export class SqliteStore implements Store {
             return ids;
         });
     }
-    freezeFactMaterial(kind: 'weekly' | 'monthly', period: string, cutoff: string, refs: FactRef[], work_ids: string[] = []): string { utc(cutoff); const value = { schema_version: 1, kind, period, cutoff, refs, work_ids }; const id = 'fact-material:' + digest(canonical(value)); this.immutable('fact_material_snapshots', id, value); return id; }
+    freezeFactMaterial(kind: 'weekly' | 'monthly', period: string, cutoff: string, refs: FactRef[], work_ids: string[] = [], context_work_ids: string[] = []): string { utc(cutoff); const value = { schema_version: 1, kind, period, cutoff, refs, work_ids, context_work_ids }; const id = 'fact-material:' + digest(canonical(value)); this.immutable('fact_material_snapshots', id, value); return id; }
     getFactMaterial(id: string): {
         kind: 'weekly' | 'monthly';
         period: string;

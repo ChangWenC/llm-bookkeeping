@@ -38,6 +38,9 @@ test('zero-fact distinct original and explicit page material accumulates, exact 
     assert.deepEqual(new Set(artifact.monthly_review!.completed_archive_context_ids), new Set(['original-one', 'original-two']));
     const replay = await reviewer.accept({ ...monthly(b, 'two'), result_id: 'different-model-result' });
     assert(replay.reused);
+    await s.completeWork('original-two');
+    const fresh = (await reviewer.prepare({ kind: 'monthly', lane: 'history', period: '2026-09', cutoff }))[0];
+    assert.deepEqual(fresh.monthly_context!.archive_contexts!.map(item => item.work_id), ['late-backdated']);
     const path = 'wiki/projects/context.md';
     await mkdir(dirname(join(c.wiki_root, path)), { recursive: true });
     await writeFile(join(c.wiki_root, path), 'Explicit context third');

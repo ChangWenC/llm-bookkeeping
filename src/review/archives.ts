@@ -16,7 +16,7 @@ export async function addArchiveContexts(store: SqliteStore, config: Bookkeeping
     if (!Number.isSafeInteger(offset) || offset < 0)
         throw new Error('archive_context_offset must be nonnegative');
     const all = await store.listWork('archive_context');
-    const ids = store.freezeArchiveWork(context.facts_page!.snapshot_id, all.filter(item => item.payload.month === context.month && Date.parse(item.updated_at) <= Date.parse(bundle.cutoff)).map(item => item.work_id));
+    const ids = store.freezeArchiveWork(context.facts_page!.snapshot_id, all.filter(item => item.state === 'pending' && item.payload.month === context.month && Date.parse(item.updated_at) <= Date.parse(bundle.cutoff)).map(item => item.work_id));
     if (offset > ids.length)
         throw new Error('archive_context_offset exceeds frozen context list');
     const work = new Map(all.map(item => [item.work_id, item]));
