@@ -453,6 +453,10 @@ export class FileAdapter implements SourceAdapter {
           );
           readStart = tail.start;
           buffer = tail.buffer;
+          // Reverse reading may stop before its planned start. The entire actual
+          // unread prefix remains history's responsibility, including a newline
+          // boundary where no partial-line adjustment will run below.
+          historyEnd = Math.max(historyEnd, readStart);
           if (tail.exhausted) gaps.push(gap("tail_budget_exhausted", p));
         } else buffer = await read(start, Math.min(STEP, end - start));
         // Persist the complete unparsed suffix in the atomic checkpoint. The next range
