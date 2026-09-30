@@ -20,8 +20,9 @@ async function fixture(t: test.TestContext) {
   ]);
   for (const [path, bytes] of originals) await writeFile(join(config.wiki_root, path), bytes);
   await writeFile(join(dir, 'reviews/回顾_2026_08.md'), '# August\n\n实质合成回顾正文。\n');
-  const store = await createStore(config); t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
-  return { config, store, originals };
+  const f = { config, store: await createStore(config), originals };
+  t.after(async () => { f.store.close(); await rm(root, { recursive: true, force: true }); });
+  return f;
 }
 async function preserved(f: Awaited<ReturnType<typeof fixture>>) {
   const records = await readArchiveRecords(f.config);
@@ -102,5 +103,37 @@ test('deletion registered and plan completed before snapshot completion resumes 
   const result = await createArchiveService(f.store, f.config, { now }).run({ month: '2026-08', mode: 'apply' });
   assert.equal(result.status, 'complete');
   assert.equal((await f.store.listWork('archive_snapshot', 'pending')).length, 0);
+  await preserved(f);
+});
+test('three mutually linked sources and monthly backlinks accept later exact same-month chains after every link phase crashes', async t => {
+  const f = await fixture(t), third = 'wiki/personal/journals/日记_2026_08_03.md';
+  for (const [path, original] of f.originals) {
+    const bytes = original + '[[日记_2026_08_03|第三篇原描述]]\n';
+    f.originals.set(path, bytes); await writeFile(join(f.config.wiki_root, path), bytes);
+  }
+  const thirdBytes = '# Third\n[[日记_2026_08_01|A原描述]] [[日记_2026_08_02|B原描述]]\n';
+  f.originals.set(third, thirdBytes); await writeFile(join(f.config.wiki_root, third), thirdBytes);
+  const monthly = join(f.config.wiki_root, 'wiki/personal/journals/reviews/回顾_2026_08.md');
+  await writeFile(monthly, '# August\n实质人工摘要：[[日记_2026_08_01|A]] [[日记_2026_08_02|B]] [[日记_2026_08_03|C]]\n');
+  const interrupted = await createArchiveService(f.store, f.config, { now, faultArchive(stage) { if (stage === 'links_saved') throw new Error('Every link phase interrupted'); } }).run({ month: '2026-08', mode: 'apply' });
+  assert.equal(interrupted.status, 'pending');
+  assert.equal((await readArchiveRecords(f.config)).length, 3);
+  f.store.close(); f.store = await createStore(f.config);
+  const resumed = await createArchiveService(f.store, f.config, { now }).run({ month: '2026-08', mode: 'apply' });
+  assert.equal(resumed.status, 'complete', JSON.stringify(resumed));
+  for (const record of await readArchiveRecords(f.config)) assert.equal(Buffer.from(String(record.record.original_bytes_base64), 'base64').toString(), f.originals.get(String(record.record.source_path)));
+  for (const path of f.originals.keys()) await assert.rejects(readFile(join(f.config.wiki_root, path)), { code: 'ENOENT' });
+  assert.ok((await readFile(monthly, 'utf8')).includes('[[回顾_2026_08|C]]'));
+});
+test('manual monthly body edits after multiple authorized link mutations remain conflicts rather than chain evidence', async t => {
+  const f = await fixture(t), monthly = join(f.config.wiki_root, 'wiki/personal/journals/reviews/回顾_2026_08.md');
+  await writeFile(monthly, '# August\n实质摘要：[[日记_2026_08_01|A]] [[日记_2026_08_02|B]]\n');
+  await createArchiveService(f.store, f.config, { now, faultArchive(stage) { if (stage === 'links_saved') throw new Error('Interrupt every plan'); } }).run({ month: '2026-08', mode: 'apply' });
+  const manual = (await readFile(monthly, 'utf8')) + '\n人工刚完成的月回顾更正。\n'; await writeFile(monthly, manual);
+  const resumed = await createArchiveService(f.store, f.config, { now }).run({ month: '2026-08', mode: 'apply' });
+  assert.equal(resumed.status, 'pending');
+  assert.ok(resumed.pages.every(page => page.status === 'pending'));
+  assert.equal(await readFile(monthly, 'utf8'), manual);
+  for (const path of f.originals.keys()) assert.ok(await readFile(join(f.config.wiki_root, path)));
   await preserved(f);
 });

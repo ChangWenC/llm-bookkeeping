@@ -40,7 +40,7 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
       payload: plan as unknown as Record<string, unknown>, reason: null, migration_key: null, updated_at: now().toISOString() };
     await store.enqueueWork(item); return item;
   }
-  async function authorizedDigest(snapshot: ArchiveSnapshot, plans: WorkItem[]): Promise<string> {
+  async function authorizedDigest(snapshot: Pick<ArchiveSnapshot, 'month' | 'path' | 'source_digest'>, plans: WorkItem[]): Promise<string> {
     const allowed = new Map(plans.filter(work => work.payload.month === snapshot.month).flatMap(work =>
       ((work.payload.links ?? []) as LinkPlan[]).filter(link => link.path === snapshot.path).map(link => [link.operation_id, link] as const)));
     let digest = snapshot.source_digest;
@@ -228,7 +228,8 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           for (const link of plan.links) {
             const latest = await readWikiTarget(config.wiki_root, link.path);
             if (latest.bytes === null && await deletedByMonth(link.path, request.month)) continue;
-            if (latest.digest !== digestBytes(Buffer.from(link.desired_base64, 'base64'))) throw new Error(`Migrated backlink page changed; deletion deferred: ${link.path}`);
+            const expectedLinkDigest = await authorizedDigest({ month: request.month, path: link.path, source_digest: link.digest }, await store.listWork('archive_plan'));
+            if (latest.digest !== expectedLinkDigest) throw new Error(`Migrated backlink page changed; deletion deferred: ${link.path}`);
           }
           for (const other of await listMarkdown(config.wiki_root)) {
             if (other === path) continue;
@@ -240,7 +241,8 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           if (current.bytes !== null && (current.digest !== deleteDigest || retainedJournal(current.bytes))) throw new Error('Source changed after preservation; deletion deferred');
           const finalReview = await readWikiTarget(config.wiki_root, monthlyPath(request.month));
           const reviewLink = plan.links.find(link => link.path === monthlyPath(request.month));
-          const expectedReviewDigest = reviewLink ? digestBytes(Buffer.from(reviewLink.desired_base64, 'base64')) : review.digest;
+          const expectedReviewDigest = await authorizedDigest({ month: request.month, path: monthlyPath(request.month),
+            source_digest: reviewLink?.digest ?? review.digest }, await store.listWork('archive_plan'));
           if (finalReview.digest !== expectedReviewDigest || !usableReview(finalReview.bytes, request.month)) throw new Error('Monthly review changed or disappeared; deletion deferred');
           const archiveCheck = await readWikiTarget(config.wiki_root, plan.archive_path);
           if (archiveCheck.digest !== digestBytes(Buffer.from(plan.archive_base64, 'base64'))) throw new Error('Saved full archive changed or disappeared; deletion deferred');
