@@ -5,12 +5,9 @@ import { isAbsolute, join, resolve } from 'node:path';
 import type { BookkeepingConfig, Store, CollectionBatch, SourceCheckpoint, Lane, EventQuery, SourceEvent, TimeRange, SourceCoverage, ReviewBundle, ReviewChunk, ReviewResult, ReviewCommit, FactRevision, FactRef, FactQuery, JournalPatch, FileStatus, OutboxEntry, FactArtifact, ConsumerAck, FileIntent, WorkItem, LegacyImportBatch, LegacyImportResult } from '../contracts/types.ts';
 import { validateReviewResult } from '../contracts/validation.ts';
 
-export function canonical(value: unknown): string {
-  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (value !== null && typeof value === 'object') return '{' + Object.keys(value).sort().filter(k => (value as any)[k] !== undefined).map(k => JSON.stringify(k) + ':' + canonical((value as any)[k])).join(',') + '}';
-  return JSON.stringify(value);
-}
-export function digest(value: string | Uint8Array): string { return createHash('sha256').update(value).digest('hex'); }
+export { canonical, digest } from '../analytics/serialization.ts';
+import { canonical, digest } from '../analytics/serialization.ts';
+import { AnalyticsRepository, type AnalyticsPort } from './analytics.ts';
 const parse = <T>(row: any): T => JSON.parse(row.json);
 const refKey = (ref: FactRef) => `${ref.fact_id}:${ref.revision}`;
 const utc = (value: string) => { if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Error('Invalid UTC timestamp: ' + value); };
@@ -61,6 +58,9 @@ export interface StoreOptions { /** Synchronous observability hook; also enables
 
 export class SqliteStore implements Store {
   readonly db: DatabaseSync;
+  private analyticsRepositoryInstance?: AnalyticsRepository;
+  analyticsPort(): AnalyticsPort { return this.analyticsRepositoryInstance ??= new AnalyticsRepository(this.db); }
+  analyticsHistoryRepository(): AnalyticsRepository { this.analyticsPort(); return this.analyticsRepositoryInstance!; }
   readonly path: string;
   private readonly options: StoreOptions;
   private readonly journalTimezone: string;
