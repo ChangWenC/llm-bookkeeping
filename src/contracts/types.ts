@@ -274,7 +274,7 @@ export interface Store {
   readEffectiveFacts(query: FactQuery): Promise<FactRevision[]>;
   listOutbox(status?: 'pending' | 'ready'): Promise<OutboxEntry[]>;
   markExportReady(batch_id: string, export_path: string): Promise<void>;
-  listReadyBatches(consumer: string): Promise<FactArtifact[]>;
+  listReadyBatches(consumer: string, limit?: number, after_batch_id?: string): Promise<FactArtifact[]>;
   acknowledgeConsumer(ack: ConsumerAck): Promise<void>;
   saveFileIntent(intent: FileIntent): Promise<void>;
   getFileIntent(operation_id: string): Promise<FileIntent | null>;

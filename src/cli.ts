@@ -80,7 +80,7 @@ export function parseArgs(args: string[]): ParsedCommand {
     case 'publish':
       if (Boolean(options.input) === Boolean(options.resume)) throw new InputError('publish requires exactly one of --input or --resume');
       break;
-    case 'consume': oneOf(options, 'target', ['analytics', 'monthly', 'index', 'all']); break;
+    case 'consume': oneOf(options, 'target', ['analytics', 'monthly', 'index', 'evidence', 'all']); break;
     case 'archive':
       month(required(options, 'month'));
       if (Boolean(options.report) === Boolean(options.apply)) throw new InputError('archive requires exactly one of --report or --apply');
@@ -262,7 +262,7 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
 
 async function consumeCommand(parsed: ParsedCommand, services: RuntimeServices) {
   const target = required(parsed.options, 'target');
-  const expected = target === 'all' ? ['analytics', 'monthly', 'index'] : [target];
+  const expected = target === 'all' ? ['analytics', 'monthly', 'index', 'evidence'] : [target];
   const outcomes = [];
   for (const name of expected) {
     const consumer = services.consumers.find(item => item.target === name);

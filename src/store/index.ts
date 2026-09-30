@@ -292,7 +292,12 @@ export class SqliteStore implements Store {
             throw new Error('Immutable export path conflict');
         this.db.prepare("UPDATE outbox SET status='ready',export_path=? WHERE id=?").run(path, id);
     }
-    async listReadyBatches(consumer: string): Promise<FactArtifact[]> { return this.db.prepare("SELECT json FROM outbox o WHERE status='ready' AND NOT EXISTS(SELECT 1 FROM acks a WHERE a.batch_id=o.id AND a.consumer=?) ORDER BY rowid").all(consumer).map(parse<FactArtifact>); }
+    async listReadyBatches(consumer: string, limit?: number, after_batch_id?: string): Promise<FactArtifact[]> {
+        if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1))
+            throw new Error('Ready batch limit must be a positive safe integer');
+        return this.db.prepare("SELECT json FROM outbox o WHERE status='ready' AND o.rowid>COALESCE((SELECT rowid FROM outbox WHERE id=?),0) AND NOT EXISTS(SELECT 1 FROM acks a WHERE a.batch_id=o.id AND a.consumer=?) ORDER BY o.rowid LIMIT ?")
+            .all(after_batch_id ?? null, consumer, limit ?? -1).map(parse<FactArtifact>);
+    }
     async acknowledgeConsumer(ack: ConsumerAck) {
         version(ack);
         utc(ack.acknowledged_at);
