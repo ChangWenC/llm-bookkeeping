@@ -99,3 +99,25 @@ test('monthly display snapshot refreshes each month once and never acknowledges 
   assert.equal((await f.store.listReadyBatches('monthly-display')).length, 0);
   assert.equal(reads, 2);
 });
+
+test('coalesced monthly display failure remains local while another captured month acknowledges', async t => {
+  const f = await fixture(t);
+  await f.seed('# 七月手工回顾\n');
+  const augustPath = join(f.config.wiki_root, 'wiki/personal/journals/reviews/回顾_2026_08.md');
+  await writeFile(augustPath, '# 八月手工回顾\n');
+  await imported(f.store, fact('fact:failed-july', 'July synthetic supplement'), 'failed-july');
+  const august = fact('fact:successful-august', 'August synthetic supplement');
+  august.journal_date.value = '2026-08-15';
+  await imported(f.store, august, 'successful-august');
+  await createPublisher(f.store, f.config).exportFacts();
+  const result = await createPublisher(f.store, f.config, { fault(stage, operation) {
+    if (stage === 'before_target' && operation.startsWith('monthly-supplement:2026-07:')) throw new Error('Synthetic July disk fault');
+  } }).resume();
+  assert.ok(result.pending.some(reason => reason.includes('monthly-display:2026-07')));
+  const remaining = await f.store.listReadyBatches('monthly-display');
+  assert.equal(remaining.length, 1);
+  assert.ok(remaining[0].affected_dates.includes('2026-07-15'));
+  assert.ok((await readFile(augustPath, 'utf8')).includes('August synthetic supplement'));
+  await createPublisher(f.store, f.config).resume();
+  assert.equal((await f.store.listReadyBatches('monthly-display')).length, 0);
+});

@@ -45,7 +45,7 @@ Its seven scenarios cover native mirror versus true repeated text, stable recapt
 
 Capture exceptions persist unavailable/partial coverage and collection_retry work. Material/backup/state paths cannot overlap Wiki, raw source roots or iCloud, including canonical existing ancestors. prepare writes compact immutable bundles and an atomic manifest; final file bytes cannot exceed configured bundle_bytes. Explicit finite review and collection budgets can exceed defaults.
 
-Daily capture/review/export/publication and source-independent facts/status/backup/restore are integrated. Monthly/archive/index and manifest import/migration now invoke concrete services. Typed weekly/monthly semantic acceptance and health validation are enabled only after their delivered Store/Analytics implementations. Synthetic integration evidence is separate from production and scheduled-run acceptance.
+Daily capture/review/export/publication and source-independent facts/status/backup/restore are integrated. Monthly/archive/index and manifest import/migration now invoke concrete services. Typed weekly/monthly semantic acceptance, all three consumers, Analytics review and changed/all health validation now call the delivered implementations. Synthetic integration evidence is separate from production and scheduled-run acceptance.
 
 ## M2 service composition
 
@@ -53,7 +53,7 @@ Daily capture/review/export/publication and source-independent facts/status/back
 
 `prepare --pages /absolute/page-targets.json` accepts `{schema_version:1,paths:["wiki/projects/项目_example.md","log.md"]}`. These are explicit Wiki targets, not implicit cwd ownership. Raw, traversal, symlink and outside paths are rejected; bounded/excerpt baselines are owned by Reviewer. Every accepted page patch still goes through the common Publisher/SafeWikiWriter lock, backups and recovery.
 
-Analytics, migration and health validation are composed from their concrete modules when available; missing modules remain explicit execution failures during this staged implementation. The temporary M1 semantic payload guard is removed only after Store's actual typed payload persistence is delivered.
+Analytics, migration and health validation now invoke concrete factories; the temporary M1 semantic payload guard is removed. This verifies delivered behavior and does not claim the remaining SPEC7 capability/pilot/decision acceptance or production cutover complete.
 
 ## Migration and monthly recovery
 
@@ -62,3 +62,5 @@ Analytics, migration and health validation are composed from their concrete modu
 Legacy archive assertions are existing monthly base context. They are not replayed as newly added supplement prose. Effective replace/retract refreshes derived supplements, and a withdrawn summary reference produces a visible invalidation notice and durable recomputation work. Successful typed monthly publication completes only the explicit reviewed preparation IDs; unread, omitted and later work remains pending. New monthly pages use journal/private/stable/pinned metadata.
 
 Group history first enumerates exact core windows, then independently bounded participation context windows. Dense surrounding context cannot poison core paging. Remaining context/irreducible second windows stay explicit partial/import debt. Pinned chats apply independently of discovery; ignored/service chats remain excluded. Display aliases require explicit verified configuration and never override native IDs.
+
+Frozen weekly/monthly fact pages: first `prepare` returns typed `facts_page` with `snapshot_id`, original `cutoff`, and `next_offset`. Continue with `prepare --kind monthly --lane history --period YYYY-MM --fact-snapshot SNAPSHOT --fact-offset NEXT --cutoff ORIGINAL_UTC --output NEW_DIR`. Keep the snapshot and cutoff unchanged; a new first page creates a new ref snapshot. Facts pages do not certify complete coverage or clear unread task IDs.

@@ -3,6 +3,7 @@ import type { BookkeepingConfig, Consumer, ConsumerOutcome, Store, WorkItem } fr
 import { acquireWikiLock, readWikiTarget } from '../../publish/index.ts';
 import { sha } from '../archive/records.ts';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_INDEX_COMMANDS } from '../../config.ts';
 
 export interface PublicCommand { executable: string; args: string[]; timeout_ms?: number }
 export interface CommandResult { exit_code: number; stdout: string; stderr: string }
@@ -24,7 +25,7 @@ export const runPublicCommand: CommandRunner = (command, context) => new Promise
   child.on('close', (code, signal) => { clearTimeout(timer); if (killTimer) clearTimeout(killTimer); resolve({ exit_code: code ?? 1, stdout, stderr: signal ? `${stderr}\nCommand terminated: ${signal}` : stderr }); });
 });
 export function createIndexConsumer(store: Store, config: BookkeepingConfig, options: IndexOptions = {}): Consumer {
-  const commands = options.commands ?? { lint: { executable: process.execPath, args: ['scripts/lint.mjs'] }, build_index: { executable: 'python3', args: ['scripts/build_index.py'] }, qmd: { executable: 'qmd', args: ['update'] } };
+  const commands = options.commands ?? config.index_commands ?? DEFAULT_INDEX_COMMANDS;
   const runner = options.runner ?? runPublicCommand, now = () => (options.now?.() ?? new Date()).toISOString();
   return { target: 'index', async consume(): Promise<ConsumerOutcome> {
     const work = await store.listWork('index', 'pending');
