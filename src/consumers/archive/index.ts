@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import type { ArchiveRequest, BookkeepingConfig, Store, FactRef, FileOutcome, WorkItem } from '../../contracts/types.ts';
+import type { ArchiveRequest, BookkeepingConfig, Store, FactRef, FileOutcome, FileIntent, WorkItem } from '../../contracts/types.ts';
 import { createSafeWikiWriter, acquireWikiLock, readWikiTarget, digestBytes } from '../../publish/index.ts';
 import { canonicalDailyDate, retainedJournal, retainedWindowStart, frontmatterScalar } from '../../publish/journals.ts';
 import { archiveFolder, sha, checkMonth, monthlyPath, effectiveMonthFacts, listMarkdown, readArchiveRecords, type ArchiveReadIssue } from './records.ts';
@@ -17,6 +17,11 @@ export interface ArchiveOptions extends WriterOptions {
   faultArchive?: (stage: 'snapshots_saved' | 'plan_saved' | 'archive_saved' | 'links_saved' | 'before_delete' | 'after_delete', path: string) => void | Promise<void>;
 }
 const success = (outcome: FileOutcome) => outcome.status === 'applied' || outcome.status === 'noop';
+/** A baseline-specific retry remains owned by the original durable exact plan. */
+export function archiveDeleteOperationMatches(plan: { path: string; delete_operation: string }, intent: FileIntent): boolean {
+  return intent.path === plan.path && intent.desired_bytes_base64 === null && intent.desired_digest === 'absent' &&
+    (intent.operation_id === plan.delete_operation || intent.operation_id === `${plan.delete_operation}:${sha(intent.baseline_digest)}`);
+}
 const dailyTargets = (path: string): Set<string> => {
   const stem = path.replace(/\.md$/, '');
   return new Set([basename(stem), stem, stem.replace(/^wiki\//, ''), stem.replace(/^wiki\/personal\//, ''), `${basename(stem)}.md`, path]);
@@ -260,8 +265,21 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           if (finalReview.digest !== expectedReviewDigest || !usableReview(finalReview.bytes, request.month)) throw new Error('Monthly review changed or disappeared; deletion deferred');
           const archiveCheck = await readWikiTarget(config.wiki_root, plan.archive_path);
           if (archiveCheck.digest !== digestBytes(Buffer.from(plan.archive_base64, 'base64'))) throw new Error('Saved full archive changed or disappeared; deletion deferred');
-          const deleted = await writer.writeLocked({ operation_id: plan.delete_operation, path, baseline_digest: deleteDigest, desired_bytes: null, fact_refs: plan.fact_refs, archive_delete_verified: true }, lock);
+          let deleteOperation = plan.delete_operation;
+          const firstDelete = await store.getFileIntent(deleteOperation);
+          if (current.bytes !== null && firstDelete && firstDelete.state !== 'applied' && firstDelete.baseline_digest !== deleteDigest) {
+            if (!archiveDeleteOperationMatches(plan, firstDelete) || firstDelete.backup_bytes_base64 === null || digestBytes(Buffer.from(firstDelete.backup_bytes_base64, 'base64')) !== firstDelete.baseline_digest)
+              throw new Error('Corrupt saved archive deletion intent');
+            // All semantic dependencies and the source's complete authorized
+            // chain were checked above. Preserve the immutable old intent and
+            // save a stable retry for ONLY this proved new baseline.
+            deleteOperation = `${plan.delete_operation}:${sha(deleteDigest)}`;
+          }
+          const deleted = await writer.writeLocked({ operation_id: deleteOperation, path, baseline_digest: deleteDigest, desired_bytes: null, fact_refs: plan.fact_refs, archive_delete_verified: true }, lock);
           if (!success(deleted)) { pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: deleted.reason }); continue; }
+          // Once absence is real, every previous baseline-specific attempt can
+          // repair its registration. Nothing here authorizes another unlink.
+          for (const intent of await store.listFileIntents()) if (archiveDeleteOperationMatches(plan, intent)) await writer.recoverLocked(intent, lock);
           await options.faultArchive?.('after_delete', path);
           await store.completeWork(work!.work_id);
           await store.completeWork(snapshotWork.get(path)!.work_id);

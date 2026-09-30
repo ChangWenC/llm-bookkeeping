@@ -9,6 +9,7 @@ import { createArchiveService, readArchiveRecords } from '../../src/consumers/ar
 import { config as base } from '../../test/fixtures/basic.ts';
 import type { ArchiveOptions } from '../../src/consumers/archive/index.ts';
 import { digestBytes } from '../../src/publish/files.ts';
+import { createPublisher } from '../../src/publish/index.ts';
 const now = () => new Date('2026-10-01T12:00:00Z');
 async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'bookkeeping-crosslinks-'));
@@ -135,5 +136,52 @@ test('manual monthly body edits after multiple authorized link mutations remain 
   assert.ok(resumed.pages.every(page => page.status === 'pending'));
   assert.equal(await readFile(monthly, 'utf8'), manual);
   for (const path of f.originals.keys()) assert.ok(await readFile(join(f.config.wiki_root, path)));
+  await preserved(f);
+});
+test('prepared deletes survive later authorized peer rewrites and another crash in a stable derived delete intent', async t => {
+  const f = await fixture(t), monthly = 'wiki/personal/journals/reviews/回顾_2026_08.md';
+  await writeFile(join(f.config.wiki_root, monthly), '# August\n实质摘要 [[日记_2026_08_01|A]] [[日记_2026_08_02|B]]\n');
+  const interrupted = await createArchiveService(f.store, f.config, { now, fault(stage, id) {
+    if (stage === 'after_intent' && id.startsWith('archive-delete:')) throw new Error('Every delete intent interrupted');
+  } }).run({ month: '2026-08', mode: 'apply' });
+  assert.equal(interrupted.status, 'pending'); await preserved(f);
+  const old = (await f.store.listFileIntents()).filter(intent => intent.operation_id.startsWith('archive-delete:'));
+  assert.equal(old.length, 2); assert.ok(old.every(intent => intent.state === 'prepared'));
+  const firstPath = [...f.originals.keys()][0], authorizedBytes = await readFile(join(f.config.wiki_root, firstPath));
+  assert.notEqual(digestBytes(authorizedBytes), old.find(intent => intent.path === firstPath)!.baseline_digest);
+  const reviewBytes = await readFile(join(f.config.wiki_root, monthly)); await rm(join(f.config.wiki_root, monthly));
+  const blocked = await createPublisher(f.store, f.config, { now }).resume();
+  assert.equal(blocked.files.filter(file => file.operation_id.startsWith('archive-delete:') && file.status === 'pending').length, 2);
+  assert.deepEqual(await readFile(join(f.config.wiki_root, firstPath)), authorizedBytes);
+  await writeFile(join(f.config.wiki_root, monthly), reviewBytes);
+  const retry = await createPublisher(f.store, f.config, { now, fault(stage, id) {
+    if (stage === 'after_intent' && /^archive-delete:[a-f0-9]{64}:[a-f0-9]{64}$/.test(id)) throw new Error('Derived delete interrupted');
+  } }).resume();
+  assert.ok(retry.files.some(file => /^archive-delete:[a-f0-9]{64}:[a-f0-9]{64}$/.test(file.operation_id) && file.status === 'pending'));
+  assert.deepEqual(await readFile(join(f.config.wiki_root, firstPath)), authorizedBytes);
+  f.store.close(); f.store = await createStore(f.config);
+  const completed = await createPublisher(f.store, f.config, { now }).resume();
+  assert.ok(!completed.files.some(file => file.operation_id.startsWith('archive-delete:') && ['pending', 'conflict'].includes(file.status)), JSON.stringify(completed.files));
+  const all = (await f.store.listFileIntents()).filter(intent => intent.operation_id.startsWith('archive-delete:'));
+  assert.equal(all.length, 3); assert.ok(all.every(intent => intent.state === 'applied'));
+  for (const previous of old) {
+    const current = all.find(intent => intent.operation_id === previous.operation_id)!;
+    assert.equal(current.baseline_digest, previous.baseline_digest); assert.equal(current.backup_bytes_base64, previous.backup_bytes_base64);
+  }
+  assert.equal((await f.store.listWork('archive_plan', 'pending')).length, 0);
+  for (const path of f.originals.keys()) await assert.rejects(readFile(join(f.config.wiki_root, path)), { code: 'ENOENT' });
+  await preserved(f);
+});
+test('a manual delta after prepared deletes cannot become a derived authorized deletion baseline', async t => {
+  const f = await fixture(t);
+  await createArchiveService(f.store, f.config, { now, fault(stage, id) {
+    if (stage === 'after_intent' && id.startsWith('archive-delete:')) throw new Error('Every delete intent interrupted');
+  } }).run({ month: '2026-08', mode: 'apply' });
+  const path = [...f.originals.keys()][0], manual = (await readFile(join(f.config.wiki_root, path), 'utf8')) + '\n人工新增正文。\n';
+  await writeFile(join(f.config.wiki_root, path), manual);
+  const result = await createPublisher(f.store, f.config, { now }).resume();
+  assert.ok(result.files.some(file => file.operation_id.startsWith('archive-delete:') && file.status === 'pending'));
+  assert.equal(await readFile(join(f.config.wiki_root, path), 'utf8'), manual);
+  assert.ok(!(await f.store.listFileIntents()).some(intent => /^archive-delete:[a-f0-9]{64}:[a-f0-9]{64}$/.test(intent.operation_id)));
   await preserved(f);
 });

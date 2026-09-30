@@ -175,22 +175,35 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     const deferred = outcomes.filter(outcome => outcome.status === 'pending' && outcome.operation_id.startsWith('archive-delete:'));
     if (deferred.length) {
       const plans = await store.listWork('archive_plan');
-      const months = new Set(plans.filter(work => deferred.some(outcome => outcome.operation_id === work.payload.delete_operation && outcome.path === work.payload.path))
+      const { createArchiveService, archiveDeleteOperationMatches } = await import('../consumers/archive/index.ts');
+      const matches = (work: typeof plans[number], outcome: FileOutcome) => {
+        const intent = intents.find(intent => intent.operation_id === outcome.operation_id);
+        return intent && typeof work.payload.path === 'string' && typeof work.payload.delete_operation === 'string' &&
+          archiveDeleteOperationMatches({ path: work.payload.path, delete_operation: work.payload.delete_operation }, intent);
+      };
+      const months = new Set(plans.filter(work => deferred.some(outcome => matches(work, outcome)))
         .map(work => String(work.payload.month)));
-      const { createArchiveService } = await import('../consumers/archive/index.ts');
       for (const month of months) {
         try {
-          const resumePaths = deferred.filter(outcome => plans.some(work => work.payload.month === month && work.payload.delete_operation === outcome.operation_id && work.payload.path === outcome.path)).map(outcome => outcome.path);
+          const resumePaths = deferred.filter(outcome => plans.some(work => work.payload.month === month && matches(work, outcome))).map(outcome => outcome.path);
           const archived = await createArchiveService(store, config, { ...options, resumePaths }).run({ month, mode: 'apply' });
           for (const outcome of deferred) {
-            const plan = plans.find(work => work.payload.month === month && work.payload.delete_operation === outcome.operation_id && work.payload.path === outcome.path);
+            const plan = plans.find(work => work.payload.month === month && matches(work, outcome));
             if (!plan) continue;
             const intent = await store.getFileIntent(outcome.operation_id);
             const page = archived.pages.find(page => page.path === outcome.path);
             if (intent?.state === 'applied') { outcome.status = 'applied'; outcome.reason = null; }
             else outcome.reason = page?.reason ?? archived.reason ?? outcome.reason;
           }
-        } catch (error) { for (const outcome of deferred) if (plans.some(work => work.payload.month === month && work.payload.delete_operation === outcome.operation_id)) outcome.reason = message(error); }
+          for (const intent of await store.listFileIntents()) {
+            if (outcomes.some(outcome => outcome.operation_id === intent.operation_id)) continue;
+            if (!plans.some(work => work.payload.month === month && typeof work.payload.path === 'string' && typeof work.payload.delete_operation === 'string' &&
+              archiveDeleteOperationMatches({ path: work.payload.path, delete_operation: work.payload.delete_operation }, intent))) continue;
+            const state = intent.state === 'applied' ? 'applied' : intent.state === 'conflict' ? 'conflict' : 'pending';
+            const reason = state === 'applied' ? null : intent.reason ?? archived.pages.find(page => page.path === intent.path)?.reason ?? archived.reason;
+            outcomes.push(fileOutcome(intent, state, reason));
+          }
+        } catch (error) { for (const outcome of deferred) if (plans.some(work => work.payload.month === month && matches(work, outcome))) outcome.reason = message(error); }
       }
     }
     return outcomes;
