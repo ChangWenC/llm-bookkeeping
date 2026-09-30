@@ -48,6 +48,9 @@
     },
     {
       "$ref": "#/$defs/AnalyticsReviewEvent"
+    },
+    {
+      "$ref": "#/$defs/AnalyticsReviewInput"
     }
   ],
   "$defs": {
@@ -3044,6 +3047,70 @@
         "manifest_id",
         "kind",
         "entries"
+      ]
+    },
+    "AnalyticsReviewInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "kind": {
+              "const": "review"
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AnalyticsReviewEvent"
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "events"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "kind": {
+              "const": "goal_contract"
+            },
+            "contract": {
+              "$ref": "#/$defs/GoalContract"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "contract"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "kind": {
+              "const": "decision_contract"
+            },
+            "contract": {
+              "$ref": "#/$defs/MajorDecisionContract"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "contract"
+          ]
+        }
       ]
     }
   }

@@ -1,13 +1,13 @@
 # Behavior and acceptance map
 
-| SPEC area | Contract/orchestration | Implementation owner / acceptance |
+| SPEC area | Concrete implementation and synthetic evidence | Real acceptance owner |
 | --- | --- | --- |
-| 2–3 environment / contracts / CLI | Node pin, native TS, package lock, DTOs, validators, all command routes | Integration; synthetic CLI tests |
-| 4 atomic capture / review / outbox | Store ports; pending patches; complete file intents; independent PublishResult | B/C; transaction/file failure tests pending |
-| 5 bounded native source capture | SourceAdapter budgets, lane-specific merged checkpoints, explicit identity/time/coverage | A; bounded-tail, malformed, relocation, DST cases pending |
-| 6 journals / effective archive | JournalSuggestion/Patch exact edits, fact revisions, legacy import port | B/C + second wave; no resurrection/folding/archive cases pending |
-| 7 Analytics | Explicit privacy projection and ready batch consumer port | Second wave; attribution/revision/confirmation/action cases pending |
-| 8 WeChat/import | Read-only adapter and manifest route; missing identity/coverage stays partial | A + second wave; real PoC mandatory pending |
-| 9 migration/cutover/retirement | Stable migration import port; runbook and coordinator boundary | Coordinator; real manual + scheduled evidence pending |
+| Contracts/CLI | Pinned Node/native TS/SQLite, typed DTOs and schema, compact private manifests, bounded explicit config | Coordinator validates deployment config |
+| Atomic capture/review/outbox | Actual SQLite transaction fault/crash tests; partial chunks; durable pending patches and full-byte intents | Coordinator runs isolated sources |
+| Native sources/WeChat | Bounded 2GB tail, mirrors/repeats/relocation, exact core/context pagination, verified ID/alias/range policy | Coordinator proves native source coverage and real WeChat |
+| Wiki publication/archive | Shared writer lock, conflict preservation, ready facts independent of files, kill/recovery archive tests | Coordinator report-first retention and black-box lint/index |
+| Effective monthly context | Imported legacy base excluded from new supplements; correction/retraction warning; reviewed task IDs only | Coordinator checks actual old archive/month pages |
+| Analytics/history | Professional projection ports; actual CLI manifest → SQLite current revision/hash activation; raw retained separately | Coordinator verifies legacy mappings and real analysis |
+| Migration/cutover | Stable legacy fact identity/repeat import and ordinary pending state; consistent backup/new-directory restore | Coordinator owns manual/scheduled runs and retirement |
 
-M0 verification establishes argument validation, temporal/config invariants, wide-ID parsing, explicit zero facts and prepare materials. It does not claim business, production, WeChat or retirement completion.
+`npm run check` runs strict types and synthetic tests against actual SQLite and subprocesses. Code, synthetic and real acceptance are separate. Missing concrete services fail explicitly during staged integration; pending work and partial coverage never become zero-activity claims. Production completion still requires the complete SPEC acceptance matrix and observed scheduled runs.

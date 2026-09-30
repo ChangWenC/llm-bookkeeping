@@ -68,10 +68,12 @@ for name in names:
         elif source[index] == '}': depth -= 1
         index += 1
     definitions[name] = properties(source[start:index-1], name != 'Versioned')
+review_input = re.search(r'export type AnalyticsReviewInput =([\s\S]+?)\nexport interface ReviewReceipt', source).group(1).strip().rstrip(';')
+definitions['AnalyticsReviewInput'] = {'oneOf': [shape(part) for part in split(review_input, '|') if part.strip()]}
 definitions['UnknownValue']['allOf'] = [{'if': {'properties': {'value': {'type': 'null'}}}, 'then': {'properties': {'reason': {'type': 'string', 'minLength': 1}}}, 'else': {'properties': {'reason': {'type': 'null'}}}}]
 definitions['FactCandidate']['not'] = {'anyOf': [{'required': ['fact_id']}, {'required': ['revision']}, {'required': ['operation_id']}]}
 definitions['WeeklyAnalysisResult']['properties']['proposed_confirmations']['maxItems'] = 3
 definitions['WeeklyAnalysisInput']['properties']['previous_weeks']['maxItems'] = 4
-root_types = ['SourceEvent', 'SourceCoverage', 'ReviewBundle', 'ReviewResult', 'FactRevision', 'JournalPatch', 'FactArtifact', 'PublishResult', 'BookkeepingConfig', 'Manifest', 'WeeklyAnalysisInput', 'WeeklyAnalysisResult', 'MonthlyReviewInput', 'MonthlyReviewResult', 'AnalyticsReviewEvent']
+root_types = ['SourceEvent', 'SourceCoverage', 'ReviewBundle', 'ReviewResult', 'FactRevision', 'JournalPatch', 'FactArtifact', 'PublishResult', 'BookkeepingConfig', 'Manifest', 'WeeklyAnalysisInput', 'WeeklyAnalysisResult', 'MonthlyReviewInput', 'MonthlyReviewResult', 'AnalyticsReviewEvent', 'AnalyticsReviewInput']
 result = {'$schema': 'https://json-schema.org/draft/2020-12/schema', '$id': 'https://llm-bookkeeping.local/contracts-v1.schema.json', 'title': 'Bookkeeping version 1 records', 'description': 'Structural DTO schema. Runtime validators additionally enforce identities, temporal ranges, review evidence, coverage and finite budgets.', 'anyOf': [{'$ref': '#/$defs/' + name} for name in root_types], '$defs': definitions}
 Path('schemas/contracts.schema.json').write_text(json.dumps(result, indent=2) + '\n')

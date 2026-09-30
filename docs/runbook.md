@@ -45,7 +45,7 @@ Its seven scenarios cover native mirror versus true repeated text, stable recapt
 
 Capture exceptions persist unavailable/partial coverage and collection_retry work. Material/backup/state paths cannot overlap Wiki, raw source roots or iCloud, including canonical existing ancestors. prepare writes compact immutable bundles and an atomic manifest; final file bytes cannot exceed configured bundle_bytes. Explicit finite review and collection budgets can exceed defaults.
 
-Current runtime connects collect, prepare, publish/resume, replay, facts, status, backup and restore. Second-wave consumers/archive/import/migration/validation are still unavailable until concrete services are integrated. Weekly/monthly semantic payload publication is explicitly unavailable until Store supports durable validated analysis. This report is synthetic integration evidence, not production, WeChat or scheduled-run acceptance.
+Daily capture/review/export/publication and source-independent facts/status/backup/restore are integrated. Monthly/archive/index and manifest import/migration now invoke concrete services. Typed weekly/monthly semantic acceptance and health validation are enabled only after their delivered Store/Analytics implementations. Synthetic integration evidence is separate from production and scheduled-run acceptance.
 
 ## M2 service composition
 
@@ -54,3 +54,11 @@ Current runtime connects collect, prepare, publish/resume, replay, facts, status
 `prepare --pages /absolute/page-targets.json` accepts `{schema_version:1,paths:["wiki/projects/项目_example.md","log.md"]}`. These are explicit Wiki targets, not implicit cwd ownership. Raw, traversal, symlink and outside paths are rejected; bounded/excerpt baselines are owned by Reviewer. Every accepted page patch still goes through the common Publisher/SafeWikiWriter lock, backups and recovery.
 
 Analytics, migration and health validation are composed from their concrete modules when available; missing modules remain explicit execution failures during this staged implementation. The temporary M1 semantic payload guard is removed only after Store's actual typed payload persistence is delivered.
+
+## Migration and monthly recovery
+
+`import` and `migrate` load the actual Store AnalyticsHistory port. Raw legacy records remain sealed history/work; only explicit professional projection plus actual immutable target/weekly hashes can activate a current-revision confirmation. Missing or stale mappings remain needs_review. `migration_limits` can raise default budgets within documented hard maxima; a large state object is retained whole.
+
+Legacy archive assertions are existing monthly base context. They are not replayed as newly added supplement prose. Effective replace/retract refreshes derived supplements, and a withdrawn summary reference produces a visible invalidation notice and durable recomputation work. Successful typed monthly publication completes only the explicit reviewed preparation IDs; unread, omitted and later work remains pending. New monthly pages use journal/private/stable/pinned metadata.
+
+Group history first enumerates exact core windows, then independently bounded participation context windows. Dense surrounding context cannot poison core paging. Remaining context/irreducible second windows stay explicit partial/import debt. Pinned chats apply independently of discovery; ignored/service chats remain excluded. Display aliases require explicit verified configuration and never override native IDs.

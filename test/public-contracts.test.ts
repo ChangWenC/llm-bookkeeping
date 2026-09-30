@@ -13,6 +13,8 @@ test('published schema includes minute precision, weekly privacy DTOs and no dan
   const schema = JSON.parse(await readFile(new URL('../schemas/contracts.schema.json', import.meta.url), 'utf8'));
   assert.ok(schema.$defs.SourceEvent.properties.time_precision.enum.includes('minute'));
   assert.ok(schema.$defs.WeeklyAnalysisInput.properties.facts);
+  assert.deepEqual(schema.$defs.AnalyticsReviewInput.oneOf.map((variant: any) => variant.properties.kind.const), ['review', 'goal_contract', 'decision_contract']);
+  assert.equal(schema.$defs.BookkeepingConfig.properties.migration_limits.properties.max_record_bytes.maximum, 4 * 1024 * 1024);
   const text = JSON.stringify(schema);
   for (const match of text.matchAll(/"\$ref":"#\/\$defs\/([^" ]+)"/g)) assert.ok(schema.$defs[match[1]], match[1]);
 });
