@@ -41,7 +41,7 @@ test('period boundaries use historical timezone timeline and normalize equal tim
 });
 
 test('conversation context is separately labeled; unfinished turns stay pending while other conversations proceed',async()=>{
- const c=await config();c.limits.chunk_events=1;const s=await createStore(c);const prior=event('prior','Roy requested verification','2026-09-30T08:00:00Z');const final=event('final','Verified parser','2026-09-30T09:00:00Z');final.role='assistant';const incomplete=event('incomplete','unfinished');incomplete.context.turn_complete=false;incomplete.source.conversation_id='another';await s.saveCollection(collection([prior,final,incomplete]));
+ const c=await config();c.limits.chunk_events=1;const s=await createStore(c);const prior=event('prior','Roy requested verification','2026-09-30T08:00:00Z');const final=event('final','Verified parser','2026-09-30T09:00:00Z');final.role='assistant';const incomplete=event('incomplete','unfinished');incomplete.role='assistant';incomplete.context.turn_complete=false;incomplete.source.conversation_id='another';await s.saveCollection(collection([prior,final,incomplete]));
  const prepared=await createReviewer(s,c).prepare({kind:'daily',lane:'live',cutoff});const chunks=prepared.flatMap(b=>b.chunks);assert.ok(chunks.find(c=>c.events[0]?.event_id==='final')!.context_events.some(e=>e.event_id==='prior'));assert.ok(!chunks.some(c=>c.events.some(e=>e.event_id==='incomplete')));assert.ok(prepared.some(b=>b.unfinished.some(g=>g.reason.includes('Incomplete'))));s.close();
 });
 
@@ -60,4 +60,32 @@ test('explicit page maintenance uses full digest and bounded excerpt, allows vis
 
 test('large manual pages and eighty events preserve an existing fact ahead of hundreds of coverage metadata rows',async()=>{
  const {mkdir,writeFile}=await import('node:fs/promises');const {join}=await import('node:path');const c=await config(),s=await createStore(c);await mkdir(join(c.wiki_root,'wiki/projects'),{recursive:true});await writeFile(join(c.wiki_root,'wiki/projects/a.md'),'Project page\n'+'a'.repeat(8698));await writeFile(join(c.wiki_root,'log.md'),'Manual log\n'+'line\n'.repeat(70000));await s.saveCollection(collection());const initial=bundle();await s.saveBundle(initial);const accepted=result(initial);accepted.pages=[];await s.commitReview(accepted);const events=Array.from({length:80},(_,i)=>event('eighty:'+i,'Synthetic active event '+i+' '.repeat(150)));const batch=collection(events,'live','big-pages');batch.coverage=Array.from({length:589},(_,i)=>({...batch.coverage[0],coverage_id:'many:'+i,conversation_id:i%3===0?null:'chat:'+i}));await s.saveCollection(batch);const reviewer=createReviewer(s,c),prepared=await reviewer.prepare({kind:'daily',lane:'live',cutoff,page_paths:['wiki/projects/a.md','log.md']});assert(prepared.length>0);assert(prepared.some(b=>b.existing_facts.length===1));assert(prepared.some(b=>b.baselines.some(page=>page.path==='log.md'&&page.context_excerpt)));for(const b of prepared){assert(Buffer.byteLength(canonical(b))<=c.limits.bundle_bytes);assert(b.unfinished.some(g=>g.reason.includes('omitted')));}s.close();
+});
+
+
+test('stored Claude human input ignores assistant completion metadata while explicit incomplete input and assistant generation remain pending', async()=>{
+ const c=await config(), s=await createStore(c);
+ const user=event('claude:human','A complete synthetic human request');
+ user.source.provider='claude'; user.context.turn_complete=false;
+ const assistant=event('claude:assistant','Synthetic unfinished generation');
+ assistant.source.provider='claude'; assistant.role='assistant'; assistant.context.turn_complete=false;
+ const partial=event('claude:partial-human','Synthetic explicitly incomplete input');
+ partial.source.provider='claude'; partial.context.turn_complete=false; partial.context.incomplete_turn=true;
+ const marked=event('claude:marked-input','Synthetic input with explicit boundary gap');
+ marked.source.provider='claude'; marked.context.turn_complete=true; marked.context.incomplete_turn=true;
+ const batch=collection([user,assistant,partial,marked]);
+ batch.coverage[0].provider='claude'; batch.checkpoints[0].provider='claude';
+ await s.saveCollection(batch);
+ const reviewer=createReviewer(s,c), prepared=await reviewer.prepare({kind:'daily',lane:'live',cutoff});
+ const active=prepared.flatMap(b=>b.chunks.flatMap(chunk=>chunk.events));
+ assert.deepEqual(active.map(event=>event.event_id),[user.event_id]);
+ assert.equal(active[0].context.turn_complete,false); // Existing immutable capture is not rewritten.
+ assert(prepared.some(b=>b.unfinished.some(issue=>issue.reason.includes('Incomplete'))));
+ for (const [i,b] of prepared.entries()) await reviewer.accept(result(b,'claude-human:'+i,false));
+ assert.equal((await s.listEvents({range,lane:'live'})).find(e=>e.event_id===partial.event_id)!.context.incomplete_turn,true);
+ assert.equal((await s.listCoverage(range))[0].review_status,'partial');
+ const next=await reviewer.prepare({kind:'daily',lane:'live',cutoff});
+ assert(!next.flatMap(b=>b.chunks.flatMap(chunk=>chunk.events)).some(e=>e.event_id===user.event_id));
+ assert(next.some(b=>b.unfinished.some(issue=>issue.reason.includes('Incomplete'))));
+ s.close();
 });

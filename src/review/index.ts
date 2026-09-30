@@ -195,7 +195,9 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                             yield unit;
             };
             for (const unit of units()) {
-                if (unit.context.turn_complete === false || unit.context.incomplete_turn === true) {
+                // stop_reason describes assistant generation, not whether a captured human input is complete.
+                // Keep the independent explicit incomplete-input marker authoritative for every role.
+                if ((unit.role !== 'user' && unit.context.turn_complete === false) || unit.context.incomplete_turn === true) {
                     unfinished.push(gap('Incomplete source turn requires subsequent context', null, unit.locator));
                     continue;
                 }
