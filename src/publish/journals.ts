@@ -5,6 +5,20 @@ export function frontmatter(bytes: Uint8Array | null): string {
   if (!bytes) return '';
   return Buffer.from(bytes).toString('utf8').match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] ?? '';
 }
+/** Read a single frontmatter text scalar with YAML quoting/comment semantics.
+ * This deliberately does not interpret nested objects or build a YAML schema. */
+export function frontmatterScalar(bytes: Uint8Array | null, key: string): string | null {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(key)) throw new Error('Invalid frontmatter scalar key');
+  const raw = frontmatter(bytes).match(new RegExp(`^[ \\t]*(?:${key}|'${key}'|"${key}")[ \\t]*:[ \\t]*(.*)$`, 'm'))?.[1]?.trim();
+  if (raw === undefined) return null;
+  if (raw.startsWith("'")) return raw.match(/^'((?:[^']|'')*)'[ \t]*(?:#.*)?$/)?.[1]?.replaceAll("''", "'") ?? null;
+  if (raw.startsWith('"')) {
+    const quoted = raw.match(/^("(?:[^"\\]|\\.)*")[ \t]*(?:#.*)?$/)?.[1];
+    if (!quoted) return null;
+    try { return JSON.parse(quoted.replace(/\\x([0-9a-fA-F]{2})/g, '\\u00$1')); } catch { return null; }
+  }
+  return raw.replace(/[ \t]+#.*$/, '').trim();
+}
 export function retainedJournal(bytes: Uint8Array | null): boolean {
   const header = frontmatter(bytes);
   if (/^\s*(?:pinned:\s*true|retention:\s*["']?pinned["']?|intentional-journal:\s*true|intentional_journal:\s*true)\s*$/m.test(header)) return true;

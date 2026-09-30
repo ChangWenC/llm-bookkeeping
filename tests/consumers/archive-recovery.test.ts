@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { createStore } from '../../src/store/index.ts';
 import { createArchiveService, readArchiveRecords } from '../../src/consumers/archive/index.ts';
 import { createPublisher, createSafeWikiWriter, acquireWikiLock } from '../../src/publish/index.ts';
+import { frontmatterScalar } from '../../src/publish/journals.ts';
 import { config as base } from '../../test/fixtures/basic.ts';
 const now = () => new Date('2026-10-01T12:00:00Z');
 const daily = 'wiki/personal/journals/日记_2026_07_01.md';
@@ -115,4 +116,30 @@ test('a new daily backlink during publisher recovery remains intact and locally 
   assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), original);
   assert.equal((await readArchiveRecords(f.config)).length, 1);
   assert.ok(!(await f.store.listFileIntents()).some(intent => intent.path === next));
+});
+test('plain, quoted and commented draft/pending statuses all prevent archive report and deletion', async t => {
+  const variants = ['draft', 'pending # unfinished', '"draft"', "'draft' # unfinished", '"pending" # unfinished', "'pending'", '"\\u0064raft"', '"\\x64raft" # YAML escape'];
+  for (const status of variants) {
+    const f = await fixture(t);
+    const bytes = `---\nstatus: ${status}\n---\n${review}`;
+    await writeFile(join(f.config.wiki_root, monthly), bytes);
+    assert.ok(['draft', 'pending'].includes(frontmatterScalar(Buffer.from(bytes), 'status')!));
+    const service = createArchiveService(f.store, f.config, { now });
+    assert.equal((await service.report('2026-07')).pages[0].status, 'pending', status);
+    assert.equal((await service.run({ month: '2026-07', mode: 'apply' })).status, 'pending', status);
+    assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), original);
+    assert.equal((await f.store.listFileIntents()).length, 0);
+  }
+});
+test('published quoted status and hash inside text are parsed without a prose quality gate', async t => {
+  const f = await fixture(t);
+  const bytes = `---\r\nstatus: 'published' # complete\r\n---\r\nOne sentence.\r\n`;
+  assert.equal(frontmatterScalar(Buffer.from(bytes), 'status'), 'published');
+  assert.equal(frontmatterScalar(Buffer.from('---\nstatus: "draft#literal" # comment\n---\n'), 'status'), 'draft#literal');
+  assert.equal(frontmatterScalar(Buffer.from("---\nstatus: 'it''s published'\n---\n"), 'status'), "it's published");
+  assert.equal(frontmatterScalar(Buffer.from('---\n"status" : "draft" # equivalent key\n---\n'), 'status'), 'draft');
+  assert.equal(frontmatterScalar(Buffer.from("---\n'status' : pending\n---\n"), 'status'), 'pending');
+  await writeFile(join(f.config.wiki_root, monthly), bytes);
+  assert.equal((await createArchiveService(f.store, f.config, { now }).run({ month: '2026-07', mode: 'apply' })).status, 'complete');
+  await assert.rejects(readFile(join(f.config.wiki_root, daily)), { code: 'ENOENT' });
 });

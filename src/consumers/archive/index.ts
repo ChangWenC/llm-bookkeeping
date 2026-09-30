@@ -1,7 +1,7 @@
 import { basename } from 'node:path';
 import type { ArchiveRequest, BookkeepingConfig, Store, FactRef, FileOutcome, WorkItem } from '../../contracts/types.ts';
 import { createSafeWikiWriter, acquireWikiLock, readWikiTarget, digestBytes } from '../../publish/index.ts';
-import { canonicalDailyDate, retainedJournal, retainedWindowStart, frontmatter } from '../../publish/journals.ts';
+import { canonicalDailyDate, retainedJournal, retainedWindowStart, frontmatterScalar } from '../../publish/journals.ts';
 import { archiveFolder, sha, checkMonth, monthlyPath, effectiveMonthFacts, listMarkdown, readArchiveRecords, type ArchiveReadIssue } from './records.ts';
 import type { WriterOptions } from '../../publish/files.ts';
 export { readArchiveRecords } from './records.ts';
@@ -34,7 +34,7 @@ function usableReview(bytes: Buffer | null, month: string): boolean {
   const text = bytes.toString('utf8').replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')
     .replace(/<!-- bookkeeping:monthly-supplement:start[\s\S]*?<!-- bookkeeping:monthly-supplement:end -->/g, '')
     .replace(/^\s*#+[^\n]*$/gm, '').replace(/<!--[\s\S]*?-->/g, '').trim();
-  return Boolean(text) && !/^\s*status:\s*(?:draft|pending)\s*$/m.test(frontmatter(bytes));
+  return Boolean(text) && !['draft', 'pending'].includes(frontmatterScalar(bytes, 'status') ?? '');
 }
 export function createArchiveService(store: Store, config: BookkeepingConfig, options: ArchiveOptions = {}) {
   const writer = createSafeWikiWriter(store, config, options);
