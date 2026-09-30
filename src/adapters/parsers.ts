@@ -1,5 +1,11 @@
 import type { BookkeepingConfig, SourceEvent } from "../contracts/types.ts";
 import { event, hash } from "./common.ts";
+import {
+  codexTurnId,
+  codexUserBodies,
+  parseHeartbeatPacket,
+  type CodexTurnOrigin,
+} from "./codex-turns.ts";
 export interface SessionIdentity {
   id: string | null;
   classification: SourceEvent["classification"];
@@ -56,6 +62,7 @@ export function sessionIdentity(
 export interface ParseState {
   lastTime?: unknown;
   cwd?: string;
+  codex_turn_origin?: CodexTurnOrigin;
   mirror?: {
     role: string;
     body_hash: string;
@@ -90,11 +97,30 @@ export function parseSessionRow(
     row.type === "realtime_item" && envelope.item?.type === "transcript_segment"
       ? { ...envelope, ...envelope.item }
       : envelope;
+  if (provider === "codex" && state.codex_turn_origin?.schema_version !== 1)
+    state.codex_turn_origin = undefined;
+  const turn = provider === "codex" ? codexTurnId(row) : null;
+  if (turn && (turn.conflict ||
+      (turn.id && state.codex_turn_origin?.turn_id !== turn.id))) {
+    state.codex_turn_origin = {
+      schema_version: 1, classification: "unknown", turn_id: turn.id,
+    };
+  }
   if (row.type === "turn_context") {
     state.cwd = p.cwd ?? state.cwd;
     return [];
   }
   const time = row.timestamp ?? p.timestamp ?? row.create_time;
+  const userBodies = provider === "codex" ? codexUserBodies(row, p, identity.id) : null;
+  const heartbeat = userBodies?.length === 1 && typeof userBodies[0] === "string"
+    ? parseHeartbeatPacket(userBodies[0]) : null;
+  const userOrigin = userBodies === null ? null : {
+    schema_version: 1 as const,
+    classification: turn?.conflict ? "unknown" as const : heartbeat ? "automation" as const :
+      userBodies.some((body: unknown) => typeof body === "string" && body.trimStart().startsWith("<heartbeat>"))
+        ? "unknown" as const : "main" as const,
+    turn_id: turn?.id ?? null,
+  };
   const add = (
     role: string,
     body: unknown,
@@ -124,11 +150,23 @@ export function parseSessionRow(
         generation,
         channel,
         kind,
-        classification: identity.classification,
+        classification: provider === "codex" && identity.classification === "main"
+          ? (userOrigin ?? state.codex_turn_origin)?.classification ?? "unknown"
+          : identity.classification,
         context: { cwd: state.cwd ?? identity.cwd, ...context },
       },
       config,
     );
+    if (provider === "codex" && e.classification === "automation") {
+      e.context.automation_origin = userOrigin && heartbeat ? {
+        schema_version: 1,
+        kind: "codex_heartbeat",
+        automation_id: heartbeat.automation_id,
+        anchor_event_id: e.event_id,
+        anchor_offset: offset,
+        turn_id: turn?.id ?? null,
+      } : state.codex_turn_origin?.automation_origin;
+    }
     result.push(e);
   };
   if (provider === "codex") {
@@ -208,6 +246,15 @@ export function parseSessionRow(
           message_id: e.source.message_id,
         };
     } else state.mirror = undefined;
+    // A suppressed representation shares the previous canonical user anchor. Do not
+    // replace it with a different native ID from an event/response mirror.
+    if (userOrigin && (result.length || (!heartbeat && !state.mirror))) {
+      const anchor = result[0]?.context.automation_origin;
+      state.codex_turn_origin = {
+        ...userOrigin,
+        ...(anchor ? { automation_origin: anchor as CodexTurnOrigin["automation_origin"] } : {}),
+      };
+    }
   } else {
     const m = row.message ?? p.message;
     const role = m?.role ?? row.type;

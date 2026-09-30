@@ -115,17 +115,21 @@ export function parseCapturedLines(input: {
           });
         for (const e of parsed) {
           e.fragment_ref = fragmentId;
-          if (e.source.message_id && input.known_events.has(e.event_id))
+          if (e.source.message_id && input.known_events.has(e.event_id) &&
+              e.classification !== "automation")
             continue;
           input.known_events.add(e.event_id);
           events.push(e);
           if (e.utc_time.value === null)
             gaps.push(gap(e.utc_time.reason ?? "time_unknown", input.locator));
+          if (e.classification === "unknown")
+            gaps.push(gap("source_turn_origin_unknown", input.locator));
         }
       } catch {
         input.state.lastTime = undefined;
         input.state.mirror = undefined;
         input.state.cwd = undefined;
+        input.state.codex_turn_origin = undefined;
         gaps.push(
           gap(`malformed_line_at:${input.read_start + pos}`, input.locator),
         );
