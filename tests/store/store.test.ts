@@ -85,6 +85,27 @@ test('microsecond range boundaries remain precise and projection cannot cite unr
  const c=await config();const s=await createStore(c);const events=[event('nano-a','A','2026-09-30T09:00:00.000001Z'),event('nano-b','B','2026-09-30T09:00:00.000002Z')];await s.saveCollection(collection(events));assert.deepEqual((await s.listEvents({range:{schema_version:1,from:'2026-09-30T09:00:00.000001Z',to:'2026-09-30T09:00:00.000002Z'}})).map(e=>e.event_id),['nano-a']);const b=bundle([events[0]]);await s.saveBundle(b);const bad=result(b);bad.candidates[0].analytics_projection.value!.event_refs=[{schema_version:1,event_id:'nano-b'}];await assert.rejects(s.commitReview(bad),/projection evidence outside/);assert.equal((await s.status()).facts,0);s.close();
 });
 
+test('unchanged original ISO proves precise native time correction without altering accepted facts or accepting real conflicts', async () => {
+ for (const original of ['2026-09-30T09:00:00.123456Z', '2026-09-30T11:00:00.123456+02:00']) {
+  for (const exactFirst of [false, true]) {
+   const c=await config(),s=await createStore(c);
+   const old=event('precision-native','same body','2026-09-30T09:00:00.123Z');old.original_time=value(original);old.time_precision='microsecond';
+   const exact={...structuredClone(old),utc_time:value('2026-09-30T09:00:00.123456Z')};
+   await s.saveCollection(collection([exactFirst?exact:old],'live','first'));
+   const b=bundle([exactFirst?exact:old]);await s.saveBundle(b);const committed=await s.commitReview(result(b));
+   await s.saveCollection(collection([exactFirst?old:exact],'live','correct'));
+   assert.equal((await s.status()).events,1);assert.deepEqual(await s.listWork('event_conflict'),[]);
+   const queried=await s.listEvents({range:{schema_version:1,from:'2026-09-30T09:00:00.123456Z',to:'2026-09-30T09:00:00.123457000Z'}});
+   assert.equal(queried.length,1);assert.equal(queried[0].utc_time.value,'2026-09-30T09:00:00.123456000Z');assert.equal(queried[0].original_time.value,original);
+   assert.deepEqual(await s.listEvents({range:{schema_version:1,from:'2026-09-30T09:00:00.123Z',to:'2026-09-30T09:00:00.123456Z'}}),[]);
+   assert.deepEqual(await s.readEffectiveFacts({range}),committed.facts);
+   for(const [i,change]of [{utc_time:value('2026-09-30T09:00:00.123457Z')},{body:'different body'},{role:'assistant' as const},{original_time:value('2026-09-30T09:00:00.123457Z'),utc_time:value('2026-09-30T09:00:00.123Z')}].entries())
+    await s.saveCollection(collection([{...exact,...change}],'live','conflict:'+i));
+   assert.equal((await s.listWork('event_conflict')).length,4);s.close();
+  }
+ }
+});
+
 test('proved native import/live transport metadata merges in both orders and context-only requires explicit inrange release',async()=>{
  for(const first of ['import','live']){
  const c=await config();const s=await createStore(c);const imported=event('native');imported.context={source_format:'export',owner_id:'Roy',context_only:true};imported.physical_order='file:offset:1';imported.original_time=value('2026-09-30T11:00:00+02:00');imported.wire_timezone=value('+02:00');imported.context.identity_verified=false;

@@ -25,7 +25,33 @@ export const unique = (ids: string[], label: string) => {
     if (ids.some(id => !id) || new Set(ids).size !== ids.length)
         throw new Error('Duplicate or empty ' + label);
 };
+// Correct the known Date millisecond truncation only when the unchanged source
+// timestamp independently proves both the old truncation and the exact instant.
+function preciseOriginalUtc(original: string | null): { exact: string; truncated: string } | null {
+    const match = original?.match(/^(\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d)\.(\d{4,9})(Z|[+-]\d\d:?\d\d)$/);
+    if (!match || !Number.isFinite(Date.parse(original!)))
+        return null;
+    const second = Date.parse(match[1] + match[3]);
+    if (!Number.isFinite(second))
+        return null;
+    return {
+        exact: new Date(second).toISOString().slice(0, 19) + '.' + match[2].padEnd(9, '0') + 'Z',
+        truncated: normalized(new Date(Date.parse(original!)).toISOString()),
+    };
+}
 export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): SourceEvent {
+    if (previous.source.message_id !== null && canonical(previous.source) === canonical(incoming.source)
+        && previous.body === incoming.body && previous.original_time.value === incoming.original_time.value
+        && previous.utc_time.value && incoming.utc_time.value) {
+        const proof = preciseOriginalUtc(previous.original_time.value);
+        const oldTime = normalized(previous.utc_time.value), newTime = normalized(incoming.utc_time.value);
+        if (proof && proof.exact !== proof.truncated
+            && ((oldTime === proof.truncated && newTime === proof.exact)
+                || (oldTime === proof.exact && newTime === proof.truncated))) {
+            previous = { ...previous, utc_time: { ...previous.utc_time, value: proof.exact }, time_precision: 'microsecond' };
+            incoming = { ...incoming, utc_time: { ...incoming.utc_time, value: proof.exact }, time_precision: 'microsecond' };
+        }
+    }
     const nativeCompatible = previous.source.message_id !== null && canonical(previous.source) === canonical(incoming.source) && previous.body === incoming.body && (!previous.utc_time.value || !incoming.utc_time.value || normalized(previous.utc_time.value) === normalized(incoming.utc_time.value)) && (previous.role === incoming.role || previous.role === 'unknown' || incoming.role === 'unknown');
     if (nativeCompatible) {
         for (const key of ['sender_id', 'real_sender_id'])
