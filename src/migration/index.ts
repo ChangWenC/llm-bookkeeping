@@ -80,7 +80,7 @@ export function createMigrationService(store:Store,config:BookkeepingConfig,opti
     let wireZone:string|undefined;
     if(entry.source_timezone){try{zone(entry.source_timezone,'source_timezone');wireZone=entry.source_timezone;}catch{result.pending.push('unknown_iana_source_timezone');}}
 
-    const metadata={account_id:entry.account_id,conversation_id:entry.conversation_id,owner_id:entry.owner_id,conversation_type:entry.conversation_type,self_ids:entry.self_ids,source_timezone:wireZone,locator:'sealed:'+entry.source_file_id,provider:entry.provider??'wechat',known_range:entry.known_range,identity_verified:entry.identity_verified,coverage_verified:false};
+    const metadata={account_id:entry.account_id,conversation_id:entry.conversation_id,owner_id:entry.owner_id,conversation_type:entry.conversation_type,self_ids:entry.self_ids,self_aliases:entry.self_aliases,mention_aliases:entry.mention_aliases,aliases_verified:entry.aliases_verified,source_timezone:wireZone,locator:'sealed:'+entry.source_file_id,provider:entry.provider??'wechat',known_range:entry.known_range,identity_verified:entry.identity_verified,coverage_verified:false};
     const isHeader=entry.format==='chatlab-jsonl'&&record?._type!=='message';
     let bytes:string;
     const normalRecord=record?{...record,source_offset:frame.start,timestamp:record[entry.time_source]}:frame.value;

@@ -50,3 +50,5 @@
 - https://github.com/leeguooooo/wechat-use/blob/4f01035e9323096e35b84e2b9b03bcf6a477f4b8/install.sh
 - https://github.com/leeguooooo/wechat-use/blob/4f01035e9323096e35b84e2b9b03bcf6a477f4b8/docs/install.md
 - https://github.com/leeguooooo/wechat-use/blob/4f01035e9323096e35b84e2b9b03bcf6a477f4b8/SKILL.md
+
+Compatibility scope: `pinned_chats` is merged even when `discover_sessions:false`; `ignored_chats` and service holders (including OpenIM) still filter it. No implicit ignored list is guessed. Optional `self_aliases` / `mention_aliases` require both `identity_verified:true` and `aliases_verified:true`; NFKC/trim/case normalization applies. Self display aliases only establish self when no native sender ID exists. Native wxid/per-chat numeric mappings remain authoritative even when a display name matches an alias. Explicit native `is_mentioned:false` is authoritative. Alias mentions require a bounded `@alias` token, avoiding substring matches. Import manifests support the same explicit verified fields.

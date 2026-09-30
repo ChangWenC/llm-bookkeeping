@@ -5,7 +5,7 @@ export interface BaseEntry { kind: string; path: string; source_file_id: string;
 export interface ImportEntry extends BaseEntry {
   kind: 'chat_export'; format: ImportFormat; account_id: string; conversation_id: string; owner_id: string;
   time_source: 'timestamp'|'create_time'|'epoch'; source_timezone: string|null; known_range: TimeRange;
-  conversation_type?: 'private'|'group'|'unknown'; identity_verified: boolean; self_ids?: string[]; provider?: string; complete?: boolean;
+  conversation_type?: 'private'|'group'|'unknown'; identity_verified: boolean; self_ids?: string[]; self_aliases?: string[]; mention_aliases?: string[]; aliases_verified?: boolean; provider?: string; complete?: boolean;
   pagination?: { limit_hit?: boolean; truncated?: boolean; duplicate_page?: boolean; cursor_verified?: boolean };
 }
 export interface JournalEntry extends BaseEntry { kind: 'daily_journal'; format: 'jsonl' }

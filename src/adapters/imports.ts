@@ -4,12 +4,16 @@ import type {
   CoverageGap,
 } from "../contracts/types.ts";
 import { event, gap, hash, parseLossless } from "./common.ts";
+import { selfAlias, selfMention, verifiedAliases } from "./wechat-identity.ts";
 export interface ImportMetadata {
   account_id: string;
   conversation_id: string;
   owner_id?: string;
   conversation_type?: 'private'|'group'|'unknown';
   self_ids?: string[];
+  self_aliases?: string[];
+  mention_aliases?: string[];
+  aliases_verified?: boolean;
   source_timezone?: string;
   locator: string;
   provider?: string;
@@ -88,7 +92,8 @@ export function parseChatExport(
   const self = new Set(
     manifest.self_ids ?? (manifest.owner_id ? [manifest.owner_id] : []),
   );
-  if (!manifest.identity_verified || !self.size)
+  const aliasOptions = { ...manifest };
+  if (!manifest.identity_verified || (!self.size && !verifiedAliases(aliasOptions, "self_aliases").length))
     gaps.push(gap("import_self_identity_unverified", manifest.locator));
   if (!manifest.coverage_verified || !manifest.known_range)
     gaps.push(
@@ -134,7 +139,7 @@ export function parseChatExport(
         block: "0",
         body,
         role:
-          manifest.identity_verified && self.has(sender)
+          manifest.identity_verified && (self.has(sender) || selfAlias(r, aliasOptions))
             ? "user"
             : manifest.identity_verified && sender
               ? "other"
@@ -148,7 +153,7 @@ export function parseChatExport(
         context: {
           sender_id: sender,
           identity_verified: manifest.identity_verified === true,
-          is_mentioned: r.is_mentioned === true,
+          is_mentioned: selfMention(r, body, aliasOptions),
           media_transcribed: false,
           source_format: format,
           source_offset: r.source_offset ?? offset,
@@ -173,7 +178,7 @@ export function parseChatExport(
       );
     const isGroup = manifest.conversation_type === "group" || manifest.conversation_type === "unknown" || manifest.conversation_id.endsWith("@chatroom");
     e.context.is_group = isGroup;
-    const anchor = manifest.identity_verified === true && (e.role === "user" || r.is_mentioned === true);
+    const anchor = manifest.identity_verified === true && (e.role === "user" || e.context.is_mentioned === true);
     const inRange = e.utc_time.value !== null && !!manifest.known_range && Date.parse(e.utc_time.value) >= Date.parse(manifest.known_range.from) && Date.parse(e.utc_time.value) < Date.parse(manifest.known_range.to);
     e.context.context_only = !inRange || manifest.identity_verified !== true || !sender || (isGroup && !anchor);
     if (isGroup && !anchor) {

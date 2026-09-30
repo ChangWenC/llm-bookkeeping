@@ -17,8 +17,10 @@ import {
   queueGroupContext,
   takeHistoryWindow,
 } from "./wechat-history.ts";
+import { selfAlias, selfMention, verifiedAliases } from "./wechat-identity.ts";
 const serviceChat = (id: string) =>
   id === "systemholder" ||
+  id.toLowerCase() === "openimholder" ||
   id === "brandservicesessionholder" ||
   id.startsWith("gh_");
 const nonemptyShard = (value: unknown) =>
@@ -225,7 +227,7 @@ export function parseWechatHistory(
       : [],
   );
   const verified = source.options.identity_verified === true;
-  if (!verified || !self.size)
+  if (!verified || (!self.size && !verifiedAliases(source.options, "self_aliases").length))
     gaps.push(gap("wechat_self_identity_unverified", chat));
   gaps.push(...verifiedRangeGaps(source, chat, request));
   if (source.options.cursor_readonly_verified !== true)
@@ -260,7 +262,8 @@ export function parseWechatHistory(
   const seen = new Set<string>();
   for (let i = 0; i < parsed.rows.length; i++) {
     const r = parsed.rows[i];
-    const sender = r.sender_wxid ?? r.real_sender_id;
+    const aliasSelf = selfAlias(r, source.options);
+    const sender = r.sender_wxid ?? r.real_sender_id ?? (aliasSelf ? r.sender_name ?? r.sender_display_name ?? r.sender : null);
     const senderId = sender == null ? null : String(sender);
     const localSelf = source.options.self_ids_by_chat as
       Record<string, unknown> | undefined;
@@ -270,9 +273,9 @@ export function parseWechatHistory(
         : [],
     );
     const senderVerified =
-      verified && (r.sender_wxid != null || perChatSelf.size > 0);
+      verified && (r.sender_wxid != null || (r.real_sender_id != null && perChatSelf.size > 0) || aliasSelf);
     const senderSelf =
-      r.sender_wxid != null ? self.has(senderId!) : perChatSelf.has(senderId!);
+      r.sender_wxid != null ? self.has(senderId!) : r.real_sender_id != null ? perChatSelf.has(senderId!) : aliasSelf;
     const native =
       r.server_id && String(r.server_id) !== "0"
         ? String(r.server_id)
@@ -315,7 +318,7 @@ export function parseWechatHistory(
         generation: "0",
         context: {
           sender_id: senderId,
-          is_mentioned: r.is_mentioned === true,
+          is_mentioned: selfMention(r, body, source.options),
           identity_verified: verified,
           media_transcribed: false,
         },
@@ -574,6 +577,7 @@ export class WechatAdapter implements SourceAdapter {
         discoveryGaps.push(gap(`wechat_sessions_unavailable:${error.message}`));
       }
     }
+    chats = [...new Set([...chats, ...(Array.isArray(this.source.options.pinned_chats) ? this.source.options.pinned_chats.map(String) : [])])];
     chats = chats.filter(
       (chat) =>
         !serviceChat(chat) &&
