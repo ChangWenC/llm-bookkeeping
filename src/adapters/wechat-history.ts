@@ -66,7 +66,7 @@ export function historyGaps(
   cursor: HistoryCursor,
   chat: string,
 ): CoverageGap[] {
-  const gaps = cursor.blocked.map((window) => ({
+  const gaps: CoverageGap[] = cursor.blocked.map((window) => ({
     schema_version: 1 as const,
     range: { schema_version: 1 as const, from: window.from, to: window.to },
     reason: "wechat_dense_second_or_split_limit_requires_import",

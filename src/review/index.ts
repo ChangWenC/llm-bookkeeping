@@ -105,17 +105,17 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
         if(!current) current={schema_version:1,bundle_id:'',kind:request.kind,lane:request.lane,period:request.period??null,cutoff:request.cutoff,chunks:[],existing_facts:[],baselines:[],coverage:[],unfinished:[]};
         const path=targetPath(request.kind,chunk.events[0],config,request.cutoff,request.period); let base:PageBaseline|undefined;
         try { base=await baseline(config,path); } catch(error:any){if(!current.unfinished.some(g=>g.locator===path))current.unfinished.push(gap(error.message,null,path));}
-        const proposed={...current,chunks:[...current.chunks,chunk],baselines:base&&!current.baselines.some(b=>b.path===path)?[...current.baselines,base]:current.baselines};
+        const proposed:ReviewBundle={...current,chunks:[...current.chunks,chunk],baselines:base&&!current.baselines.some(b=>b.path===path)?[...current.baselines,base]:current.baselines};
         if(Buffer.byteLength(canonical(proposed))+128>limits.bundle_bytes) {
           if(!current.chunks.length){unfinished.push(gap('Event metadata cannot fit bundle budget',range,chunk.events[0]?.locator??null));continue;}
           await finish(); if(bundles.length>=limits.bundles_per_round)break; current={...proposed,chunks:[chunk],baselines:base?[base]:[],existing_facts:[],coverage:[],unfinished:[]};
           if(Buffer.byteLength(canonical(current))+128>limits.bundle_bytes){current=null;continue;}
         } else current=proposed;
         // Fit evidence metadata without breaking the hard serialized bound. Omitted context is explicitly reported.
-        for(const c of coverage) if(!current.coverage.some(x=>x.coverage_id===c.coverage_id)){const p={...current,coverage:[...current.coverage,c]}; if(Buffer.byteLength(canonical(p))+256<=limits.bundle_bytes)current=p;}
-        for(const fact of facts) if(!current.existing_facts.some(f=>f.fact_id===fact.fact_id&&f.revision===fact.revision)){const p={...current,existing_facts:[...current.existing_facts,fact]}; if(Buffer.byteLength(canonical(p))+512<=limits.bundle_bytes)current=p;}
-        for(const g of unfinished){const p={...current,unfinished:[...current.unfinished,g]}; if(Buffer.byteLength(canonical(p))+256<=limits.bundle_bytes)current=p;}
-        if(current.coverage.length<coverage.length || current.existing_facts.length<facts.length){const p={...current,unfinished:[...current.unfinished,gap('Coverage or existing fact context omitted by bundle byte budget',range)]};if(Buffer.byteLength(canonical(p))+128<=limits.bundle_bytes)current=p;}
+        for(const c of coverage) if(!current.coverage.some(x=>x.coverage_id===c.coverage_id)){const p:ReviewBundle={...current,coverage:[...current.coverage,c]}; if(Buffer.byteLength(canonical(p))+256<=limits.bundle_bytes)current=p;}
+        for(const fact of facts) if(!current.existing_facts.some(f=>f.fact_id===fact.fact_id&&f.revision===fact.revision)){const p:ReviewBundle={...current,existing_facts:[...current.existing_facts,fact]}; if(Buffer.byteLength(canonical(p))+512<=limits.bundle_bytes)current=p;}
+        for(const g of unfinished){const p:ReviewBundle={...current,unfinished:[...current.unfinished,g]}; if(Buffer.byteLength(canonical(p))+256<=limits.bundle_bytes)current=p;}
+        if(current.coverage.length<coverage.length || current.existing_facts.length<facts.length){const p:ReviewBundle={...current,unfinished:[...current.unfinished,gap('Coverage or existing fact context omitted by bundle byte budget',range)]};if(Buffer.byteLength(canonical(p))+128<=limits.bundle_bytes)current=p;}
       }
       await finish(); return bundles;
     },
