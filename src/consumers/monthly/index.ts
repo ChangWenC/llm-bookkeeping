@@ -84,6 +84,11 @@ export function createMonthlyConsumer(store: Store, config: BookkeepingConfig, o
       }
       const displayed = await consumer.refreshMonthlySupplements(review.month);
       if (displayed.status !== 'complete') return displayed;
+      const pendingPreparation = await store.listWork('prepare_monthly', 'pending');
+      for (const workId of review.completed_work_ids ?? []) {
+        const work = pendingPreparation.find(item => item.work_id === workId);
+        if (work?.payload.month === review.month) await store.completeWork(workId);
+      }
       await store.acknowledgeConsumer({ schema_version: 1, consumer: 'monthly-publish', batch_id: batch.batch_id, acknowledged_at: now() });
       return { schema_version: 1, target: 'monthly', status: 'complete', reason: newer ? 'Newer published monthly review retained; old accepted result remains historical' : null };
     },

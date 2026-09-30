@@ -58,3 +58,21 @@ test('retraction of a monthly-summary represented fact visibly invalidates the o
   assert.equal((await f.store.readEffectiveFacts({ range: { schema_version: 1, from: '2026-07-01T00:00:00Z', to: '2026-08-01T00:00:00Z' } })).length, 0);
 });
 
+
+test('successful typed monthly publication acknowledges only explicitly reviewed preparation IDs', async t => {
+  const f = await fixture(t);
+  await imported(f.store, fact('fact:queue', 'Synthetic represented fact'), 'initial:queue');
+  await createPublisher(f.store, f.config).exportFacts();
+  const monthly = createMonthlyConsumer(f.store, f.config);
+  await monthly.consume();
+  const prepared = await f.store.listWork('prepare_monthly', 'pending');
+  assert.ok(prepared.length);
+  await f.store.enqueueWork({ schema_version: 1, work_id: 'prepare-monthly:later', kind: 'prepare_monthly', state: 'pending', lane: 'history', payload: { month: '2026-07', batch_id: 'later-unread' }, reason: 'Synthetic after-bundle work', migration_key: null, updated_at: '2026-10-01T00:00:00Z' });
+  const batch = (await f.store.listReadyBatches('monthly-publish'))[0];
+  const outcome = await monthly.publishMonthlyReview({ ...batch, monthly_review: { schema_version: 1, month: '2026-07', summary: '已核验的合成月摘要。', fact_refs: [{ schema_version: 1, fact_id: 'fact:queue', revision: 1 }], supplement_text: '', coverage_status: 'partial', completed_work_ids: prepared.map(work => work.work_id) } });
+  assert.equal(outcome.status, 'complete');
+  assert.deepEqual((await f.store.listWork('prepare_monthly', 'pending')).map(work => work.work_id), ['prepare-monthly:later']);
+  const body = await readFile(join(f.config.wiki_root, f.path), 'utf8');
+  assert.match(body, /type: journal\nnamespace: personal/);
+  assert.match(body, /status: stable/); assert.match(body, /retention: pinned/);
+});
