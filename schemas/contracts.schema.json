@@ -1130,6 +1130,18 @@
           "items": {
             "$ref": "#/$defs/AnalysisRevisionRef"
           }
+        },
+        "observation_candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeeklyObservation"
+          }
+        },
+        "confirmed_goals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GoalContract"
+          }
         }
       },
       "required": [

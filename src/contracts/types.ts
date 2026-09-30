@@ -79,6 +79,8 @@ export interface WeeklyAnalysisInput extends Versioned {
   facts: ProfessionalFact[]; coverage: SourceCoverage[]; coverage_status: AnalysisCoverageStatus;
   previous_weeks: WeeklyAnalysisSnapshot[]; prior_action: ValidationAction | null;
   confirmed_goal_refs: AnalysisRevisionRef[];
+  observation_candidates?: WeeklyObservation[];
+  confirmed_goals?: GoalContract[];
 }
 export interface WeeklyAnalysisResult extends Versioned {
   snapshot: WeeklyAnalysisSnapshot; prior_action_disposition: PriorActionDisposition | null;
