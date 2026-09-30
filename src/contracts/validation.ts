@@ -22,6 +22,12 @@ export function utc(value: unknown, path: string): string {
   if (normalized.slice(0,19) !== s.slice(0,19)) fail(path, 'invalid calendar timestamp');
   return s;
 }
+/** Exact ordering through nanoseconds, including equivalent fraction spellings. */
+export function utcComparisonKey(value: string): string {
+  const s = utc(value, 'timestamp');
+  const [whole, fraction = ''] = s.slice(0, -1).split('.');
+  return whole + '.' + fraction.padEnd(9, '0') + 'Z';
+}
 export function date(value: unknown, path: string): string {
   const s = string(value,path);
   if (!/^\d{4}-\d\d-\d\d$/.test(s) || !Number.isFinite(Date.parse(`${s}T00:00:00Z`)) || new Date(`${s}T00:00:00Z`).toISOString().slice(0,10) !== s) fail(path,'expected valid YYYY-MM-DD');
@@ -38,7 +44,7 @@ function unknownValue(value: unknown, path: string, validate = string) {
   if (v.value === null) string(v.reason,`${path}.reason`);
   else { validate(v.value,`${path}.value`); if (v.reason !== null) fail(`${path}.reason`,'known value requires null reason'); }
 }
-function range(value: unknown,path:string) { const r=version(value,path); utc(r.from,`${path}.from`);utc(r.to,`${path}.to`);if(Date.parse(r.from)>=Date.parse(r.to))fail(path,'expected nonempty half-open range'); }
+function range(value: unknown,path:string) { const r=version(value,path); utc(r.from,`${path}.from`);utc(r.to,`${path}.to`);if(utcComparisonKey(r.from)>=utcComparisonKey(r.to))fail(path,'expected nonempty half-open range'); }
 function projection(value:unknown){unknownValue(value,'analytics_projection',(v,p)=>{const r=version(v,p);string(r.summary,'projection.summary');string(r.subject,'projection.subject');array(r.scope,'projection.scope').forEach(s=>string(s,'projection.scope'));refs(r.event_refs,'projection.event_refs');record(r.attribution,'projection.attribution');return JSON.stringify(r);});}
 function refs(value: unknown,path:string,fact=false) { array(value,path).forEach((v,i)=>{const r=version(v,`${path}[${i}]`);string(r[fact?'fact_id':'event_id'],path);if(fact&&(!Number.isSafeInteger(r.revision)||r.revision<1))fail(path,'expected positive fact revision');}); }
 export function validateSourceEvent(value: unknown): SourceEvent {
@@ -51,7 +57,7 @@ export function validateSourceEvent(value: unknown): SourceEvent {
   unknownValue(r.original_time,'original_time');unknownValue(r.utc_time,'utc_time',utc);
   unknownValue(r.wire_timezone,'wire_timezone');unknownValue(r.journal_timezone,'journal_timezone',zone);
   unknownValue(r.journal_date,'journal_date',date);nullableString(r.journal_timezone_basis,'journal_timezone_basis');
-  choice(r.time_precision,['minute','second','millisecond','microsecond','day','unknown'],'time_precision');
+  choice(r.time_precision,['minute','second','millisecond','microsecond','nanosecond','day','unknown'],'time_precision');
   choice(r.classification,['main','subagent','automation','unknown'],'classification');record(r.context,'context');return r as SourceEvent;
 }
 export function validateCoverage(value:unknown): SourceCoverage {

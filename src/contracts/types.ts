@@ -17,7 +17,7 @@ export interface SourceIdentity extends Versioned {
 export interface SourceEvent extends Versioned {
   event_id: string; source: SourceIdentity; role: string; kind: string; channel: string | null;
   body: string | null; fragment_ref: string | null; physical_order: string;
-  original_time: UnknownValue<string>; time_precision: 'minute' | 'second' | 'millisecond' | 'microsecond' | 'day' | 'unknown';
+  original_time: UnknownValue<string>; time_precision: 'minute' | 'second' | 'millisecond' | 'microsecond' | 'nanosecond' | 'day' | 'unknown';
   utc_time: UnknownValue<string>; wire_timezone: UnknownValue<string>;
   journal_timezone: UnknownValue<string>; journal_timezone_basis: string | null;
   journal_date: UnknownValue<string>; classification: 'main' | 'subagent' | 'automation' | 'unknown';

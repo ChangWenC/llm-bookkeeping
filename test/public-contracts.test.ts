@@ -13,6 +13,7 @@ test('weekly coverage and explicit revision/actions remain distinct', () => {
 test('published schema includes minute precision, weekly privacy DTOs and no dangling refs', async () => {
   const schema = JSON.parse(await readFile(new URL('../schemas/contracts.schema.json', import.meta.url), 'utf8'));
   assert.ok(schema.$defs.SourceEvent.properties.time_precision.enum.includes('minute'));
+  assert.ok(schema.$defs.SourceEvent.properties.time_precision.enum.includes('nanosecond'));
   assert.ok(schema.$defs.WeeklyAnalysisInput.properties.facts);
   assert.deepEqual(schema.$defs.AnalyticsReviewInput.oneOf.map((variant: any) => variant.properties.kind.const), ['review', 'goal_contract', 'decision_contract', 'capability_candidate']);
   assert.equal(schema.$defs.BookkeepingConfig.properties.migration_limits.properties.max_record_bytes.maximum, 4 * 1024 * 1024);

@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, absolutePath, DEFAULT_COLLECTION_BUDGETS, canonicalLocation, validateDataLocation } from './config.ts';
-import { InputError, utc, date, parseJsonPreservingIntegers, validateManifest, validateReviewResult, version, array, string } from './contracts/validation.ts';
+import { InputError, utc, utcComparisonKey, date, parseJsonPreservingIntegers, validateManifest, validateReviewResult, version, array, string } from './contracts/validation.ts';
 import { createRuntime, restoreRuntime, UnavailableError } from './runtime.ts';
 import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, SourceAdapter, SourceCoverage } from './contracts/types.ts';
 
@@ -89,7 +89,7 @@ export function parseArgs(args: string[]): ParsedCommand {
     case 'replay': case 'facts': {
       const from = utc(required(options, 'from'), 'from');
       const to = utc(required(options, 'to'), 'to');
-      if (Date.parse(from) >= Date.parse(to)) throw new InputError('--from must precede --to');
+      if (utcComparisonKey(from) >= utcComparisonKey(to)) throw new InputError('--from must precede --to');
       if (command === 'replay') required(options, 'source');
       break;
     }
@@ -160,7 +160,7 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
       : config.journal_timezone_timeline[0].effective_from,
     to: cutoff,
   };
-  if (Date.parse(query.from) >= Date.parse(query.to)) throw new InputError('Collection cutoff must follow configured live/history start');
+  if (utcComparisonKey(query.from) >= utcComparisonKey(query.to)) throw new InputError('Collection cutoff must follow configured live/history start');
   if (!services.adapters.length) unavailable('enabled source adapters');
   const budget = config.collection_budgets?.[lane] ?? DEFAULT_COLLECTION_BUDGETS[lane];
   const providers = [];

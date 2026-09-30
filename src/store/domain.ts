@@ -27,7 +27,7 @@ export const unique = (ids: string[], label: string) => {
 };
 // Correct the known Date millisecond truncation only when the unchanged source
 // timestamp independently proves both the old truncation and the exact instant.
-function preciseOriginalUtc(original: string | null): { exact: string; truncated: string } | null {
+function preciseOriginalUtc(original: string | null): { exact: string; truncated: string; precision: SourceEvent['time_precision'] } | null {
     const match = original?.match(/^(\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d)\.(\d{4,9})(Z|[+-]\d\d:?\d\d)$/);
     if (!match || !Number.isFinite(Date.parse(original!)))
         return null;
@@ -37,6 +37,7 @@ function preciseOriginalUtc(original: string | null): { exact: string; truncated
     return {
         exact: new Date(second).toISOString().slice(0, 19) + '.' + match[2].padEnd(9, '0') + 'Z',
         truncated: normalized(new Date(Date.parse(original!)).toISOString()),
+        precision: match[2].length > 6 ? 'nanosecond' : 'microsecond',
     };
 }
 export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): SourceEvent {
@@ -48,8 +49,8 @@ export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): Sourc
         if (proof && proof.exact !== proof.truncated
             && ((oldTime === proof.truncated && newTime === proof.exact)
                 || (oldTime === proof.exact && newTime === proof.truncated))) {
-            previous = { ...previous, utc_time: { ...previous.utc_time, value: proof.exact }, time_precision: 'microsecond' };
-            incoming = { ...incoming, utc_time: { ...incoming.utc_time, value: proof.exact }, time_precision: 'microsecond' };
+            previous = { ...previous, utc_time: { ...previous.utc_time, value: proof.exact }, time_precision: proof.precision };
+            incoming = { ...incoming, utc_time: { ...incoming.utc_time, value: proof.exact }, time_precision: proof.precision };
         }
     }
     const nativeCompatible = previous.source.message_id !== null && canonical(previous.source) === canonical(incoming.source) && previous.body === incoming.body && (!previous.utc_time.value || !incoming.utc_time.value || normalized(previous.utc_time.value) === normalized(incoming.utc_time.value)) && (previous.role === incoming.role || previous.role === 'unknown' || incoming.role === 'unknown');
