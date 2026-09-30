@@ -28,6 +28,10 @@ export interface AnalyticsOutput {
     coverage: SourceCoverage[];
     snapshots: WeeklyAnalysisSnapshot[];
     notices: AnalyticsNotice[];
+    freshness: {
+        analysis_ref: AnalysisRevisionRef;
+        freshness_at: string;
+    }[];
     overlays: Record<string, unknown>[];
     exclusions: {
         fact_ref: FactRef;
@@ -50,6 +54,7 @@ export class AnalyticsRepository {
       CREATE TABLE IF NOT EXISTS analytics_freshness(batch_id TEXT PRIMARY KEY,analysis_id TEXT NOT NULL,revision INTEGER NOT NULL,at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_notices(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_legacy(migration_key TEXT PRIMARY KEY,json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS analytics_reservations(id TEXT NOT NULL,revision INTEGER NOT NULL,json TEXT NOT NULL,PRIMARY KEY(id,revision));
       CREATE TABLE IF NOT EXISTS analytics_state(key TEXT PRIMARY KEY,json TEXT NOT NULL);
     `);
     }
@@ -114,14 +119,17 @@ export class AnalyticsRepository {
         const live = new Set(this.facts().map(fact => factKey(fact.fact_ref)));
         return this.db.prepare("SELECT json FROM analytics_targets t WHERE kind='observation' AND revision=(SELECT MAX(revision) FROM analytics_targets n WHERE n.id=t.id) ORDER BY id").all().map(json<WeeklyObservation>).filter(observation => observation.evidence_refs.every(ref => live.has(factKey(ref))));
     }
+    rawSnapshot(week: string): WeeklyAnalysisSnapshot | null { const row = this.db.prepare('SELECT json FROM analytics_snapshots WHERE week_end=? ORDER BY revision DESC LIMIT 1').get(week); return row ? json(row) : null; }
     snapshots(): WeeklyAnalysisSnapshot[] {
         const current = new Set(this.facts().map(fact => factKey(fact.fact_ref)));
         return this.db.prepare('SELECT json FROM analytics_snapshots s WHERE revision=(SELECT MAX(revision) FROM analytics_snapshots n WHERE n.id=s.id) ORDER BY week_end,revision').all().map(json<WeeklyAnalysisSnapshot>).map(snapshot => {
-            const observations = snapshot.observations.filter(o => o.evidence_refs.every(ref => current.has(factKey(ref))));
-            const changed = observations.length !== snapshot.observations.length || snapshot.capabilities.some(c => c.evidence_refs.some(ref => !current.has(factKey(ref))));
-            return changed ? { ...snapshot, observations, coverage_status: 'partial', direction: 'unknown', capabilities: snapshot.capabilities.map(c => c.evidence_refs.every(ref => current.has(factKey(ref))) ? c : { ...c, trend: 'unknown', explanation: 'Evidence revision replaced/retracted; semantic recomputation pending', evidence_refs: [] }) } : snapshot;
+            const observations = snapshot.observations.filter(observation => { const review = this.reviewState(observation.observation_ref); return observation.evidence_refs.every(ref => current.has(factKey(ref))) && review?.action !== 'reject' && review?.action !== 'retract'; }).map(observation => { const review = this.reviewState(observation.observation_ref); return { ...observation, summary: review?.action === 'correct' ? review.correction! : observation.summary, stage: review?.action === 'confirm' ? 'formal' as const : 'candidate' as const }; });
+            const changed = observations.length !== snapshot.observations.length || snapshot.capabilities.some(capability => capability.evidence_refs.some(ref => !current.has(factKey(ref)))) || snapshot.goal_gaps.some(gap => !this.confirmed(gap.goal_ref) || gap.evidence_refs.some(ref => !current.has(factKey(ref))));
+            const action = snapshot.validation_action;
+            return { ...snapshot, observations, goal_gaps: snapshot.goal_gaps.filter(gap => this.confirmed(gap.goal_ref) && gap.evidence_refs.every(ref => current.has(factKey(ref)))), ...(changed ? { coverage_status: 'partial' as const, direction: 'unknown' as const, capabilities: snapshot.capabilities.map(capability => capability.evidence_refs.every(ref => current.has(factKey(ref))) ? capability : { ...capability, trend: 'unknown' as const, explanation: 'Evidence revision replaced/retracted; semantic recomputation pending', evidence_refs: [] }) } : {}), validation_action: action && action.evidence_refs.every(ref => current.has(factKey(ref))) ? action : null };
         });
     }
+    unresolvedHistory(): boolean { return this.readHistory().some((record: any) => record.result.unresolved > 0); }
     confirmedGoals(config: BookkeepingConfig): GoalContract[] {
         return this.db.prepare("SELECT json FROM analytics_targets WHERE kind='goal_contract' ORDER BY rowid").all().map(json<GoalContract>).filter(goal => config.goal_whitelist.includes(goal.contract_ref.logical_id) && this.confirmed(goal.contract_ref));
     }
@@ -150,6 +158,23 @@ export class AnalyticsRepository {
         this.db.prepare('INSERT OR IGNORE INTO analytics_snapshots VALUES(?,?,?,?)').run(snapshot.analysis_ref.logical_id, snapshot.analysis_ref.revision, snapshot.week_end, canonical(snapshot));
         this.db.prepare('INSERT OR IGNORE INTO analytics_freshness VALUES(?,?,?,?)').run(batchId, snapshot.analysis_ref.logical_id, snapshot.analysis_ref.revision, result.freshness_at);
     }
+    reserveAnalysis(result: WeeklyAnalysisResult): void {
+        const snapshot = result.snapshot;
+        const targets = [{ ref: snapshot.analysis_ref, value: snapshot }, ...snapshot.observations.map(observation => ({ ref: observation.observation_ref, value: { ...observation, stage: 'candidate' } })), ...(snapshot.validation_action ? [{ ref: snapshot.validation_action.action_ref, value: snapshot.validation_action }] : [])];
+        for (const { ref, value } of targets) {
+            const previous = this.target(ref);
+            if (previous && canonical(previous.value) !== canonical(value))
+                throw new Error('Analytics target identity conflict');
+            const old = this.db.prepare('SELECT json FROM analytics_reservations WHERE id=? AND revision=?').get(ref.logical_id, ref.revision) as any;
+            if (old && old.json !== canonical(value))
+                throw new Error('Reserved analytics revision identity conflict');
+            this.db.prepare('INSERT OR IGNORE INTO analytics_reservations VALUES(?,?,?)').run(ref.logical_id, ref.revision, canonical(value));
+        }
+    }
+    freshness(): {
+        analysis_ref: AnalysisRevisionRef;
+        freshness_at: string;
+    }[] { return this.db.prepare('SELECT analysis_id,revision,MAX(at) AS at FROM analytics_freshness GROUP BY analysis_id,revision ORDER BY at').all().map((row: any) => ({ analysis_ref: { schema_version: 1, logical_id: row.analysis_id, revision: row.revision }, freshness_at: row.at })); }
     ingest(batch: FactArtifact, config: BookkeepingConfig): AnalyticsOutput {
         return this.transaction(() => {
             // Hash only professional transport fields. Original fact bodies never enter the Analytics ledger or output.
@@ -190,7 +215,7 @@ export class AnalyticsRepository {
             if (batch.analysis)
                 this.saveAnalysis(batch.analysis, batch.batch_id);
             this.evaluateDecisions(config);
-            const output: AnalyticsOutput = { schema_version: 1, batch_id: batch.batch_id, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(), notices: this.notices(), overlays: this.overlays(), exclusions: records.filter(fact => fact.reason && fact.action !== 'retract').map(fact => ({ fact_ref: fact.fact_ref, reason: fact.reason! })) };
+            const output: AnalyticsOutput = { schema_version: 1, batch_id: batch.batch_id, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(), notices: this.notices(), freshness: this.freshness(), overlays: this.overlays(), exclusions: records.filter(fact => fact.reason && fact.action !== 'retract').map(fact => ({ fact_ref: fact.fact_ref, reason: fact.reason! })) };
             this.db.prepare('INSERT INTO analytics_batches VALUES(?,?,?)').run(batch.batch_id, hash, canonical(output));
             return output;
         });
@@ -288,12 +313,25 @@ export class AnalyticsRepository {
     historyRecord(key: string): any | null { const row = this.db.prepare('SELECT json FROM analytics_legacy WHERE migration_key=?').get(key); return row ? json(row) : null; }
     saveHistory(key: string, value: unknown): void { this.db.prepare('INSERT INTO analytics_legacy VALUES(?,?)').run(key, canonical(value)); }
     readHistory(): unknown[] { return this.db.prepare('SELECT json FROM analytics_legacy ORDER BY rowid').all().map(json); }
-    currentOutput(batchId: string): AnalyticsOutput { return { schema_version: 1, batch_id: batchId, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(), notices: this.notices(), overlays: this.overlays(), exclusions: this.exclusions().map(item => ({ fact_ref: item.fact_ref, reason: item.reason })) }; }
+    currentOutput(batchId: string): AnalyticsOutput { return { schema_version: 1, batch_id: batchId, facts: this.facts(), observations: this.observations(), coverage: this.coverage(), snapshots: this.snapshots(), notices: this.notices(), freshness: this.freshness(), overlays: this.overlays(), exclusions: this.exclusions().map(item => ({ fact_ref: item.fact_ref, reason: item.reason })) }; }
     cockpitRegion(): string | null { const row = this.db.prepare("SELECT json FROM analytics_state WHERE key='cockpit_region'").get(); return row ? json<string>(row) : null; }
     setCockpitRegion(region: string): void { this.db.prepare("INSERT INTO analytics_state VALUES('cockpit_region',?) ON CONFLICT(key) DO UPDATE SET json=excluded.json").run(canonical(region)); }
+    pendingCockpit(): {
+        operation_id: string;
+        region: string;
+    } | null { const row = this.db.prepare("SELECT json FROM analytics_state WHERE key='pending_cockpit'").get(); return row ? json(row) : null; }
+    setPendingCockpit(value: {
+        operation_id: string;
+        region: string;
+    } | null): void {
+        if (value === null)
+            this.db.prepare("DELETE FROM analytics_state WHERE key='pending_cockpit'").run();
+        else
+            this.db.prepare("INSERT INTO analytics_state VALUES('pending_cockpit',?) ON CONFLICT(key) DO UPDATE SET json=excluded.json").run(canonical(value));
+    }
 }
 /** Consumer-facing persistence operations expose no SQLite handle or transaction primitives. */
-export type AnalyticsPort = Pick<AnalyticsRepository, 'ingest' | 'facts' | 'exclusions' | 'coverage' | 'observations' | 'snapshots' | 'confirmedGoals' | 'applyReview' | 'currentOutput' | 'cockpitRegion' | 'setCockpitRegion' | 'target' | 'latestRevision'>;
+export type AnalyticsPort = Pick<AnalyticsRepository, 'ingest' | 'facts' | 'exclusions' | 'coverage' | 'observations' | 'snapshots' | 'rawSnapshot' | 'unresolvedHistory' | 'confirmedGoals' | 'applyReview' | 'currentOutput' | 'cockpitRegion' | 'setCockpitRegion' | 'pendingCockpit' | 'setPendingCockpit' | 'target' | 'latestRevision'>;
 export function getAnalyticsPort(store: unknown): AnalyticsPort {
     const provider = store as {
         analyticsPort?: () => AnalyticsPort;

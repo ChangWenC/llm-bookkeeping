@@ -22,39 +22,48 @@ async function fixture() {
     const input = { schema_version: 1 as const, migration_key: 'legacy:1', records: [{ kind: 'review' as const, source_id: 'old-review', logical_id: 'legacy-confirm', revision: 1, content_hash: 'a'.repeat(64), professional_payload: event }], mappings: [{ source_id: 'old-review', target_ref: observation.observation_ref, weekly_ref: snapshot.analysis_ref, target_content_hash: contentHash(observation), weekly_content_hash: contentHash(snapshot), confidence: 'verified' as const, reason: null }] };
     return { c, s, repo, port: createAnalyticsHistoryPort(s, c), input, observation };
 }
-test('history confirmation compares both actual immutable targets, preserves history and is idempotent', async () => { const f = await fixture(); try {
-    const bad = structuredClone(f.input);
-    bad.migration_key = 'bad';
-    bad.mappings[0].target_content_hash = 'b'.repeat(64);
-    assert.equal((await f.port.importHistory(bad)).activated, 0);
-    assert.equal(f.repo.confirmed(f.observation.observation_ref), false);
-    const r = await f.port.importHistory(f.input);
-    assert.equal(r.activated, 1);
-    assert(f.repo.confirmed(f.observation.observation_ref));
-    assert((await f.port.importHistory(f.input)).reused);
-    assert.equal((await f.port.readHistory()).length, 2);
-    await assert.rejects(f.port.importHistory({ ...f.input, records: [] }), /identity conflict/);
-}
-finally {
-    f.s.close();
-} });
-test('failure retaining migration history rolls back exact revision confirmation in the same SQLite transaction', async () => { const f = await fixture(); try {
-    f.s.db.exec("CREATE TRIGGER fail_history BEFORE INSERT ON analytics_legacy BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END;");
-    await assert.rejects(f.port.importHistory(f.input), /history failure/);
-    assert.equal(f.repo.confirmed(f.observation.observation_ref), false);
-    assert.equal(f.repo.reviews().length, 0);
-    f.s.db.exec('DROP TRIGGER fail_history');
-    assert.equal((await f.port.importHistory(f.input)).activated, 1);
-}
-finally {
-    f.s.close();
-} });
-test('raw history payload is refused before mutation', async () => { const f = await fixture(); try {
-    const bad = structuredClone(f.input);
-    (bad.records[0].professional_payload as any).body = 'private';
-    await assert.rejects(f.port.importHistory(bad), /Raw legacy/);
-    assert.equal((await f.port.readHistory()).length, 0);
-}
-finally {
-    f.s.close();
-} });
+test('history confirmation compares both actual immutable targets, preserves history and is idempotent', async () => {
+    const f = await fixture();
+    try {
+        const bad = structuredClone(f.input);
+        bad.migration_key = 'bad';
+        bad.mappings[0].target_content_hash = 'b'.repeat(64);
+        assert.equal((await f.port.importHistory(bad)).activated, 0);
+        assert.equal(f.repo.confirmed(f.observation.observation_ref), false);
+        const r = await f.port.importHistory(f.input);
+        assert.equal(r.activated, 1);
+        assert(f.repo.confirmed(f.observation.observation_ref));
+        assert((await f.port.importHistory(f.input)).reused);
+        assert.equal((await f.port.readHistory()).length, 2);
+        await assert.rejects(f.port.importHistory({ ...f.input, records: [] }), /identity conflict/);
+    }
+    finally {
+        f.s.close();
+    }
+});
+test('failure retaining migration history rolls back exact revision confirmation in the same SQLite transaction', async () => {
+    const f = await fixture();
+    try {
+        f.s.db.exec("CREATE TRIGGER fail_history BEFORE INSERT ON analytics_legacy BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END;");
+        await assert.rejects(f.port.importHistory(f.input), /history failure/);
+        assert.equal(f.repo.confirmed(f.observation.observation_ref), false);
+        assert.equal(f.repo.reviews().length, 0);
+        f.s.db.exec('DROP TRIGGER fail_history');
+        assert.equal((await f.port.importHistory(f.input)).activated, 1);
+    }
+    finally {
+        f.s.close();
+    }
+});
+test('raw history payload is refused before mutation', async () => {
+    const f = await fixture();
+    try {
+        const bad = structuredClone(f.input);
+        (bad.records[0].professional_payload as any).body = 'private';
+        await assert.rejects(f.port.importHistory(bad), /Raw legacy/);
+        assert.equal((await f.port.readHistory()).length, 0);
+    }
+    finally {
+        f.s.close();
+    }
+});

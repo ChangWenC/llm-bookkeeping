@@ -2,14 +2,20 @@ import type { AnalyticsReviewInput, FactRef, WeeklyAnalysisInput, WeeklyAnalysis
 import { array, record, string, utc, version, validateWeeklyAnalysisResult } from '../contracts/validation.ts';
 import { analysisKey, factKey } from './model.ts';
 import { canonical } from './serialization.ts';
-function ref(value: unknown): void { const r = version(value, 'revision ref'); string(r.logical_id, 'logical_id'); if (!Number.isSafeInteger(r.revision) || r.revision < 1)
-    throw new Error('Invalid analysis revision'); }
-function evidence(value: unknown): void { for (const item of array(value, 'evidence_refs')) {
-    const r = version(item);
-    string(r.fact_id, 'fact_id');
+function ref(value: unknown): void {
+    const r = version(value, 'revision ref');
+    string(r.logical_id, 'logical_id');
     if (!Number.isSafeInteger(r.revision) || r.revision < 1)
-        throw new Error('Invalid fact revision');
-} }
+        throw new Error('Invalid analysis revision');
+}
+function evidence(value: unknown): void {
+    for (const item of array(value, 'evidence_refs')) {
+        const r = version(item);
+        string(r.fact_id, 'fact_id');
+        if (!Number.isSafeInteger(r.revision) || r.revision < 1)
+            throw new Error('Invalid fact revision');
+    }
+}
 function text(value: unknown, name: string): void { string(value, name); }
 export function validateAnalyticsInput(value: unknown): AnalyticsReviewInput {
     const input = version(value, 'analytics review input');
@@ -65,13 +71,19 @@ export function validateAnalyticsInput(value: unknown): AnalyticsReviewInput {
 export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalysisInput): WeeklyAnalysisResult {
     const result = validateWeeklyAnalysisResult(value);
     const snapshot = result.snapshot;
+    const previousSnapshot = input.previous_snapshot;
+    const reuse = previousSnapshot && canonical(snapshot) === canonical(previousSnapshot);
+    if (!input.analysis_ref || (!reuse && analysisKey(snapshot.analysis_ref) !== analysisKey(input.analysis_ref)))
+        throw new Error('Snapshot must use the exact application-prepared weekly revision');
     if (snapshot.week_end !== input.week_end)
         throw new Error('Analysis week differs from prepared week');
     if (input.coverage_status !== 'complete' && snapshot.coverage_status === 'complete')
         throw new Error('Analysis cannot upgrade incomplete prepared coverage');
     const allowed = new Set(input.facts.map(fact => factKey(fact.fact_ref)));
-    const check = (refs: FactRef[]): void => { if (refs.some(ref => !allowed.has(factKey(ref))))
-        throw new Error('Analysis evidence outside prepared professional facts'); };
+    const check = (refs: FactRef[]): void => {
+        if (refs.some(ref => !allowed.has(factKey(ref))))
+            throw new Error('Analysis evidence outside prepared professional facts');
+    };
     const observationIds = new Set<string>();
     for (const observation of snapshot.observations) {
         if (!observation.evidence_refs.length)
@@ -99,14 +111,19 @@ export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalys
         if (!input.confirmed_goal_refs.some(ref => analysisKey(ref) === analysisKey(goal.goal_ref)))
             throw new Error('Goal gap requires an exact confirmed goal revision');
     }
+    const actionEvidence = new Set([...allowed, ...(input.prior_action?.evidence_refs ?? []).map(factKey)]);
+    const checkAction = (refs: FactRef[]) => {
+        if (refs.some(ref => !actionEvidence.has(factKey(ref))))
+            throw new Error('Action evidence outside prepared current facts or prior action');
+    };
     if (snapshot.validation_action)
-        check(snapshot.validation_action.evidence_refs);
+        checkAction(snapshot.validation_action.evidence_refs);
     const previous = input.prior_action;
     const disposition = result.prior_action_disposition;
     if (previous?.state === 'active') {
         if (!disposition || analysisKey(disposition.action_ref) !== analysisKey(previous.action_ref))
             throw new Error('Prior active action requires explicit disposition');
-        check(disposition.evidence_refs);
+        checkAction(disposition.evidence_refs);
         if (disposition.disposition === 'continue' && (!snapshot.validation_action || analysisKey(snapshot.validation_action.action_ref) !== analysisKey(previous.action_ref) || snapshot.validation_action.state !== 'active'))
             throw new Error('Continue must preserve the prior active action');
         if (disposition.disposition === 'narrow' && (!snapshot.validation_action || snapshot.validation_action.action_ref.logical_id !== previous.action_ref.logical_id || snapshot.validation_action.action_ref.revision !== previous.action_ref.revision + 1 || snapshot.validation_action.state !== 'active'))

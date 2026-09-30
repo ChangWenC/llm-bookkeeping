@@ -1,0 +1,28 @@
+import type { DatabaseSync } from 'node:sqlite';
+export function initializeSchema(db: DatabaseSync): void {
+    db.exec(`PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
+      CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      INSERT OR IGNORE INTO metadata VALUES('schema','1');
+      CREATE TABLE IF NOT EXISTS collections(id TEXT PRIMARY KEY,json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS fragments(id TEXT PRIMARY KEY,json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,json TEXT NOT NULL,time TEXT,classification TEXT NOT NULL,ordering TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS event_time ON events(time,ordering,id);
+      CREATE TABLE IF NOT EXISTS event_lanes(event_id TEXT NOT NULL REFERENCES events(id),lane TEXT NOT NULL,PRIMARY KEY(event_id,lane));
+      CREATE TABLE IF NOT EXISTS coverage(id TEXT PRIMARY KEY,json TEXT NOT NULL,from_time TEXT NOT NULL,to_time TEXT NOT NULL,lane TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS checkpoints(id TEXT PRIMARY KEY,json TEXT NOT NULL,provider TEXT NOT NULL,lane TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS bundles(id TEXT PRIMARY KEY,json TEXT NOT NULL,kind TEXT NOT NULL,lane TEXT NOT NULL,period TEXT,cutoff TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS chunks(id TEXT PRIMARY KEY,json TEXT NOT NULL,kind TEXT NOT NULL,lane TEXT NOT NULL,from_time TEXT,to_time TEXT,state TEXT NOT NULL DEFAULT 'pending');
+      CREATE TABLE IF NOT EXISTS reviewed_units(kind TEXT NOT NULL,lane TEXT NOT NULL,event_id TEXT NOT NULL,PRIMARY KEY(kind,lane,event_id));
+      CREATE TABLE IF NOT EXISTS reviewed_spans(kind TEXT NOT NULL,lane TEXT NOT NULL,source_id TEXT NOT NULL,start_byte INTEGER NOT NULL,end_byte INTEGER NOT NULL,total_bytes INTEGER NOT NULL,PRIMARY KEY(kind,lane,source_id,start_byte,end_byte));
+      CREATE TABLE IF NOT EXISTS reviewed_sources(kind TEXT NOT NULL,lane TEXT NOT NULL,source_id TEXT NOT NULL,PRIMARY KEY(kind,lane,source_id));
+      CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,bundle_id TEXT UNIQUE NOT NULL REFERENCES bundles(id),json TEXT NOT NULL,content TEXT NOT NULL,commit_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS facts(id TEXT NOT NULL,revision INTEGER NOT NULL,json TEXT NOT NULL,recorded_at TEXT NOT NULL,PRIMARY KEY(id,revision));
+      CREATE TABLE IF NOT EXISTS patches(id TEXT PRIMARY KEY,json TEXT NOT NULL,status TEXT NOT NULL,reason TEXT);
+      CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,json TEXT NOT NULL,status TEXT NOT NULL,export_path TEXT);
+      CREATE TABLE IF NOT EXISTS acks(consumer TEXT NOT NULL,batch_id TEXT NOT NULL REFERENCES outbox(id),json TEXT NOT NULL,PRIMARY KEY(consumer,batch_id));
+      CREATE TABLE IF NOT EXISTS intents(id TEXT PRIMARY KEY,json TEXT NOT NULL,state TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS work(id TEXT PRIMARY KEY,json TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,migration_key TEXT UNIQUE);
+      CREATE TABLE IF NOT EXISTS imports(migration_key TEXT PRIMARY KEY,json TEXT NOT NULL,result_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS legacy_mappings(source_id TEXT PRIMARY KEY,json TEXT NOT NULL);
+    `);
+}

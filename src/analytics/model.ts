@@ -29,34 +29,28 @@ export function coverageStatus(config: BookkeepingConfig, records: SourceCoverag
     const providers = config.providers.filter(provider => provider.enabled);
     if (!providers.length)
         return 'unknown';
+    const start = Date.parse(range.from), end = Date.parse(range.to);
     let anyKnown = false;
     let allComplete = true;
     for (const provider of providers) {
-        const relevant = records.filter(record => record.provider === provider.provider && record.account_id === provider.account_id);
-        const intervals: [
-            number,
-            number
-        ][] = [];
-        for (const record of relevant) {
-            if (!['unknown', 'unavailable', 'disabled'].includes(record.capture_status))
-                anyKnown = true;
-            if (record.capture_status !== 'complete' || record.review_status !== 'complete' || record.gaps.length) {
-                allComplete = false;
-                continue;
+        const relevant = records.filter(record => record.provider === provider.provider && record.account_id === provider.account_id && Date.parse(record.query_range.from) < end && Date.parse(record.query_range.to) > start);
+        if (relevant.some(record => !['unknown', 'unavailable', 'disabled'].includes(record.capture_status)))
+            anyKnown = true;
+        const scopes = new Set<string | null>([null, ...relevant.map(record => record.conversation_id)]);
+        for (const scope of scopes) {
+            const scoped = relevant.filter(record => record.conversation_id === scope);
+            // Discovery covers the entire period. Conversation/file obligations cover their explicitly queried intervals.
+            const obligations = scope === null ? [[start, end, 0]] : scoped.map(record => [Math.max(start, Date.parse(record.query_range.from)), Math.min(end, Date.parse(record.query_range.to)), Date.parse(record.cutoff)]);
+            for (const [from, to, minimumCutoff] of obligations) {
+                const intervals = scoped.filter(record => record.capture_status === 'complete' && record.review_status === 'complete' && !record.gaps.length && Date.parse(record.cutoff) >= minimumCutoff).flatMap(record => record.read_ranges.map(read => [Math.max(from, Date.parse(read.from), Date.parse(record.query_range.from)), Math.min(to, Date.parse(read.to), Date.parse(record.query_range.to), Date.parse(record.cutoff))])).sort((a, b) => a[0] - b[0]);
+                let frontier = from;
+                for (const [left, right] of intervals)
+                    if (left <= frontier)
+                        frontier = Math.max(frontier, right);
+                if (frontier < to)
+                    allComplete = false;
             }
-            // Provider discovery coverage is required; a completed individual conversation cannot prove enumeration.
-            if (record.conversation_id !== null)
-                continue;
-            for (const read of record.read_ranges)
-                intervals.push([Math.max(Date.parse(read.from), Date.parse(range.from)), Math.min(Date.parse(read.to), Date.parse(range.to), Date.parse(record.cutoff))]);
         }
-        intervals.sort((a, b) => a[0] - b[0]);
-        let frontier = Date.parse(range.from);
-        for (const [from, to] of intervals)
-            if (from <= frontier)
-                frontier = Math.max(frontier, to);
-        if (frontier < Date.parse(range.to))
-            allComplete = false;
     }
     return allComplete ? 'complete' : anyKnown ? 'partial' : 'unknown';
 }

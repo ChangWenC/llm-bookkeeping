@@ -1,0 +1,112 @@
+import type { SourceEvent, FactRef, TimeRange, FactRevision } from '../contracts/types.ts';
+import { canonical } from '../analytics/serialization.ts';
+export const refKey = (ref: FactRef) => `${ref.fact_id}:${ref.revision}`;
+export const utc = (value: string) => {
+    if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(value) || !Number.isFinite(Date.parse(value)))
+        throw new Error('Invalid UTC timestamp: ' + value);
+};
+export const normalized = (value: string) => {
+    const match = value.match(/^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z$/);
+    if (!match)
+        throw new Error('Invalid UTC timestamp');
+    return match[1] + '.' + (match[2] ?? '').padEnd(9, '0') + 'Z';
+};
+export const rangeCheck = (range: TimeRange) => {
+    utc(range.from);
+    utc(range.to);
+    if (normalized(range.from) >= normalized(range.to))
+        throw new Error('Range must be nonempty and half open');
+};
+export const version = (value: any) => {
+    if (value?.schema_version !== 1)
+        throw new Error('Unsupported schema_version');
+};
+export const unique = (ids: string[], label: string) => {
+    if (ids.some(id => !id) || new Set(ids).size !== ids.length)
+        throw new Error('Duplicate or empty ' + label);
+};
+export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): SourceEvent {
+    const nativeCompatible = previous.source.message_id !== null && canonical(previous.source) === canonical(incoming.source) && previous.body === incoming.body && (!previous.utc_time.value || !incoming.utc_time.value || normalized(previous.utc_time.value) === normalized(incoming.utc_time.value)) && (previous.role === incoming.role || previous.role === 'unknown' || incoming.role === 'unknown');
+    if (nativeCompatible) {
+        for (const key of ['sender_id', 'real_sender_id'])
+            if (previous.context[key] !== undefined && incoming.context[key] !== undefined && String(previous.context[key]) !== String(incoming.context[key]))
+                throw new Error('Conflicting known sender');
+        const retainedContext = { ...previous.context, ...incoming.context };
+        for (const key of ['identity_verified', 'media_transcribed'])
+            if (previous.context[key] === true)
+                retainedContext[key] = true;
+        if (previous.context.context_only === false || incoming.context.context_only === false)
+            retainedContext.context_only = false;
+        const candidate = { ...incoming, physical_order: previous.physical_order, generation: previous.generation, time_precision: previous.time_precision === 'unknown' ? incoming.time_precision : previous.time_precision, context: retainedContext };
+        if (previous.utc_time.value && incoming.utc_time.value && previous.original_time.value !== null)
+            candidate.original_time = previous.original_time;
+        if (previous.journal_timezone.value === incoming.journal_timezone.value && previous.journal_date.value === incoming.journal_date.value)
+            candidate.journal_timezone_basis = previous.journal_timezone_basis;
+        if (previous.wire_timezone.value !== null)
+            candidate.wire_timezone = previous.wire_timezone;
+        previous = { ...previous, context: retainedContext };
+        incoming = candidate;
+    }
+    const merged = structuredClone(previous);
+    const nullable = ['original_time', 'utc_time', 'wire_timezone', 'journal_timezone', 'journal_date'] as const;
+    for (const key of nullable) {
+        const a = previous[key];
+        const b = incoming[key];
+        if (a.value === null && b.value !== null)
+            (merged as any)[key] = b;
+        else if (b.value !== null && a.value !== b.value) {
+            if (['utc_time', 'original_time'].includes(key) && a.value?.endsWith('Z') && b.value.endsWith('Z') && normalized(a.value) === normalized(b.value))
+                continue;
+            throw new Error('Conflicting known event ' + key);
+        }
+    }
+    for (const key of ['message_id', 'block_id'] as const) {
+        if (merged.source[key] === null)
+            merged.source[key] = incoming.source[key];
+        else if (incoming.source[key] !== null && merged.source[key] !== incoming.source[key])
+            throw new Error('Conflicting native source identity');
+    }
+    if (previous.classification === 'unknown')
+        merged.classification = incoming.classification;
+    if (previous.role === 'unknown')
+        merged.role = incoming.role;
+    if (previous.time_precision === 'unknown')
+        merged.time_precision = incoming.time_precision;
+    if (previous.journal_timezone_basis === null)
+        merged.journal_timezone_basis = incoming.journal_timezone_basis;
+    if (previous.fragment_ref === null)
+        merged.fragment_ref = incoming.fragment_ref;
+    if (previous.context.turn_complete === false && incoming.context.turn_complete === true)
+        merged.context.turn_complete = true;
+    if (previous.context.incomplete_turn === true && incoming.context.incomplete_turn === false)
+        merged.context.incomplete_turn = false;
+    merged.locator = incoming.locator;
+    const normalizeComparable = (e: SourceEvent) => ({ ...e, locator: null, fragment_ref: null, ...Object.fromEntries(nullable.map(key => [key, { ...e[key], value: e[key].value && ['utc_time', 'original_time'].includes(key) && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(e[key].value!) ? normalized(e[key].value!) : e[key].value }])) });
+    // Incoming nulls cannot erase known information. Rebuild its comparison shape with retained values.
+    const comparator = { ...incoming, source: { ...incoming.source }, context: { ...incoming.context } };
+    for (const key of nullable)
+        if (incoming[key].value === null)
+            (comparator as any)[key] = merged[key];
+    for (const key of ['message_id', 'block_id'] as const)
+        if (comparator.source[key] === null)
+            comparator.source[key] = merged.source[key];
+    if (comparator.classification === 'unknown')
+        comparator.classification = merged.classification;
+    if (comparator.role === 'unknown')
+        comparator.role = merged.role;
+    if (comparator.time_precision === 'unknown')
+        comparator.time_precision = merged.time_precision;
+    if (comparator.journal_timezone_basis === null)
+        comparator.journal_timezone_basis = merged.journal_timezone_basis;
+    if (canonical(normalizeComparable(merged)) !== canonical(normalizeComparable(comparator)))
+        throw new Error('Conflicting event content/identity');
+    return merged;
+}
+export function weekFor(date: string): string { const d = new Date(date + 'T12:00:00Z'); const dow = d.getUTCDay(); d.setUTCDate(d.getUTCDate() - (dow + 6) % 7); return d.toISOString().slice(0, 10); }
+export function factWeek(fact: FactRevision): string | null {
+    const time = fact.occurred_at.value;
+    if (!time)
+        return null;
+    const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time));
+    return weekFor(date);
+}
