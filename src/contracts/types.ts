@@ -104,6 +104,7 @@ export interface AnalyticsAttributionPair extends Versioned {
   observation_ref: AnalysisRevisionRef; capability_ref: AnalysisRevisionRef;
 }
 export interface AnalyticsPilotStats extends Versioned {
+  review_duration_ms: UnknownValue<number>;
   range: TimeRange; weeks: string[];
   coverage: { complete: number; partial: number; unknown: number };
   reviews: { confirmed_pairs: number; corrected_pairs: number; rejected_pairs: number; retracted_reviews: number };

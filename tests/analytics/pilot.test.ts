@@ -24,6 +24,7 @@ test('pilot uses four completed Amsterdam weeks across DST and real scope covera
   assert.equal(result.range.from, '2026-10-04T22:00:00.000Z');
   assert.equal(result.range.to, '2026-11-01T23:00:00.000Z');
   assert.equal((Date.parse(result.range.to) - Date.parse(result.range.from)) / 3600000, 673);
+  assert.deepEqual(result.review_duration_ms, { schema_version: 1, value: null, reason: 'Actual review duration was not measured' });
   assert.deepEqual(result.coverage, { complete: 2, partial: 1, unknown: 1 });
   assert.deepEqual(analyticsPilotStats({ ...config, providers: [] }, input).coverage, { complete: 0, partial: 0, unknown: 4 });
 });

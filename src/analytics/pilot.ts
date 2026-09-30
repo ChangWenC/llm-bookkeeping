@@ -36,6 +36,7 @@ export function analyticsPilotStats(config: BookkeepingConfig, input: AnalyticsP
   const inRange = (instant: string) => { const at = Date.parse(utc(instant, 'pilot.event.at')); return at >= from && at < to && at <= asOf; };
   const stats: AnalyticsPilotStats = {
     schema_version: 1, range, weeks,
+    review_duration_ms: { schema_version: 1, value: null, reason: 'Actual review duration was not measured' },
     coverage: { complete: 0, partial: 0, unknown: 0 },
     reviews: { confirmed_pairs: 0, corrected_pairs: 0, rejected_pairs: 0, retracted_reviews: 0 },
     notifications: { generated: 0, active: 0 },

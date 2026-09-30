@@ -1503,6 +1503,32 @@
             "completed",
             "active"
           ]
+        },
+        "review_duration_ms": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "value": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "schema_version",
+            "value",
+            "reason"
+          ]
         }
       },
       "required": [
@@ -1512,7 +1538,8 @@
         "coverage",
         "reviews",
         "notifications",
-        "actions"
+        "actions",
+        "review_duration_ms"
       ]
     },
     "AnalyticsReviewEvent": {
