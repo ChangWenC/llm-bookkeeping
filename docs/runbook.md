@@ -37,7 +37,7 @@ Report code, synthetic and real acceptance independently. Use SPEC's complete ma
 
 Production cutover belongs to the coordinator: isolated Wiki acceptance; pause monthly; await old writer exit; consistent snapshot + restore sample; minimal explicit config/T0/S; real manual daily; update existing daily automation preserving schedule/model/effort; update prompts/schema/memory; safe monthly resume; observe two real scheduled runs; retire old dedicated entry points while preserving recoverable snapshots. Do not declare full completion after only M1.
 
-## M1 integration verification (synthetic only)
+## Integration verification (synthetic only)
 
 `npm run check` performs strict TypeScript checking with pinned TypeScript 5.9.3 / @types/node 25.8.0, then recursively discovers only `.test.ts` tests. Fixtures are not counted as test cases. `tests/integration/end-to-end.test.ts` uses actual adapters, SQLite Store, Reviewer, Publisher and CLI orchestration against isolated synthetic roots; only clock/stdout/stderr are injected.
 
@@ -53,7 +53,7 @@ Daily capture/review/export/publication and source-independent facts/status/back
 
 `prepare --pages /absolute/page-targets.json` accepts `{schema_version:1,paths:["wiki/projects/项目_example.md","log.md"]}`. These are explicit Wiki targets, not implicit cwd ownership. Raw, traversal, symlink and outside paths are rejected; bounded/excerpt baselines are owned by Reviewer. Every accepted page patch still goes through the common Publisher/SafeWikiWriter lock, backups and recovery.
 
-Analytics, migration and health validation now invoke concrete factories; the temporary M1 semantic payload guard is removed. This verifies delivered behavior and does not claim the remaining SPEC7 capability/pilot/decision acceptance or production cutover complete.
+Analytics, migration and health validation invoke concrete factories. SPEC7 exact pair folds, catalogue promotion, as-of contract expiry, bounded goal material and four-week pilot now have actual SQLite/CLI synthetic acceptance. Real production and scheduled-run acceptance remain separate.
 
 ## Migration and monthly recovery
 
@@ -66,3 +66,13 @@ Group history first enumerates exact core windows, then independently bounded pa
 Frozen weekly/monthly fact pages: first `prepare` returns typed `facts_page` with `snapshot_id`, original `cutoff`, and `next_offset`. Continue with `prepare --kind monthly --lane history --period YYYY-MM --fact-snapshot SNAPSHOT --fact-offset NEXT --cutoff ORIGINAL_UTC --output NEW_DIR`. Keep the snapshot and cutoff unchanged; a new first page creates a new ref snapshot. Facts pages do not certify complete coverage or clear unread task IDs.
 
 New-page review contract: when a requested baseline has digest `absent`, `ReviewResult.pages[].new_text` supplies the complete current Wiki template, including all required frontmatter, H1, date and journal class. Publisher writes that accepted content; it does not manufacture a page template. Existing pages receive only reviewed local append or exact replacement. An existing-day acceptance does not cover first-page creation.
+
+## Exact Analytics review and bounded original material
+
+`analytics-review --input FILE` accepts a versioned `kind:review` payload with append-only events. Generic observation `confirm` confirms that observation only. `selected_pairs:[{schema_version:1,observation_ref,capability_ref}]` selects exact revisions; `correct` confirms those selected pairs and marks remaining pairs contested. A `retract` supplies `retracts_review_id` for the exact previous effect; retracting that retraction restores the prior fold. Unknown or stale refs remain local pending/stale. `kind:capability_candidate` registers a candidate definition; explicit user confirmation of that exact definition revision promotes it. Revision changes inherit no old pair confirmation.
+
+`consume --target analytics` returns `analytics_pilot` with four completed Amsterdam Mon–Sun periods, exact professional review/action/notice counters, current as-of active states and an explicit unknown review duration. Goal and decision expiry refresh current cockpit even without a new fact batch; generated notice history remains intact. The production CLI uses the real clock; tests inject only its existing clock/output dependencies.
+
+Monthly original material: `prepare --kind monthly --lane history --period YYYY-MM --cutoff ORIGINAL_UTC --pages EXPLICIT_TARGETS --output DIR` reads only explicitly named old daily/project pages. Accepted zero-fact original pages accumulate distinct summaries without new fact allocation. For queued immutable v2 archives, use `--archive-context-offset NEXT` and the returned `--fact-snapshot SNAPSHOT` with that original cutoff. `archive_context_page` exposes continuation; a large original gives its required larger bundle budget so re-reading the same offset reaches the tail. Only fully included original IDs may enter `monthly_review.completed_archive_context_ids`; excerpt, unread and later work remains pending.
+
+Configured `goal_whitelist` page paths supply bounded `goal_page_baselines` for weekly review. Full digests survive excerpts; absent, unsafe or oversized targets are local gaps. Page contents do not create confirmed goal contracts or expand professional permissions.

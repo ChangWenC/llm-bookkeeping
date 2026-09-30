@@ -8,7 +8,7 @@ Authoritative contracts are `src/contracts/types.ts`; no business implementation
 - A: `src/adapters/**`; export `createAdapters(config): SourceAdapter[]` from `src/adapters/index.ts`.
 - B: `src/store/**`, `src/review/**`; export `createStore(config): Promise<Store>` and `createReviewer(store, config): Reviewer` from respective `index.ts`. Only B writes SQLite schema.
 - C: `src/publish/**`; export `createPublisher(store, config): Publisher` from `src/publish/index.ts`.
-- Consumers/migration are second-wave ports; absent services report explicit unavailable, never success.
+- Analytics/monthly/index consumers and manifest import/migration use concrete factories; only genuinely absent services report unavailable.
 
 ## Collection
 
@@ -70,6 +70,6 @@ SPEC7 professional catalogue: optional config/weekly `analytics_catalog` contain
 
 Monthly original context is separate from facts. `page_paths` includes explicit safe daily/project pages with bounded full-digest baselines. `archive_contexts` contains queued immutable v2 original excerpts and known fact_refs without allocating duplicate facts; `archive_context_page` supplies bounded work offset/next_offset/total. Continue with original cutoff. A large entry’s `excerpt_reason` must specify how to increase the configured material budget and re-read that entry to reach its tail. `completed_archive_context_ids` accepts only actually included full-original context IDs, never an unread/excerpt entry; successful monthly publication completes exactly those IDs.
 
-`src/analytics/pilot.ts` exposes pure `analyticsPilotStats(config,{as_of,coverage,reviews,notices,actions})`; callers provide already applied professional exact-ref events, historical unique notices with as-of active flags, and immutable action events. Counters cover four completed Europe/Amsterdam Mon–Sun periods (DST-aware), while active notice/action counts reflect the current as-of fold, including still-active older records. Generic observation confirmation counts zero capability pairs. `goalActiveAt` and `decisionActiveAt` use exact current-revision confirmation supplied by Store, matching goal ref/subject and contract expiry; registration flags grant no authority. These helpers do not scan sources or expand permissions. Store/consumer wiring is delivered separately.
+`src/analytics/pilot.ts` exposes pure `analyticsPilotStats(config,{as_of,coverage,reviews,notices,actions})`; callers provide already applied professional exact-ref events, historical unique notices with as-of active flags, and immutable action events. Counters cover four completed Europe/Amsterdam Mon–Sun periods (DST-aware), while active notice/action counts reflect the current as-of fold, including still-active older records. Generic observation confirmation counts zero capability pairs. `goalActiveAt` and `decisionActiveAt` use exact current-revision confirmation supplied by Store, matching goal ref/subject and contract expiry; registration flags grant no authority. These helpers do not scan sources or expand permissions. Store persists the professional action/notice/review ledgers and Analytics consume returns these statistics.
 
 Pilot `review_duration_ms` is explicitly unknown (`value:null`, reason `Actual review duration was not measured`). Preparation/publication wall-clock intervals are not measured human review duration.
