@@ -328,7 +328,7 @@ export async function executeCommand(parsed: ParsedCommand, config: BookkeepingC
 
 export interface CliDependencies {
   loadConfig?: (path?: string) => Promise<BookkeepingConfig>;
-  createRuntime?: (config: BookkeepingConfig, command?: string, options?: Record<string, string | boolean>) => Promise<RuntimeServices>;
+  createRuntime?: (config: BookkeepingConfig, command?: string, options?: Record<string, string | boolean>, now?: () => Date) => Promise<RuntimeServices>;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
   now?: () => string;
@@ -349,8 +349,10 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     if (parsed.command === 'restore' && !dependencies.createRuntime) {
       result = await restoreRuntime(resolve(required(parsed.options, 'input')), required(parsed.options, 'data-dir'), config);
     } else {
-      services = await (dependencies.createRuntime ?? createRuntime)(config, parsed.command, parsed.options);
-      result = await executeCommand(parsed, config, services, (dependencies.now ?? (() => new Date().toISOString()))());
+      const now = (dependencies.now ?? (() => new Date().toISOString()))();
+      utc(now, 'runtime clock');
+      services = await (dependencies.createRuntime ?? createRuntime)(config, parsed.command, parsed.options, () => new Date(now));
+      result = await executeCommand(parsed, config, services, now);
     }
     if (services) {
       await (services.close ? services.close() : services.store.close());

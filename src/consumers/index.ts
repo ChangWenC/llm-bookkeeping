@@ -6,7 +6,7 @@ export { createArchiveService } from './archive/index.ts';
 export { createMonthlyConsumer } from './monthly/index.ts';
 export { createIndexConsumer } from './index/index.ts';
 
-export async function createConsumers(store: Store, config: BookkeepingConfig, targets = ['analytics', 'monthly', 'index']): Promise<Consumer[]> {
+export async function createConsumers(store: Store, config: BookkeepingConfig, targets = ['analytics', 'monthly', 'index'], options: { now?: () => Date } = {}): Promise<Consumer[]> {
   const consumers: Consumer[] = [];
   for (const target of targets) {
     if (target === 'monthly') consumers.push(createMonthlyConsumer(store, config));
@@ -14,7 +14,7 @@ export async function createConsumers(store: Store, config: BookkeepingConfig, t
     else if (target === 'analytics') {
       const path = './analytics/index.ts';
       const module = await import(path);
-      consumers.push(module.createAnalyticsConsumer(store, config));
+      consumers.push(module.createAnalyticsConsumer(store, config, { now: options.now }));
     } else throw new Error(`Unknown consumer ${target}`);
   }
   return consumers;

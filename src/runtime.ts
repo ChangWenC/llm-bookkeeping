@@ -36,7 +36,7 @@ export async function restoreRuntime(input: string, dataDir: string, config: Boo
 }
 
 /** Command-scoped composition. Reading status/facts or restoring never initializes sources. */
-export async function createRuntime(config: BookkeepingConfig, command?: string, options: Record<string, string | boolean> = {}): Promise<RuntimeServices> {
+export async function createRuntime(config: BookkeepingConfig, command?: string, options: Record<string, string | boolean> = {}, now?: () => Date): Promise<RuntimeServices> {
   requireNode();
   const storeModule = await loadModule('./store/index.ts');
   const store: Store = await storeModule.createStore(config);
@@ -76,7 +76,7 @@ export async function createRuntime(config: BookkeepingConfig, command?: string,
       const module = await loadModule('./consumers/index.ts');
       const target = options.target;
       const targets = typeof target === 'string' && target !== 'all' ? [target] : ['analytics', 'monthly', 'index'];
-      services.consumers = await module.createConsumers(store, config, targets);
+      services.consumers = await module.createConsumers(store, config, targets, { now });
     }
     if (!command || command === 'archive') {
       const module = await loadModule('./consumers/archive/index.ts');
@@ -84,7 +84,7 @@ export async function createRuntime(config: BookkeepingConfig, command?: string,
     }
     if (command === 'analytics-review') {
       const module = await loadModule('./consumers/analytics/index.ts');
-      const analytics = module.createAnalyticsConsumer(store, config);
+      const analytics = module.createAnalyticsConsumer(store, config, { now });
       services.analyticsReview = input => analytics.review(input);
     }
     if (command === 'import' || command === 'migrate') {
