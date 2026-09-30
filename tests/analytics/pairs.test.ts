@@ -61,9 +61,12 @@ test('candidate definitions and attribution revisions never inherit confirmation
     const f = await setup();
     await f.review('verified-pair', 'confirm', f.observation.observation_ref, [f.pair('verify')]);
     await f.review('formal-one', 'confirm', ref('capability:verify'));
+    await f.review('keep-design-only', 'correct', f.observation.observation_ref, [f.pair('design')]);
+    assert.equal(f.repository.currentOutput('x').overlays.find(p => p.label === 'verify')!.contested, true);
     await f.consumer.review({ schema_version: 1, kind: 'capability_candidate', definition: definition('verify', 'candidate', 2) });
     assert.equal(f.repository.catalog(f.c).capabilities.find(d => d.label === 'verify')!.status, 'candidate');
     assert.equal(f.repository.currentOutput('x').overlays.find(p => p.label === 'verify')!.confirmed, false);
+    assert.equal(f.repository.currentOutput('x').overlays.find(p => p.label === 'verify')!.contested, false);
     assert.equal((await f.review('stale-definition', 'confirm', f.observation.observation_ref, [f.pair('verify')]))[0].status, 'pending');
     await f.review('new-pair', 'confirm', f.observation.observation_ref, [f.pair('verify', 2)]);
     assert.equal(f.repository.currentOutput('x').overlays.find(p => p.label === 'verify')!.stage, 'candidate');
@@ -121,5 +124,7 @@ test('four-week SQL action audit counts continuation, narrowing and abandonment 
         assert.equal(f.repository.pilot(f.c, clock).actions.active, i === 3 ? 0 : 1);
     }
     assert.deepEqual(f.repository.pilot(f.c, '2026-10-26T12:00:00Z').actions, { continued: 1, narrowed: 1, abandoned: 1, completed: 0, active: 0 });
+    const reprepare = (await reviewer.prepare({ kind: 'weekly', lane: 'history', period: '2026-10-25', cutoff: '2026-10-26T12:00:00Z' }))[0];
+    assert.equal(reprepare.analysis_context!.prior_action, null); // A closed current-week action cannot resurrect the older week action.
     f.s.close();
 });

@@ -22,7 +22,7 @@ export function activityReview(events: AnalyticsReviewEvent[], ref: AnalysisRevi
 export function capabilityMatches(definition: AnalyticsDefinition, capabilityId: string): boolean {
     return definition.definition_ref.logical_id === capabilityId || definition.definition_ref.logical_id === 'capability:' + capabilityId;
 }
-export function attributionOverlays(observations: WeeklyObservation[], catalog: AnalyticsCatalog, events: AnalyticsReviewEvent[]): Record<string, unknown>[] {
+export function attributionOverlays(observations: WeeklyObservation[], catalog: AnalyticsCatalog, events: AnalyticsReviewEvent[], reviewedDefinitions: Record<string, AnalysisRevisionRef[]> = {}): Record<string, unknown>[] {
     const active = activeReviews(events);
     return observations.flatMap(observation => {
         if (activityReview(events, observation.observation_ref)?.action === 'reject')
@@ -36,8 +36,11 @@ export function attributionOverlays(observations: WeeklyObservation[], catalog: 
         }>();
         for (const event of active.filter(event => analysisKey(event.target_ref) === analysisKey(observation.observation_ref) && (event.selected_pairs?.length || (event.action === 'correct' && event.selected_pairs !== undefined)))) {
             const chosen = new Set(event.selected_pairs!.map(pair => analysisKey(pair.capability_ref)));
+            const reviewed = new Set((reviewedDefinitions[event.review_id] ?? event.selected_pairs!.map(pair => pair.capability_ref)).map(analysisKey));
             for (const definition of definitions) {
                 const key = analysisKey(definition.definition_ref);
+                if (!reviewed.has(key))
+                    continue;
                 if (event.action === 'correct')
                     states.set(key, { confirmed: chosen.has(key), contested: !chosen.has(key), review_id: event.review_id, correction: event.correction });
                 else if (chosen.has(key))

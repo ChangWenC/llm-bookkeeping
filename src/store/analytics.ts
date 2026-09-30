@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { AnalyticsCatalog, AnalyticsDefinition, AnalyticsReviewEvent, AnalyticsReviewInput, AnalysisRevisionRef, BookkeepingConfig, FactArtifact, FactRef, GoalContract, MajorDecisionContract, ProfessionalFact, ReviewReceipt, SourceCoverage, WeeklyAnalysisResult, WeeklyAnalysisSnapshot, WeeklyObservation } from '../contracts/types.ts';
-import { activityReview, attributionOverlays, validatePairTargets } from '../analytics/reviews.ts';
+import { activityReview, attributionOverlays, validatePairTargets, capabilityMatches } from '../analytics/reviews.ts';
 import { goalActiveAt, decisionActiveAt } from '../analytics/contracts.ts';
 import { analyticsPilotStats, type PilotActionEvent } from '../analytics/pilot.ts';
 import { canonical } from '../analytics/serialization.ts';
@@ -54,6 +54,7 @@ export class AnalyticsRepository {
       CREATE TABLE IF NOT EXISTS analytics_coverage(id TEXT PRIMARY KEY,json TEXT NOT NULL,cutoff TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_targets(id TEXT NOT NULL,revision INTEGER NOT NULL,kind TEXT NOT NULL,json TEXT NOT NULL,content_hash TEXT NOT NULL,PRIMARY KEY(id,revision));
       CREATE TABLE IF NOT EXISTS analytics_reviews(id TEXT PRIMARY KEY,json TEXT NOT NULL,status TEXT NOT NULL,reason TEXT);
+      CREATE TABLE IF NOT EXISTS analytics_review_definitions(review_id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_snapshots(id TEXT NOT NULL,revision INTEGER NOT NULL,week_end TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(id,revision));
       CREATE TABLE IF NOT EXISTS analytics_freshness(batch_id TEXT PRIMARY KEY,analysis_id TEXT NOT NULL,revision INTEGER NOT NULL,at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_notices(id TEXT PRIMARY KEY,json TEXT NOT NULL);
@@ -169,7 +170,10 @@ export class AnalyticsRepository {
         });
         return { schema_version: 1, capabilities: definitions('capability_definition'), directions: definitions('direction_definition'), project_mappings: config?.analytics_catalog?.project_mappings ?? [] };
     }
-    overlays(): Record<string, unknown>[] { return attributionOverlays(this.observations(), this.catalog(), this.reviews()); }
+    overlays(): Record<string, unknown>[] {
+        const definitions = Object.fromEntries(this.db.prepare('SELECT review_id,json FROM analytics_review_definitions').all().map((row: any) => [row.review_id, JSON.parse(row.json)]));
+        return attributionOverlays(this.observations(), this.catalog(), this.reviews(), definitions);
+    }
     /** Caller has validated the semantic result; this participates in Store's existing transaction. */
     saveAnalysis(result: WeeklyAnalysisResult, batchId: string): void {
         const snapshot = result.snapshot;
@@ -322,6 +326,8 @@ export class AnalyticsRepository {
                 if (status === 'applied' && event.action !== 'retract' && (event.selected_pairs?.length || (event.action === 'correct' && event.selected_pairs !== undefined))) {
                     try {
                         validatePairTargets(event, target?.kind === 'observation' ? target.value : null, this.catalog(config).capabilities);
+                        const definitions = this.catalog(config).capabilities.filter(definition => (target!.value as WeeklyObservation).capability_ids.some(id => capabilityMatches(definition, id))).map(definition => definition.definition_ref);
+                        this.db.prepare('INSERT INTO analytics_review_definitions VALUES(?,?)').run(event.review_id, canonical(definitions));
                     }
                     catch (error) {
                         status = 'pending';
