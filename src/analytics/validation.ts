@@ -1,5 +1,5 @@
 import type { AnalyticsReviewInput, FactRef, WeeklyAnalysisInput, WeeklyAnalysisResult } from '../contracts/types.ts';
-import { array, record, string, utc, version, validateWeeklyAnalysisResult } from '../contracts/validation.ts';
+import { array, record, string, utc, utcComparisonKey, version, validateWeeklyAnalysisResult } from '../contracts/validation.ts';
 import { analysisKey, factKey } from './model.ts';
 import { canonical } from './serialization.ts';
 import { capabilityMatches } from './reviews.ts';
@@ -85,7 +85,7 @@ export function validateAnalyticsInput(value: unknown): AnalyticsReviewInput {
             ref(contract.goal_ref);
             utc(contract.valid_from, 'valid_from');
             utc(contract.valid_to, 'valid_to');
-            if (Date.parse(contract.valid_from) >= Date.parse(contract.valid_to))
+            if (utcComparisonKey(contract.valid_from) >= utcComparisonKey(contract.valid_to))
                 throw new Error('Invalid decision validity interval');
             const trigger = version(contract.trigger);
             text(trigger.name, 'trigger.name');

@@ -3,6 +3,7 @@ import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AnalyticsReviewInput, BookkeepingConfig, Consumer, ConsumerOutcome, ReviewReceipt, Store, WeeklyAnalysisInput } from '../../contracts/types.ts';
 import { canonical, digest } from '../../analytics/serialization.ts';
+import { utcComparisonKey } from '../../contracts/validation.ts';
 import { getAnalyticsPort, type AnalyticsPort, type AnalyticsOutput } from '../../store/analytics.ts';
 import { analysisWeekRange, addCalendarDays } from '../../time.ts';
 import { coverageStatus, factKey, analysisKey } from '../../analytics/model.ts';
@@ -54,13 +55,13 @@ export async function prepareWeeklyAnalysis(store: Store, config: BookkeepingCon
     for (const batch of await store.listReadyBatches('analytics'))
         repository.ingest(batch, config, asOf);
     const range = analysisWeekRange(weekEnd);
-    const facts = repository.facts().filter(fact => fact.occurred_at.value && Date.parse(fact.occurred_at.value) >= Date.parse(range.from) && Date.parse(fact.occurred_at.value) < Date.parse(range.to));
-    const coverage = repository.coverage().filter(record => Date.parse(record.query_range.from) < Date.parse(range.to) && Date.parse(record.query_range.to) > Date.parse(range.from));
+    const facts = repository.facts().filter(fact => fact.occurred_at.value && utcComparisonKey(fact.occurred_at.value) >= utcComparisonKey(range.from) && utcComparisonKey(fact.occurred_at.value) < utcComparisonKey(range.to));
+    const coverage = repository.coverage().filter(record => utcComparisonKey(record.query_range.from) < utcComparisonKey(range.to) && utcComparisonKey(record.query_range.to) > utcComparisonKey(range.from));
     const previous = repository.snapshots(asOf).filter(snapshot => snapshot.week_end < weekEnd && snapshot.week_end >= addCalendarDays(weekEnd, -28)).slice(-4);
     const latest = previous.at(-1);
     const goals = repository.confirmedGoals(config, asOf);
     const currentKeys = new Set(facts.map(fact => factKey(fact.fact_ref)));
-    const excluded = repository.exclusions().some(item => item.reason !== 'Outside professional whitelist' && (!item.occurred_at.value || (Date.parse(item.occurred_at.value) >= Date.parse(range.from) && Date.parse(item.occurred_at.value) < Date.parse(range.to))));
+    const excluded = repository.exclusions().some(item => item.reason !== 'Outside professional whitelist' && (!item.occurred_at.value || (utcComparisonKey(item.occurred_at.value) >= utcComparisonKey(range.from) && utcComparisonKey(item.occurred_at.value) < utcComparisonKey(range.to))));
     const previousSnapshot = repository.rawSnapshot(weekEnd);
     return { schema_version: 1, analysis_ref: { schema_version: 1, logical_id: 'weekly:' + weekEnd, revision: repository.latestRevision('weekly:' + weekEnd) + 1 }, ...(previousSnapshot ? { previous_snapshot: previousSnapshot } : {}), week_end: weekEnd, range, analysis_timezone: 'Europe/Amsterdam', facts, coverage,
         coverage_status: excluded || repository.unresolvedHistory() ? 'partial' : coverageStatus(config, coverage, range), previous_weeks: previous,

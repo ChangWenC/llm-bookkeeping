@@ -4,6 +4,7 @@ import { activityReview, attributionOverlays, validatePairTargets, capabilityMat
 import { goalActiveAt, decisionActiveAt } from '../analytics/contracts.ts';
 import { analyticsPilotStats, type PilotActionEvent } from '../analytics/pilot.ts';
 import { canonical } from '../analytics/serialization.ts';
+import { utcComparisonKey } from '../contracts/validation.ts';
 import { analysisKey, factKey, cropProjection, observationFor, contentHash } from '../analytics/model.ts';
 interface StoredProfessionalFact {
     fact_ref: FactRef;
@@ -102,7 +103,7 @@ export class AnalyticsRepository {
     }
     reviews(): AnalyticsReviewEvent[] { return this.db.prepare("SELECT json FROM analytics_reviews WHERE status='applied' ORDER BY rowid").all().map(json<AnalyticsReviewEvent>); }
     reviewState(ref: AnalysisRevisionRef, asOf?: string): AnalyticsReviewEvent | null {
-        return activityReview(this.reviews().filter(event => !asOf || Date.parse(event.created_at) <= Date.parse(asOf)), ref);
+        return activityReview(this.reviews().filter(event => !asOf || utcComparisonKey(event.created_at) <= utcComparisonKey(asOf)), ref);
     }
     confirmed(ref: AnalysisRevisionRef, asOf?: string): boolean { return this.latestRevision(ref.logical_id) === ref.revision && this.reviewState(ref, asOf)?.action === 'confirm'; }
     private effectiveRecords(): StoredProfessionalFact[] {
@@ -172,7 +173,7 @@ export class AnalyticsRepository {
     }
     overlays(asOf?: string): Record<string, unknown>[] {
         const definitions = Object.fromEntries(this.db.prepare('SELECT review_id,json FROM analytics_review_definitions').all().map((row: any) => [row.review_id, JSON.parse(row.json)]));
-        return attributionOverlays(this.observations(), this.catalog(undefined, asOf), this.reviews().filter(event => !asOf || Date.parse(event.created_at) <= Date.parse(asOf)), definitions);
+        return attributionOverlays(this.observations(), this.catalog(undefined, asOf), this.reviews().filter(event => !asOf || utcComparisonKey(event.created_at) <= utcComparisonKey(asOf)), definitions);
     }
     /** Caller has validated the semantic result; this participates in Store's existing transaction. */
     saveAnalysis(result: WeeklyAnalysisResult, batchId: string): void {
@@ -239,7 +240,7 @@ export class AnalyticsRepository {
             }
             for (const coverage of batch.coverage) {
                 const old = this.db.prepare('SELECT cutoff FROM analytics_coverage WHERE id=?').get(coverage.coverage_id) as any;
-                if (!old || Date.parse(old.cutoff) <= Date.parse(coverage.cutoff))
+                if (!old || utcComparisonKey(old.cutoff) <= utcComparisonKey(coverage.cutoff))
                     this.db.prepare('INSERT INTO analytics_coverage VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json,cutoff=excluded.cutoff').run(coverage.coverage_id, canonical(coverage), coverage.cutoff);
             }
             for (const fact of this.facts()) {
@@ -355,10 +356,10 @@ export class AnalyticsRepository {
                     continue;
                 if (fact.projection.subject !== decision.subject || verification.subject !== decision.subject || verification.name !== decision.trigger.name || verification.value !== decision.trigger.expected_value)
                     continue;
-                const time = Date.parse(verification.verified_at);
-                if (time > Date.parse(asOf))
+                const time = utcComparisonKey(verification.verified_at);
+                if (time > utcComparisonKey(asOf))
                     continue;
-                if (time < Date.parse(decision.valid_from) || time >= Date.parse(decision.valid_to) || (goal.deadline && time > Date.parse(goal.deadline)))
+                if (time < utcComparisonKey(decision.valid_from) || time >= utcComparisonKey(decision.valid_to) || (goal.deadline && time > utcComparisonKey(goal.deadline)))
                     continue;
                 if (fact.projection.attribution.goal_target_version !== goal.target_version)
                     continue;
@@ -375,7 +376,7 @@ export class AnalyticsRepository {
         return this.noticeHistory().filter(notice => {
             const decision = this.target(notice.decision_ref)?.value as MajorDecisionContract | undefined;
             const goal = decision ? this.target(decision.goal_ref)?.value as GoalContract | undefined : undefined;
-            return Date.parse(notice.verified_at) <= Date.parse(asOf) && facts.has(factKey(notice.fact_ref)) && !!decision && !!goal && decisionActiveAt(decision, goal, asOf, { decision_confirmed: this.confirmed(notice.decision_ref, asOf), goal_confirmed: this.confirmed(decision.goal_ref, asOf) });
+            return utcComparisonKey(notice.verified_at) <= utcComparisonKey(asOf) && facts.has(factKey(notice.fact_ref)) && !!decision && !!goal && decisionActiveAt(decision, goal, asOf, { decision_confirmed: this.confirmed(notice.decision_ref, asOf), goal_confirmed: this.confirmed(decision.goal_ref, asOf) });
         });
     }
     pilot(config: BookkeepingConfig, asOf: string) {

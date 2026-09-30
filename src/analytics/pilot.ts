@@ -1,5 +1,5 @@
 import type { AnalyticsPilotStats, AnalyticsReviewEvent, AnalysisRevisionRef, BookkeepingConfig, SourceCoverage } from '../contracts/types.ts';
-import { utc } from '../contracts/validation.ts';
+import { utcComparisonKey } from '../contracts/validation.ts';
 import { addCalendarDays, analysisWeekEnd, analysisWeekRange } from '../time.ts';
 import { analysisKey, coverageStatus } from './model.ts';
 
@@ -27,13 +27,13 @@ function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
  * the current as_of state, including a still-active older notice/action. No source scan.
  */
 export function analyticsPilotStats(config: BookkeepingConfig, input: AnalyticsPilotInput): AnalyticsPilotStats {
-  const asOf = Date.parse(utc(input.as_of, 'pilot.as_of'));
+  const asOf = utcComparisonKey(input.as_of);
   let last = analysisWeekEnd(input.as_of);
-  if (Date.parse(analysisWeekRange(last).to) > asOf) last = addCalendarDays(last, -7);
+  if (utcComparisonKey(analysisWeekRange(last).to) > asOf) last = addCalendarDays(last, -7);
   const weeks = Array.from({ length: 4 }, (_, index) => addCalendarDays(last, (index - 3) * 7));
   const range = { schema_version: 1 as const, from: analysisWeekRange(weeks[0]).from, to: analysisWeekRange(last).to };
-  const from = Date.parse(range.from), to = Date.parse(range.to);
-  const inRange = (instant: string) => { const at = Date.parse(utc(instant, 'pilot.event.at')); return at >= from && at < to && at <= asOf; };
+  const from = utcComparisonKey(range.from), to = utcComparisonKey(range.to);
+  const inRange = (instant: string) => { const at = utcComparisonKey(instant); return at >= from && at < to && at <= asOf; };
   const stats: AnalyticsPilotStats = {
     schema_version: 1, range, weeks,
     review_duration_ms: { schema_version: 1, value: null, reason: 'Actual review duration was not measured' },
@@ -53,11 +53,11 @@ export function analyticsPilotStats(config: BookkeepingConfig, input: AnalyticsP
     stats.reviews[key] += pairs.length;
   }
   for (const notice of uniqueBy(input.notices, item => item.notice_id)) {
-    const at = Date.parse(utc(notice.verified_at, 'pilot.notice.verified_at'));
+    const at = utcComparisonKey(notice.verified_at);
     if (inRange(notice.verified_at)) stats.notifications.generated++;
     if (at <= asOf && notice.active) stats.notifications.active++;
   }
-  const actions = uniqueBy(input.actions, item => item.event_id).filter(item => Date.parse(utc(item.at, 'pilot.action.at')) <= asOf);
+  const actions = uniqueBy(input.actions, item => item.event_id).filter(item => utcComparisonKey(item.at) <= asOf);
   const counters = { continue: 'continued', narrow: 'narrowed', abandon: 'abandoned', completed: 'completed' } as const;
   for (const action of actions) {
     if (inRange(action.at) && action.disposition !== 'active') stats.actions[counters[action.disposition]]++;
@@ -66,7 +66,7 @@ export function analyticsPilotStats(config: BookkeepingConfig, input: AnalyticsP
   const current = new Map<string, PilotActionEvent>();
   for (const action of actions) {
     const old = current.get(action.action_ref.logical_id);
-    if (!old || action.action_ref.revision > old.action_ref.revision || (action.action_ref.revision === old.action_ref.revision && Date.parse(action.at) >= Date.parse(old.at))) current.set(action.action_ref.logical_id, action);
+    if (!old || action.action_ref.revision > old.action_ref.revision || (action.action_ref.revision === old.action_ref.revision && utcComparisonKey(action.at) >= utcComparisonKey(old.at))) current.set(action.action_ref.logical_id, action);
   }
   stats.actions.active = [...current.values()].filter(action => ['active', 'continue', 'narrow'].includes(action.disposition)).length;
   return stats;
