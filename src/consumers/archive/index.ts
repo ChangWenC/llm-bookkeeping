@@ -215,6 +215,15 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           await options.faultArchive?.('archive_saved', path);
           let blocked: FileOutcome | null = null;
           for (const link of plan.links) {
+            if (options.resumePaths && !inScope(link.path)) {
+              const peer = await readWikiTarget(config.wiki_root, link.path);
+              const peerDate = canonicalDailyDate(link.path, peer.bytes);
+              if (peer.bytes !== null && peerDate?.startsWith(request.month) && !retainedJournal(peer.bytes)) {
+                const frozen = (await store.listWork('archive_snapshot')).find(work => work.payload.month === request.month && work.payload.path === link.path)?.payload as unknown as ArchiveSnapshot | undefined;
+                if (!frozen || (await readWikiTarget(config.wiki_root, frozen.archive_path)).digest !== digestBytes(Buffer.from(frozen.archive_base64, 'base64')))
+                  throw new Error(`Daily backlink source has no preserved original; run explicit month archive: ${link.path}`);
+              }
+            }
             const outcome = await writer.writeLocked({ operation_id: link.operation_id, path: link.path, baseline_digest: link.digest, desired_bytes: Buffer.from(link.desired_base64, 'base64'), fact_refs: plan.fact_refs }, lock);
             if (!success(outcome)) { blocked = outcome; break; }
           }

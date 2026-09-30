@@ -105,3 +105,14 @@ test('generic writer recovery refuses an extant archive delete; publisher retrie
   assert.equal((await readArchiveRecords(f.config)).length, 1);
   assert.ok(!(await f.store.listWork('archive_plan')).some(work => work.payload.path === next));
 });
+test('a new daily backlink during publisher recovery remains intact and locally defers the saved deletion', async t => {
+  const f = await fixture(t); await interrupt(f, 'after_intent');
+  const next = 'wiki/personal/journals/日记_2026_07_02.md', bytes = '# New sibling\n完整新原文 [[日记_2026_07_01|原有描述]]\n';
+  await writeFile(join(f.config.wiki_root, next), bytes);
+  const result = await createPublisher(f.store, f.config, { now }).resume();
+  assert.ok(result.files.some(file => file.operation_id.startsWith('archive-delete:') && file.status === 'pending' && /backlink/.test(file.reason ?? '')));
+  assert.equal(await readFile(join(f.config.wiki_root, next), 'utf8'), bytes);
+  assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), original);
+  assert.equal((await readArchiveRecords(f.config)).length, 1);
+  assert.ok(!(await f.store.listFileIntents()).some(intent => intent.path === next));
+});
