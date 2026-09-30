@@ -187,7 +187,7 @@ test('complete unchanged snapshot reuses identity with fresh output, while forge
         const third = (await reviewer.prepare({ kind: 'weekly', lane: 'history', period: week, cutoff: '2026-10-05T02:00:00Z' }))[0], bad = result(third, 'forged', false);
         bad.analysis = semantic(third.analysis_context!);
         bad.analysis.snapshot.analysis_ref = { schema_version: 1, logical_id: 'model-created-other-week', revision: 1 };
-        await assert.rejects(reviewer.accept(bad), /exact application/);
+        await assert.rejects(reviewer.accept(bad), /exact application|reuse the previous snapshot/);
         assert.equal(await f.s.getReviewResult('forged'), null);
     }
     finally {

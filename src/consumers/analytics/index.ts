@@ -114,7 +114,8 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
             repository.setPendingCockpit(null);
         }
         const target = await readWikiTarget(config.wiki_root, COCKPIT);
-        const current = target.bytes?.toString('utf8') ?? '';
+        const day = now().slice(0, 10);
+        const current = target.bytes?.toString('utf8') ?? `---\ntitle: 职业学习分析\nnamespace: personal\ntype: personal-synthesis\nsummary: 职业学习证据与周验证动作\nsources: []\ntags: [self-analytics]\nstatus: stable\nprivacy: private\naliases: []\ncreated: ${day}\nupdated: ${day}\n---\n\n# 职业学习分析\n`;
         const desiredRegion = region(output);
         if (output.observations.some(o => o.summary.includes(START) || o.summary.includes(END)) || output.snapshots.some(snapshot => canonical(snapshot).includes(START) || canonical(snapshot).includes(END)))
             throw new Error('Managed-region delimiters cannot be semantic content');

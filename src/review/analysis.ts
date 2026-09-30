@@ -10,24 +10,28 @@ export async function prepareWeeklyBundle(store: Store, config: BookkeepingConfi
         existing_facts: [], baselines: [], coverage: [], unfinished: [], analysis_context: structuredClone(context) };
     const limit = config.limits.bundle_bytes;
     let omitted = false;
+    let factsOmitted = false;
     const fits = () => Buffer.byteLength(canonical(bundle)) + 768 <= limit;
+    // Coverage records are secondary material; accurate status was computed from the complete ledger first.
+    while ((Buffer.byteLength(canonical(bundle.analysis_context!.coverage)) > 16384 || !fits()) && bundle.analysis_context!.coverage.length) {
+        bundle.analysis_context!.coverage.pop();
+        omitted = true;
+    }
     while (!fits() && bundle.analysis_context!.previous_weeks.length) {
         bundle.analysis_context!.previous_weeks.shift();
         omitted = true;
     }
     while (!fits() && bundle.analysis_context!.facts.length) {
         const removed = bundle.analysis_context!.facts.pop()!;
+        factsOmitted = true;
         bundle.analysis_context!.observation_candidates = bundle.analysis_context!.observation_candidates!.filter(observation => !observation.evidence_refs.some(ref => ref.fact_id === removed.fact_ref.fact_id && ref.revision === removed.fact_ref.revision));
-        omitted = true;
-    }
-    while (!fits() && bundle.analysis_context!.coverage.length) {
-        bundle.analysis_context!.coverage.pop();
         omitted = true;
     }
     if (!fits())
         throw new Error('Weekly fixed context cannot fit configured bundle budget');
     if (omitted) {
-        bundle.analysis_context!.coverage_status = 'partial';
+        if (factsOmitted)
+            bundle.analysis_context!.coverage_status = 'partial';
         bundle.unfinished.push({ schema_version: 1, range: context.range, reason: 'Bounded weekly preparation omitted professional facts/coverage/history; preserve pending ranges', locator: null, resumable: true });
     }
     if (context.coverage_status !== 'complete')
@@ -53,14 +57,15 @@ export async function prepareMonthlyBundle(store: Store, config: BookkeepingConf
     const original = { facts: context.facts.length, coverage: context.coverage.length };
     const bundle: ReviewBundle = { schema_version: 1, bundle_id: '', kind: 'monthly', lane: request.lane, period: month, cutoff: request.cutoff, chunks: [{ schema_version: 1, chunk_id: 'monthly:' + digest(canonical(context)), events: [], context_events: [], body_bytes: 0 }], existing_facts: [], baselines: context.manual_baselines, coverage: [], unfinished: [], monthly_context: context };
     const fits = () => Buffer.byteLength(canonical(bundle)) + 768 <= config.limits.bundle_bytes;
+    while ((Buffer.byteLength(canonical(context.coverage)) > 16384 || !fits()) && context.coverage.length)
+        context.coverage.pop();
     while (!fits() && context.facts.length)
         context.facts.pop();
-    while (!fits() && context.coverage.length)
-        context.coverage.pop();
     if (!fits())
         throw new Error('Monthly fixed context cannot fit configured bundle budget');
     if (context.facts.length < original.facts || context.coverage.length < original.coverage) {
-        context.coverage_status = 'partial';
+        if (context.facts.length < original.facts)
+            context.coverage_status = 'partial';
         bundle.unfinished.push({ schema_version: 1, range: context.range, reason: `Bounded monthly context omitted: facts ${context.facts.length}/${original.facts}, coverage ${context.coverage.length}/${original.coverage}`, locator: null, resumable: true });
     }
     for (const page of context.manual_baselines)

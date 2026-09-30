@@ -73,6 +73,9 @@ export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalys
     const snapshot = result.snapshot;
     const previousSnapshot = input.previous_snapshot;
     const reuse = previousSnapshot && canonical(snapshot) === canonical(previousSnapshot);
+    const unchanged = previousSnapshot && canonical({ ...snapshot, analysis_ref: null }) === canonical({ ...previousSnapshot, analysis_ref: null });
+    if (unchanged && !reuse)
+        throw new Error('Unchanged analysis must reuse the previous snapshot revision');
     if (!input.analysis_ref || (!reuse && analysisKey(snapshot.analysis_ref) !== analysisKey(input.analysis_ref)))
         throw new Error('Snapshot must use the exact application-prepared weekly revision');
     if (snapshot.week_end !== input.week_end)
@@ -128,6 +131,8 @@ export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalys
             throw new Error('Continue must preserve the prior active action');
         if (disposition.disposition === 'narrow' && (!snapshot.validation_action || snapshot.validation_action.action_ref.logical_id !== previous.action_ref.logical_id || snapshot.validation_action.action_ref.revision !== previous.action_ref.revision + 1 || snapshot.validation_action.state !== 'active'))
             throw new Error('Narrow requires a new revision of the same active action');
+        if (disposition.disposition === 'abandon' && snapshot.validation_action?.state === 'active' && snapshot.validation_action.action_ref.logical_id === previous.action_ref.logical_id)
+            throw new Error('Abandon cannot retain the previous active action');
     }
     else if (disposition)
         throw new Error('Prior action disposition has no prepared action');

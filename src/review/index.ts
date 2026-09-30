@@ -174,7 +174,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                     if (pending.some(e => e.event_id === context.event_id))
                         continue;
                     const bytes = Buffer.byteLength(context.body ?? '');
-                    if (bodyBytes + bytes <= limits.chunk_body_bytes) {
+                    if (bodyBytes + bytes <= limits.chunk_body_bytes && Buffer.byteLength(canonical({ events: pending, context_events: [...contextEvents, context] })) + 1024 <= Math.floor(limits.bundle_bytes / 2)) {
                         contextEvents.push(context);
                         bodyBytes += bytes;
                     }
@@ -200,7 +200,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                     continue;
                 }
                 const bytes = Buffer.byteLength(unit.body ?? '');
-                if (pending.length && (pending.length >= limits.chunk_events || bodyBytes + bytes > limits.chunk_body_bytes || pending[0].journal_date.value !== unit.journal_date.value))
+                if (pending.length && (pending.length >= limits.chunk_events || bodyBytes + bytes > limits.chunk_body_bytes || Buffer.byteLength(canonical([...pending, unit])) > Math.floor(limits.bundle_bytes / 2) || pending[0].journal_date.value !== unit.journal_date.value))
                     flush();
                 if (chunks.length >= capacity) {
                     unfinished.push(gap('Unprepared event slices remain', range, unit.locator));
@@ -252,7 +252,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                         current.unfinished.push(gap(error.message, null, path));
                 }
                 const proposed: ReviewBundle = { ...current, chunks: [...current.chunks, chunk], baselines: base && !current.baselines.some(b => b.path === path) ? [...current.baselines, base] : current.baselines };
-                if (Buffer.byteLength(canonical(proposed)) + 128 > limits.bundle_bytes) {
+                if (Buffer.byteLength(canonical(proposed)) + 1024 > limits.bundle_bytes) {
                     if (!current.chunks.length) {
                         unfinished.push(gap('Event metadata cannot fit bundle budget', range, chunk.events[0]?.locator ?? null));
                         continue;
@@ -261,7 +261,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                     if (bundles.length >= limits.bundles_per_round)
                         break;
                     current = { ...initial(), chunks: [chunk], baselines: base ? [base] : [] };
-                    if (Buffer.byteLength(canonical(current)) + 128 > limits.bundle_bytes) {
+                    if (Buffer.byteLength(canonical(current)) + 1024 > limits.bundle_bytes) {
                         current = null;
                         continue;
                     }
@@ -277,15 +277,15 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                         else if (!current.unfinished.some(g => g.locator === page.path))
                             current.unfinished.push(gap('Explicit page baseline omitted by bundle budget', null, page.path));
                     }
-                for (const c of coverage)
-                    if (!current.coverage.some(x => x.coverage_id === c.coverage_id)) {
-                        const p: ReviewBundle = { ...current, coverage: [...current.coverage, c] };
-                        if (Buffer.byteLength(canonical(p)) + 768 <= limits.bundle_bytes)
-                            current = p;
-                    }
                 for (const fact of facts)
                     if (!current.existing_facts.some(f => f.fact_id === fact.fact_id && f.revision === fact.revision)) {
                         const p: ReviewBundle = { ...current, existing_facts: [...current.existing_facts, fact] };
+                        if (Buffer.byteLength(canonical(p)) + 768 <= limits.bundle_bytes)
+                            current = p;
+                    }
+                for (const c of coverage)
+                    if (!current.coverage.some(x => x.coverage_id === c.coverage_id)) {
+                        const p: ReviewBundle = { ...current, coverage: [...current.coverage, c] };
                         if (Buffer.byteLength(canonical(p)) + 768 <= limits.bundle_bytes)
                             current = p;
                     }
