@@ -161,12 +161,12 @@ test('local immutable export interrupted after rename retries registration witho
 });
 
 test('archived and window-excluded missing pages queue supplements while retained manual page allows local append', async t => {
-  const f = await fixture(t); const archived = { ...patch('op:archived', 'archived.md', ''), date: '2026-09-15', baseline_digest: 'absent' };
-  const old = { ...patch('op:old', 'old.md', ''), date: '2026-07-31', baseline_digest: 'absent' };
-  const retained = { ...patch('op:retained', 'retained.md', ''), date: '2026-09-15' };
+  const f = await fixture(t); const archived = { ...patch('op:archived', 'wiki/personal/journals/日记_2026_09_15.md', ''), date: '2026-09-15', baseline_digest: 'absent' };
+  const old = { ...patch('op:old', 'wiki/personal/journals/日记_2026_07_31.md', ''), date: '2026-07-31', baseline_digest: 'absent' };
+  const retained = { ...patch('op:retained', 'wiki/personal/journals/日记_2026_09_16.md', ''), date: '2026-09-16' };
   await seed(f.wiki, retained.path, '---\nintentional-journal: true\n---\nhuman body\n');
   const archivePath = 'wiki/personal/_evidence/daily_journals/daily_2026.jsonl';
-  await seed(f.wiki, archivePath, JSON.stringify({ schema_version: 'daily-journal-jsonl-v1', date: '2026-09-15', retention: 'archived' }) + '\n');
+  await seed(f.wiki, archivePath, JSON.stringify({ schema_version: 'daily-journal-jsonl-v1', date: '2026-09-15', retention: 'archived' }) + '\n' + JSON.stringify({date: '2026-09-16', retention: 'archived'}) + '\n');
   const original = await readFile(join(f.wiki, archivePath)); const store = new FakeStore([archived, old, retained]);
   const result = await createPublisher(store.port(), f.config, { now: fixedNow }).applyPatches([archived, old, retained]);
   assert.deepEqual(result.map(file => file.status), ['noop', 'noop', 'applied']);
@@ -179,7 +179,7 @@ test('retention reconstruction uses completed archive work and timezone timeline
   const f = await fixture(t); const store = new FakeStore();
   store.work.set('archive:synthetic', { schema_version: 1, work_id: 'archive:synthetic', kind: 'archive', state: 'complete', lane: 'history', payload: { entries: [{ date: '2026-09-16' }] }, reason: null, migration_key: null, updated_at: fixedNow().toISOString() });
   const config = { ...f.config, journal_timezone_timeline: [{ schema_version: 1 as const, effective_from: '1970-01-01T00:00:00Z', timezone: 'Asia/Tokyo', basis: 'synthetic timeline' }] };
-  const ps = [{ ...patch('op:from-work', 'work.md', ''), date: '2026-09-16', baseline_digest: 'absent' }, { ...patch('op:timeline', 'timeline.md', ''), date: '2026-08-15', baseline_digest: 'absent' }];
+  const ps = [{ ...patch('op:from-work', 'wiki/personal/journals/日记_2026_09_16.md', ''), date: '2026-09-16', baseline_digest: 'absent' }, { ...patch('op:timeline', 'wiki/personal/journals/日记_2026_08_15.md', ''), date: '2026-08-15', baseline_digest: 'absent' }];
   const result = await createPublisher(store.port(), config, { now: () => new Date('2026-09-30T16:00:00Z') }).applyPatches(ps);
   assert.deepEqual(result.map(file => file.status), ['noop', 'noop']);
 });
@@ -209,4 +209,16 @@ test('old-content intent resumes, unchanged bytes do not queue index, and manual
   const bytesPatch = { ...patch('op:bytes', 'manual-bytes.md', '', 'entry\n'), baseline_digest: digestBytes(binary) };
   assert.equal((await createPublisher(store.port(), f.config, { now: fixedNow }).applyPatches([bytesPatch]))[0].status, 'applied');
   assert.deepEqual(await readFile(join(f.wiki, 'manual-bytes.md')), Buffer.concat([binary, Buffer.from('\nentry\n')]));
+});
+
+test('monthly, weekly and project patches with archived dates publish normally; pinned tags retain daily pages', async t => {
+  const f = await fixture(t); const store = new FakeStore();
+  store.work.set('archive:old', { schema_version: 1, work_id: 'archive:old', kind: 'archive', state: 'complete', lane: 'history', payload: { archived_dates: ['2026-07-31'] }, reason: null, migration_key: null, updated_at: fixedNow().toISOString() });
+  const paths = ['wiki/personal/journals/reviews/回顾_2026_07.md', 'wiki/personal/synthesis/综合_self_analytics_current.md', 'wiki/projects/合成项目.md'];
+  const ps = paths.map((path, index) => ({ ...patch(`op:non-daily-${index}`, path, ''), date: '2026-07-31', baseline_digest: 'absent' }));
+  const pinned = { ...patch('op:tagged', 'wiki/personal/journals/日记_2026_07_31.md', ''), date: '2026-07-31' };
+  await seed(f.wiki, pinned.path, '---\ntags:\n  - pinned-daily\n---\nhuman daily\n'); ps.push(pinned);
+  const outcomes = await createPublisher(store.port(), f.config, { now: fixedNow }).applyPatches(ps);
+  assert.deepEqual(outcomes.map(file => file.status), ['applied', 'applied', 'applied', 'applied']);
+  assert.equal((await store.listWork('journal_supplement')).length, 0);
 });

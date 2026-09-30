@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { BookkeepingConfig, Store, Publisher, PublishResult, ReviewResult, JournalPatch, FileOutcome, FactArtifact } from '../contracts/types.ts';
 import { acquireWikiLock } from './lock.ts';
 import { SafeWikiWriter, digestBytes, readWikiTarget, syncDirectory, type WriterOptions } from './files.ts';
+import { canonicalDailyDate, retainedJournal, retainedWindowStart } from './journals.ts';
 export { acquireWikiLock, withWikiLock, wikiLockLocation, assertWikiLockHeld } from './lock.ts';
 export { createSafeWikiWriter, SafeWikiWriter, digestBytes, resolveWikiPath, readWikiTarget } from './files.ts';
 export type { WikiLock } from './lock.ts';
@@ -113,14 +114,6 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
     await scan(folder);
     return result;
   }
-  function retentionStart(): string {
-    const instant = options.now?.() ?? new Date();
-    let zone = config.journal_timezone;
-    for (const entry of config.journal_timezone_timeline) if (Date.parse(entry.effective_from) <= instant.getTime()) zone = entry.timezone;
-    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit' }).formatToParts(instant);
-    const year = Number(parts.find(part => part.type === 'year')!.value), month = Number(parts.find(part => part.type === 'month')!.value);
-    return new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 10);
-  }
   async function applyPatches(patches: JournalPatch[]): Promise<FileOutcome[]> {
     if (!patches.length) return [];
     const lock = await acquireWikiLock(config.wiki_root);
@@ -140,9 +133,11 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
           else {
             if (!validDate(patch.date)) throw new Error('Invalid journal calendar date');
             const target = await readWikiTarget(config.wiki_root, patch.path);
-            archived ??= await archivedDates();
-            const retained = target.bytes !== null && /^\s*(?:pinned:\s*true|retention:\s*pinned|intentional-journal:\s*true|intentional_journal:\s*true)\s*$/m.test(target.bytes.toString('utf8'));
-            const supplement = (archived.has(patch.date) && !retained) || (target.bytes === null && patch.date < retentionStart());
+            const dailyDate = canonicalDailyDate(target.path, target.bytes);
+            if (dailyDate !== null && dailyDate !== patch.date) throw new Error('Journal patch date differs from canonical daily target');
+            if (dailyDate !== null) archived ??= await archivedDates();
+            const retained = target.bytes !== null && retainedJournal(target.bytes);
+            const supplement = dailyDate !== null && ((archived!.has(patch.date) && !retained) || (target.bytes === null && patch.date < retainedWindowStart(config, options.now?.() ?? new Date())));
             if (supplement) {
               await enqueue('journal_supplement', patch.operation_id, { patch, reason: 'Archived or outside retained journal window' });
               outcome = fileOutcome(patch, 'noop', 'Facts retained; journal supplement queued without recreating daily Markdown');
