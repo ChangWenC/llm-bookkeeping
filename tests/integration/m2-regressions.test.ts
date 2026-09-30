@@ -76,3 +76,26 @@ test('successful typed monthly publication acknowledges only explicitly reviewed
   assert.match(body, /type: journal\nnamespace: personal/);
   assert.match(body, /status: stable/); assert.match(body, /retention: pinned/);
 });
+
+test('monthly display snapshot refreshes each month once and never acknowledges a later batch', async t => {
+  const f = await fixture(t);
+  await f.seed('# 手工七月回顾\n');
+  for (let index = 0; index < 5; index++) await imported(f.store, fact('legacy:group:' + index, 'existing baseline ' + index, 'legacy_record'), 'group:' + index);
+  await createPublisher(f.store, f.config).exportFacts();
+  const originalRead = f.store.readEffectiveFacts.bind(f.store);
+  let reads = 0;
+  f.store.readEffectiveFacts = async query => {
+    reads++;
+    if (reads === 1) {
+      await imported(f.store, fact('fact:arrived-later', 'Synthetic later supplement'), 'later-after-snapshot');
+      await createPublisher(f.store, f.config).exportFacts();
+    }
+    return originalRead(query);
+  };
+  await createPublisher(f.store, f.config).resume();
+  assert.equal(reads, 1, 'Five historical outbox batches in one month require only one effective-month read');
+  assert.equal((await f.store.listReadyBatches('monthly-display')).length, 1, 'After-snapshot batch is never accidentally acknowledged');
+  await createPublisher(f.store, f.config).resume();
+  assert.equal((await f.store.listReadyBatches('monthly-display')).length, 0);
+  assert.equal(reads, 2);
+});

@@ -182,21 +182,32 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
       catch (error) { outcome = { schema_version: 1 as const, target: 'monthly', status: 'pending' as const, reason: message(error) }; }
       outcomes.push({ ...outcome, target: `monthly-publish:${batch.batch_id}` });
     }
+    // Snapshot the unacknowledged batches, group by month, refresh once per month.
+    // Batches arriving while files are rendered remain unacknowledged for the next run.
+    const monthsByBatch = new Map<string, string[]>();
+    const batchesByMonth = new Map<string, FactArtifact[]>();
     for (const batch of displayBatches) {
       const months = [...new Set([...(batch.affected_months ?? []), ...[...batch.affected_dates, ...batch.affected_weeks].map(date => date.slice(0, 7))])];
-      let complete = true;
+      monthsByBatch.set(batch.batch_id, months);
       for (const month of months) {
-        const id = `${batch.batch_id}:${month}`;
-        await enqueue('monthly_display', id, { month, batch_id: batch.batch_id });
-        let outcome;
-        try { outcome = await monthly.refreshMonthlySupplements(month); }
-        catch (error) { outcome = { schema_version: 1 as const, target: 'monthly', status: 'pending' as const, reason: message(error) }; }
-        outcomes.push({ ...outcome, target: `monthly-display:${id}` });
-        if (outcome.status === 'complete') await store.completeWork(`monthly_display:${id}`);
-        else complete = false;
+        const grouped = batchesByMonth.get(month) ?? [];
+        grouped.push(batch); batchesByMonth.set(month, grouped);
+        await enqueue('monthly_display', `${batch.batch_id}:${month}`, { month, batch_id: batch.batch_id });
       }
-      if (complete) await store.acknowledgeConsumer({ schema_version: 1, consumer: 'monthly-display', batch_id: batch.batch_id, acknowledged_at: now() });
     }
+    const completedMonths = new Set<string>();
+    for (const [month, grouped] of batchesByMonth) {
+      let outcome;
+      try { outcome = await monthly.refreshMonthlySupplements(month); }
+      catch (error) { outcome = { schema_version: 1 as const, target: 'monthly', status: 'pending' as const, reason: message(error) }; }
+      outcomes.push({ ...outcome, target: `monthly-display:${month}` });
+      if (outcome.status === 'complete') {
+        completedMonths.add(month);
+        for (const batch of grouped) await store.completeWork(`monthly_display:${batch.batch_id}:${month}`);
+      }
+    }
+    for (const batch of displayBatches) if (monthsByBatch.get(batch.batch_id)!.every(month => completedMonths.has(month)))
+      await store.acknowledgeConsumer({ schema_version: 1, consumer: 'monthly-display', batch_id: batch.batch_id, acknowledged_at: now() });
     return outcomes;
   }
   async function result(resultId: string | null, batchId: string | null, reused: boolean, exports: { ready: string[]; pending: string[] }, files: FileOutcome[], monthly: PublishResult['consumers']): Promise<PublishResult> {
