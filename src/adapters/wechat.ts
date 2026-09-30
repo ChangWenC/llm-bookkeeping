@@ -15,7 +15,8 @@ import {
   recordHistoryWindow,
   historyGaps,
   queueGroupContext,
-  takeHistoryWindow,
+  chooseHistoryWindow,
+  recordLateWindow,
 } from "./wechat-history.ts";
 import { selfAlias, selfMention, verifiedAliases } from "./wechat-identity.ts";
 const serviceChat = (id: string) =>
@@ -661,27 +662,14 @@ export class WechatAdapter implements SourceAdapter {
         };
         batch.batch_id = hash(`${batch.batch_id}:${JSON.stringify(history)}`);
       };
-      if (history && !history.queue.length) {
-        const gaps = [
-          ...verifiedRangeGaps(this.source, chat, request),
-          ...historyGaps(history, chat),
-        ];
-        discoveryGaps.push(...gaps);
-        const completed = make([], gaps, chat);
-        attachHistory(completed);
-        yield completed;
-        continue;
-      }
-      while (!history || history.queue.length) {
-        if (
-          history &&
-          (historyQueries >= maxQueries ||
-            chatQueries >= 4 ||
-            Date.now() >= deadline ||
-            remaining <= 0)
-        )
-          break;
-        const window = history ? takeHistoryWindow(history) : undefined;
+      let lateAlreadyRead = false;
+      while (true) {
+        if (history && (historyQueries >= maxQueries || chatQueries >= 4 || Date.now() >= deadline || remaining <= 0)) break;
+        const selected = history ? chooseHistoryWindow(history, request, this.source.options, lateAlreadyRead) : undefined;
+        if (history && !selected) break;
+        const window = selected?.window;
+        const late = selected?.late === true;
+        if (late) lateAlreadyRead = true;
         const query = window
           ? {
               ...request,
@@ -724,14 +712,19 @@ export class WechatAdapter implements SourceAdapter {
                 g.reason === "wechat_window_not_proven" ||
                 g.reason === "wechat_shards_or_truncation_unknown",
             );
-            if (unreliable) history.queue.push(window);
+            if (unreliable) {
+              if (late) recordLateWindow(history, window, false, rows.length, request, this.source.options, true);
+              else history.queue.push(window);
+            }
             else {
               const capped = rows.length >= Math.min(10000, Number(this.source.options.limit ?? 2000));
-              recordHistoryWindow(history, window, capped);
+              if (late) recordLateWindow(history, window, capped, rows.length, request, this.source.options);
+              else recordHistoryWindow(history, window, capped);
               if (!capped && window.purpose !== "context" && chat.endsWith("@chatroom")) {
                 const anchors = parsed.events.filter(event => !event.context.context_only && (event.role === "user" || event.context.is_mentioned === true))
                   .flatMap(event => event.utc_time.value ? [Date.parse(event.utc_time.value)] : []);
-                queueGroupContext(history, anchors, request.cutoff);
+                queueGroupContext(late ? history.late_sweep! : history, anchors, request.cutoff);
+                if (late && history.late_sweep!.queue.length) history.late_sweep!.next_cycle_at = null;
               }
             }
           }
@@ -755,11 +748,14 @@ export class WechatAdapter implements SourceAdapter {
         } catch (error: any) {
           const failure = gap(`wechat_unavailable:${error.message}`, chat);
           discoveryGaps.push(failure);
-          if (history && window) history.queue.push(window);
+          if (history && window) {
+            if (late) recordLateWindow(history, window, false, 0, request, this.source.options, true);
+            else history.queue.push(window);
+          }
           const failed = make([], [failure], chat, "unavailable");
           attachHistory(failed);
           yield failed;
-          break;
+          if (!late) break;
         }
         if (!history) break;
       }
