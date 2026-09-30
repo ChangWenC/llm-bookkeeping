@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAdapters, parseTime } from '../../src/adapters/index.ts';
+import { createAdapters, parseTime, parseLossless, parseWechatHistory } from '../../src/adapters/index.ts';
 import { createStore } from '../../src/store/index.ts';
 import { config as defaults } from '../../test/fixtures/basic.ts';
 import type { BookkeepingConfig, CollectionBatch, CollectRequest } from '../../src/contracts/types.ts';
@@ -98,4 +98,45 @@ test('recapturing identical native ISO source enriches a saved truncated timesta
   assert.equal(events.find(event => event.source.message_id === 'native:1')!.utc_time.value, '2026-09-30T10:00:00.000000001Z');
   assert.equal(events.find(event => event.source.message_id === 'native:1')!.time_precision, 'nanosecond');
   assert.deepEqual(await store.listWork('event_conflict'), []);
+});
+
+
+test('source numeric epoch time lexemes are preserved before Number while unrelated decimals remain numeric', () => {
+  const parsed = parseLossless('{"timestamp":1790769660.123456789,"payload":{"create_time":1790769660.123456,"epoch":1790769660.100},"other":1790769660.123456789,"text":"timestamp:1790769660.123456789"}');
+  assert.equal(parsed.timestamp, '1790769660.123456789');
+  assert.equal(parsed.payload.create_time, '1790769660.123456');
+  assert.equal(parsed.payload.epoch, '1790769660.100');
+  assert.equal(typeof parsed.other, 'number');
+  assert.equal(parsed.text, 'timestamp:1790769660.123456789');
+  assert.equal(parseLossless('{"time\\u0073tamp":1790769660.123456789}').timestamp, '1790769660.123456789');
+  assert.equal(typeof parseLossless('{"timestamp":[1790769660.123456789]}').timestamp[0], 'number');
+  const rounded = JSON.parse('{"create_time":1790769660.123456789}').create_time;
+  assert.equal(parseTime(rounded).utc, null);
+  assert.equal(parseTime(rounded).reason, 'numeric_time_precision_unproven');
+});
+
+test('numeric WeChat wire fractions reach actual SQLite nanosecond boundaries without lexical rounding', async t => {
+  const { store } = await fixture(t);
+  const config: BookkeepingConfig = {
+    ...defaults,
+    journal_timezone_timeline: [{ schema_version: 1, effective_from: '1970-01-01T00:00:00Z', timezone: 'Europe/Amsterdam', basis: 'synthetic' }],
+    providers: [{ schema_version: 1, provider: 'wechat', enabled: true, roots: [], account_id: 'synthetic', options: {
+      self_ids: ['synthetic'], identity_verified: true, cursor_readonly_verified: true,
+      copy_verified_since: '2026-09-30T00:00:00Z', limit: 2000,
+    } }],
+  };
+  const request: CollectRequest = {
+    lane: 'live', cutoff: '2026-09-30T13:00:00Z',
+    range: { schema_version: 1, from: '2026-09-30T12:00:00Z', to: '2026-09-30T13:00:00Z' },
+    budget: { max_duration_ms: 10000, max_directory_entries: 100, max_bytes: 1024 * 1024 },
+  };
+  const raw = '{"meta":{"status":"windowed","since_resolved":1790769600,"until_resolved":1790773200,"shards_hit":1,"shards_scanned":1},"rows":[{"server_id":9223372036854775807,"sender_wxid":"synthetic","message_kind":"text","message_content":"synthetic numeric source","create_time":1790769660.123456789},{"server_id":9223372036854775806,"sender_wxid":"synthetic","message_kind":"text","message_content":"synthetic numeric peer","create_time":1790769660.123456790}]}';
+  const parsed = parseWechatHistory(raw, config.providers[0], 'synthetic-chat', request, config);
+  assert.equal(parsed.events[0].original_time.value, '1790769660.123456789');
+  assert.equal(parsed.events[0].utc_time.value, '2026-09-30T12:01:00.123456789Z');
+  assert.equal(parsed.events[0].time_precision, 'nanosecond');
+  await store.saveCollection({ schema_version: 1, batch_id: 'numeric-wire-time', events: parsed.events, fragments: [], coverage: [], checkpoints: [] });
+  const selected = await store.listEvents({ range: { schema_version: 1, from: '2026-09-30T12:01:00.123456789Z', to: '2026-09-30T12:01:00.123456790Z' } });
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].source.message_id, '9223372036854775807');
 });

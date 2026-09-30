@@ -16,6 +16,7 @@ export const unknown = <T>(
 export function parseLossless(text: string): any {
   let out = "",
     i = 0;
+  let epochTimeKey = false;
   while (i < text.length) {
     if (text[i] === '"') {
       const start = i++;
@@ -23,7 +24,11 @@ export function parseLossless(text: string): any {
         if (text[i] === "\\") i += 2;
         else if (text[i++] === '"') break;
       }
-      out += text.slice(start, i);
+      const token = text.slice(start, i);
+      out += token;
+      let next = i;
+      while (/\s/.test(text[next] ?? "") && next < text.length) next++;
+      epochTimeKey = text[next] === ":" && ["timestamp", "create_time", "epoch"].includes(JSON.parse(token));
     } else if (text[i] === "-" || /[0-9]/.test(text[i])) {
       const m = text.slice(i).match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);
       if (!m) {
@@ -32,11 +37,17 @@ export function parseLossless(text: string): any {
       }
       const n = m[0];
       out +=
-        /^-?\d+$/.test(n) && !Number.isSafeInteger(Number(n))
+        (epochTimeKey && /^\d{10}\.\d{1,9}$/.test(n)) ||
+        (/^-?\d+$/.test(n) && !Number.isSafeInteger(Number(n)))
           ? JSON.stringify(n)
           : n;
+      epochTimeKey = false;
       i += n.length;
-    } else out += text[i++];
+    } else {
+      const character = text[i++];
+      out += character;
+      if (character !== ":" && !/\s/.test(character)) epochTimeKey = false;
+    }
   }
   return JSON.parse(out);
 }
@@ -69,6 +80,8 @@ export function parseTime(raw: unknown, zone?: string): ParsedTime {
     const epoch = text.match(/^(-?\d+)(?:\.(\d{1,9}))?$/);
     if (!epoch)
       return { utc: null, wire: null, precision: "unknown", reason: "invalid_time" };
+    if (typeof raw === "number" && (epoch[2]?.length ?? 0) > 3)
+      return { utc: null, wire: "UTC", precision: "unknown", reason: "numeric_time_precision_unproven" };
     let whole = BigInt(epoch[1]);
     let fraction = epoch[2];
     if (text.startsWith("-") && fraction && BigInt(fraction) !== 0n) {
