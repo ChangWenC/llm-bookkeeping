@@ -323,11 +323,7 @@ export function parseWechatHistory(
       const t = Date.parse(e.utc_time.value);
       if (!(t >= expectedWindow.from * 1000 && t < expectedWindow.to * 1000))
         continue;
-      if (
-        t < Date.parse(request.range.from) ||
-        t >= Date.parse(request.range.to)
-      )
-        e.context.context_only = true;
+      e.context.context_only = t < Date.parse(request.range.from) || t >= Date.parse(request.range.to);
     }
     e.physical_order =
       String(Math.round(Number(r.create_time) * 1000)).padStart(20, "0") +

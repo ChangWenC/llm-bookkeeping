@@ -8,6 +8,7 @@ export interface ImportMetadata {
   account_id: string;
   conversation_id: string;
   owner_id?: string;
+  conversation_type?: 'private'|'group'|'unknown';
   self_ids?: string[];
   source_timezone?: string;
   locator: string;
@@ -97,20 +98,21 @@ export function parseChatExport(
   const occurrences = new Map<string, number>();
   for (const { row: r, offset } of rows) {
     const chatlab = format.startsWith("chatlab");
-    const sender = String(r.sender ?? r.sender_id ?? "");
-    const native = r.platformMessageId ?? r.server_id ?? r.message_id ?? r.id;
-    const body = r.content ?? r.message_content ?? r.text;
-    const timestamp = r.timestamp ?? r.create_time;
+    const sender = String(r.sender_wxid ?? r.real_sender_id ?? r.sender ?? r.sender_id ?? "");
+    const server = r.server_id != null && String(r.server_id) !== "0" ? r.server_id : null;
+    const native = r.platformMessageId ?? server ?? r.message_id ?? (r.local_id == null ? r.id : `local:${r.local_id}`);
+    const body = r.content ?? r.message_content ?? r.display_text ?? r.text;
+    const timestamp = r.timestamp ?? r.create_time ?? r.epoch;
     const kind = chatlab
       ? Number(r.type) === 0
         ? "text"
         : `media:${r.type}`
-      : (r.message_type ?? "text");
+      : (r.message_kind ?? r.message_type ?? "text");
     if (typeof body !== "string") {
       gaps.push(gap("import_media_or_content_missing", manifest.locator));
       continue;
     }
-    if (kind !== "text" && kind !== "message")
+    if (!["text", "Text", "message", 1, "1"].includes(kind))
       gaps.push(gap("media_not_transcribed", manifest.locator));
     const key = hash(
       JSON.stringify([
@@ -142,9 +144,12 @@ export function parseChatExport(
         offset,
         locator: manifest.locator,
         generation: native == null ? hash(manifest.locator) : "0",
-        kind,
+        kind: String(kind),
         context: {
           sender_id: sender,
+          identity_verified: manifest.identity_verified === true,
+          is_mentioned: r.is_mentioned === true,
+          media_transcribed: false,
           source_format: format,
           source_offset: r.source_offset ?? offset,
           owner_id: manifest.owner_id ?? null,
@@ -153,6 +158,11 @@ export function parseChatExport(
       },
       config,
     );
+    if (r.create_time != null || r.epoch != null) {
+      const epoch = r.create_time ?? r.epoch;
+      if (typeof epoch === "number" || (typeof epoch === "string" && /^\d{10}(?:\.\d+)?$/.test(epoch)))
+        e.physical_order = String(Math.round(Number(epoch) * 1000)).padStart(20, "0") + ":" + String(r.local_id ?? r.server_id ?? hash(JSON.stringify([epoch, sender || null, body]))).padStart(20, "0");
+    }
     if (native == null)
       e.event_id = hash(
         `${manifest.provider ?? "wechat"}:${manifest.account_id}:${manifest.conversation_id}:import:${key}:${count}`,
@@ -161,7 +171,20 @@ export function parseChatExport(
       gaps.push(
         gap(e.utc_time.reason ?? "import_time_unknown", manifest.locator),
       );
+    const isGroup = manifest.conversation_type === "group" || manifest.conversation_type === "unknown" || manifest.conversation_id.endsWith("@chatroom");
+    e.context.is_group = isGroup;
+    const anchor = manifest.identity_verified === true && (e.role === "user" || r.is_mentioned === true);
+    const inRange = e.utc_time.value !== null && !!manifest.known_range && Date.parse(e.utc_time.value) >= Date.parse(manifest.known_range.from) && Date.parse(e.utc_time.value) < Date.parse(manifest.known_range.to);
+    e.context.context_only = !inRange || manifest.identity_verified !== true || !sender || (isGroup && !anchor);
+    if (isGroup && !anchor) {
+      e.context.participation_window_status = "unknown";
+      gaps.push(gap("import_group_participation_window_pending", manifest.locator));
+    }
     events.push(e);
+  }
+  const anchors = events.filter(e => e.context.context_only === false && e.utc_time.value !== null).map(e => Date.parse(e.utc_time.value!));
+  if (manifest.conversation_type === "group" || manifest.conversation_type === "unknown" || manifest.conversation_id.endsWith("@chatroom")) for (const e of events) {
+    if (e.context.context_only !== false && e.utc_time.value !== null && anchors.some(t => Math.abs(Date.parse(e.utc_time.value!) - t) <= 20 * 60000)) e.context.participation_window_status = "within_anchor_window";
   }
   return { events, gaps, members, metadata: meta };
 }

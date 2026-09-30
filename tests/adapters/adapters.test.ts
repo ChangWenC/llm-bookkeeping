@@ -1074,7 +1074,7 @@ test("group query captures 20 minute preceding context and marks it separate fro
   const e = events(out);
   assert.equal(e.length, 2);
   assert.equal(e[0].context.context_only, true);
-  assert.equal(e[1].context.context_only, undefined);
+  assert.equal(e[1].context.context_only, false);
 });
 test("WeChat history persists bounded split windows and asc newest subset eventually reaches older messages", async () => {
   const config = wxconfig(),
