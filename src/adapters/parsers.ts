@@ -231,7 +231,8 @@ export function parseSessionRow(
           role === "assistant" ? "final" : null,
           "message",
           {
-            turn_complete: m?.stop_reason != null,
+            // A parsed user record is complete independently of assistant generation.
+            turn_complete: role === "user" || m?.stop_reason != null,
             stop_reason: m?.stop_reason ?? null,
           },
         );

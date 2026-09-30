@@ -1263,3 +1263,70 @@ test("source fragments remain immutable after path relocation and replay", async
   }
   assert.equal(events(replay)[0].event_id, events(first)[0].event_id);
 });
+
+test("Claude parsed human user records are complete without assistant stop_reason", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bk-claude-human-"));
+  const human = {
+    type: "user",
+    uuid: "u",
+    sessionId: "s",
+    isSidechain: false,
+    origin: { kind: "human" },
+    entrypoint: "claude-desktop",
+    turnOrigin: "human",
+    promptSource: "sdk",
+    timestamp: "2026-09-30T12:00:00Z",
+    message: { role: "user", content: "synthetic" },
+  };
+  await writeFile(
+    path.join(dir, "human.jsonl"),
+    lines(
+      human,
+      {
+        ...human,
+        uuid: "u-blocks",
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "first human block" },
+            { type: "text", text: "second human block" },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        uuid: "a-pending",
+        sessionId: "s",
+        timestamp: "2026-09-30T12:01:00Z",
+        message: { role: "assistant", content: "unfinished assistant" },
+      },
+      {
+        type: "assistant",
+        uuid: "a-complete",
+        sessionId: "s",
+        timestamp: "2026-09-30T12:02:00Z",
+        message: {
+          role: "assistant",
+          content: "finished assistant",
+          stop_reason: "end_turn",
+        },
+      },
+    ),
+  );
+  const captured = events(await collect(cfg("claude", [dir])));
+  const users = captured.filter((e) => e.role === "user");
+  assert.equal(users.length, 3);
+  assert.deepEqual(users.map((e) => e.body), [
+    "synthetic",
+    "first human block",
+    "second human block",
+  ]);
+  for (const e of users) {
+    assert.equal(e.context.turn_complete, true);
+    assert.equal(e.context.stop_reason, null);
+  }
+  const assistants = captured.filter((e) => e.role === "assistant");
+  assert.equal(assistants.length, 2);
+  assert.equal(assistants[0].context.turn_complete, false);
+  assert.equal(assistants[1].context.turn_complete, true);
+});
