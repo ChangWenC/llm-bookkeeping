@@ -11,7 +11,7 @@ import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, S
 export const COMMANDS = ['collect','prepare','publish','consume','archive','import','migrate','replay','facts','analytics-review','status','backup','restore','validate'] as const;
 export interface ParsedCommand { command: typeof COMMANDS[number]; options: Record<string,string|boolean> }
 const allowed: Record<string, string[]> = {
-  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot'], publish: ['input', 'resume'],
+  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset'], publish: ['input', 'resume'],
   consume: ['target'], archive: ['month', 'report', 'apply'], import: ['manifest'], migrate: ['manifest'],
   replay: ['source', 'from', 'to'], facts: ['from', 'to'], 'analytics-review': ['input'],
   status: [], backup: ['output'], restore: ['input', 'data-dir'], validate: ['scope'],
@@ -63,10 +63,12 @@ export function parseArgs(args: string[]): ParsedCommand {
       oneOf(options, 'lane', ['live', 'history']);
       required(options, 'output');
       if (options.cutoff) utc(required(options, 'cutoff'), 'cutoff');
-      if (options['fact-offset'] !== undefined) {
-        const value = required(options, 'fact-offset');
-        if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InputError('--fact-offset: nonnegative safe integer required');
+      for (const key of ['fact-offset', 'archive-context-offset']) if (options[key] !== undefined) {
+        const value = required(options, key);
+        if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InputError(`--${key}: nonnegative safe integer required`);
       }
+      if (options['archive-context-offset'] !== undefined && kind !== 'monthly') throw new InputError('Archive context pagination requires monthly preparation');
+      if (Number(options['archive-context-offset'] ?? 0) > 0 && !options.cutoff) throw new InputError('Archive context continuation requires original --cutoff');
       if ((options['fact-offset'] !== undefined || options['fact-snapshot']) && kind === 'daily') throw new InputError('Fact pagination requires weekly or monthly preparation');
       if ((Number(options['fact-offset'] ?? 0) > 0 || options['fact-snapshot']) && (!options['fact-snapshot'] || !options.cutoff)) throw new InputError('Follow-up fact pages require --fact-snapshot and original --cutoff');
       if (options.period) {
@@ -238,8 +240,10 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     period: options.period as string | undefined, cutoff, output_dir: outputDir, page_paths: pagePaths,
     fact_offset: options['fact-offset'] === undefined ? undefined : Number(options['fact-offset']),
     fact_snapshot: options['fact-snapshot'] as string | undefined,
+    archive_context_offset: options['archive-context-offset'] === undefined ? undefined : Number(options['archive-context-offset']),
   });
   if ((options['fact-offset'] !== undefined || options['fact-snapshot']) && bundles.some(bundle => !bundle.analysis_context?.facts_page && !bundle.monthly_context?.facts_page)) unavailable('Frozen fact pagination is not delivered by Reviewer');
+  if (options['archive-context-offset'] !== undefined && bundles.some(bundle => !bundle.monthly_context?.archive_context_page)) unavailable('Archive context material reader is not delivered by Reviewer');
   const files = [];
   for (const bundle of bundles) {
     const name = `bundle-${encodeURIComponent(bundle.bundle_id)}.json`;

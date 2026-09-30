@@ -135,15 +135,21 @@ export interface ReviewReceipt extends Versioned {
   review_id: string; target_ref: AnalysisRevisionRef;
   status: 'applied' | 'already_applied' | 'stale' | 'pending'; reason: string | null;
 }
+export interface ArchiveReviewContext extends Versioned {
+  work_id: string; source_path: string; date: string; original_digest: string;
+  content_excerpt: string; excerpt_reason: string | null; fact_refs: FactRef[];
+}
+export interface ArchiveContextPage extends Versioned { offset: number; next_offset: number | null; total: number }
 export interface MonthlyReviewInput extends Versioned {
   month: string; range: TimeRange; facts: FactRevision[]; coverage: SourceCoverage[];
   coverage_status: AnalysisCoverageStatus; manual_baselines: PageBaseline[];
   prepared_work_ids?: string[]; facts_page?: FactsPage;
+  archive_contexts?: ArchiveReviewContext[]; archive_context_page?: ArchiveContextPage;
 }
 export interface MonthlyReviewResult extends Versioned {
   month: string; summary: string; fact_refs: FactRef[];
   supplement_text: string; coverage_status: AnalysisCoverageStatus;
-  completed_work_ids?: string[];
+  completed_work_ids?: string[]; completed_archive_context_ids?: string[];
 }
 export interface ReviewBundle extends Versioned {
   bundle_id: string; kind: ReviewKind; lane: Lane; period: string | null; cutoff: string;
@@ -217,7 +223,7 @@ export interface LegacyImportResult extends Versioned { migration_key: string; r
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
 export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
-export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string }
+export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }
 export interface CollectionBudget { max_duration_ms: number; max_bytes: number; max_directory_entries: number }
 export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig }

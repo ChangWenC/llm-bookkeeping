@@ -1717,6 +1717,85 @@
         "reason"
       ]
     },
+    "ArchiveReviewContext": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "original_digest": {
+          "type": "string"
+        },
+        "content_excerpt": {
+          "type": "string"
+        },
+        "excerpt_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "work_id",
+        "source_path",
+        "date",
+        "original_digest",
+        "content_excerpt",
+        "excerpt_reason",
+        "fact_refs"
+      ]
+    },
+    "ArchiveContextPage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "offset": {
+          "type": "number"
+        },
+        "next_offset": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "offset",
+        "next_offset",
+        "total"
+      ]
+    },
     "MonthlyReviewInput": {
       "type": "object",
       "properties": {
@@ -1762,6 +1841,15 @@
         },
         "facts_page": {
           "$ref": "#/$defs/FactsPage"
+        },
+        "archive_contexts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArchiveReviewContext"
+          }
+        },
+        "archive_context_page": {
+          "$ref": "#/$defs/ArchiveContextPage"
         }
       },
       "required": [
@@ -1803,6 +1891,12 @@
           ]
         },
         "completed_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "completed_archive_context_ids": {
           "type": "array",
           "items": {
             "type": "string"
