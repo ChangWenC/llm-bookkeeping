@@ -80,6 +80,11 @@ test('stored Claude human input ignores assistant completion metadata while expl
  const active=prepared.flatMap(b=>b.chunks.flatMap(chunk=>chunk.events));
  assert.deepEqual(active.map(event=>event.event_id),[user.event_id]);
  assert.equal(active[0].context.turn_complete,false); // Existing immutable capture is not rewritten.
+ await s.saveCollection({...batch,batch_id:'claude-fixed-parser-recapture',events:[{...user,context:{...user.context,turn_complete:true}}]});
+ const recaptured=await s.listEvents({range,lane:'live'});
+ assert.equal(recaptured.length,4);
+ assert.equal(recaptured.find(event=>event.event_id===user.event_id)!.context.turn_complete,true);
+ assert.equal((await s.listWork('event_conflict')).length,0);
  assert(prepared.some(b=>b.unfinished.some(issue=>issue.reason.includes('Incomplete'))));
  for (const [i,b] of prepared.entries()) await reviewer.accept(result(b,'claude-human:'+i,false));
  assert.equal((await s.listEvents({range,lane:'live'})).find(e=>e.event_id===partial.event_id)!.context.incomplete_turn,true);
