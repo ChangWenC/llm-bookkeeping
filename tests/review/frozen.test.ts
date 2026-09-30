@@ -69,3 +69,61 @@ test('frozen weekly and monthly pages keep immutable references across backdated
     }
     s.close();
 });
+test('accepted consecutive pages accumulate monthly refs and weekly observations without replacing the previous page', async () => {
+    const c = await config();
+    c.limits.bundle_bytes = 8192;
+    const s = await createStore(c), events = Array.from({ length: 8 }, (_, i) => event('accumulate:' + i));
+    await s.saveCollection(collection(events));
+    const b = bundle(events);
+    await s.saveBundle(b);
+    const r = result(b);
+    r.pages = [];
+    r.candidates = events.map((e, i) => ({ ...candidate(b, 'claim:' + i), content: 'Monthly original ' + i + 'x'.repeat(1800), event_refs: [{ schema_version: 1, event_id: e.event_id }], analytics_projection: { schema_version: 1, value: { ...candidate(b).analytics_projection.value!, summary: 'Professional ' + i + 'x'.repeat(500), event_refs: [{ schema_version: 1, event_id: e.event_id }] }, reason: null } }));
+    const initial = await s.commitReview(r);
+    await s.markExportReady(initial.batch_id, c.data_dir + '/initial.json');
+    const analytics = createAnalyticsConsumer(s, c);
+    await analytics.consume();
+    const reviewer = createReviewer(s, c);
+    for (const kind of ['monthly', 'weekly'] as const) {
+        let page = (await reviewer.prepare({ kind, lane: 'history', period: kind === 'weekly' ? '2026-10-04' : '2026-09', cutoff }))[0];
+        const allRefs = new Set<string>();
+        let snapshotId = '', offset = 0;
+        for (let i = 0; i < 2; i++) {
+            const context = page.analysis_context ?? page.monthly_context!, fp = context.facts_page!;
+            snapshotId = fp.snapshot_id;
+            const rr = result(page, kind + ':page:' + i, false);
+            if (kind === 'monthly') {
+                rr.monthly_review = { schema_version: 1, month: '2026-09', summary: 'Accepted page ' + i, supplement_text: '', fact_refs: page.monthly_context!.facts.map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), coverage_status: 'partial' };
+                for (const ref of rr.monthly_review.fact_refs)
+                    allRefs.add(ref.fact_id + ':' + ref.revision);
+            }
+            else {
+                rr.analysis = { schema_version: 1, snapshot: { schema_version: 1, analysis_ref: page.analysis_context!.analysis_ref!, week_end: '2026-10-04', coverage_status: 'partial', observations: page.analysis_context!.observation_candidates!, capabilities: [], goal_gaps: [], direction: 'unknown', patterns: ['Accepted weekly material ' + i], validation_action: null }, prior_action_disposition: null, proposed_confirmations: page.analysis_context!.observation_candidates!.slice(0, 3).map(observation => observation.observation_ref), freshness_at: cutoff };
+                for (const observation of rr.analysis.snapshot.observations)
+                    for (const ref of observation.evidence_refs)
+                        allRefs.add(ref.fact_id + ':' + ref.revision);
+            }
+            const accepted = await reviewer.accept(rr);
+            await s.markExportReady(accepted.batch_id, c.data_dir + '/' + kind + i + '.json');
+            const artifact = (await s.listOutbox()).find(item => item.batch_id === accepted.batch_id)!.artifact;
+            if (kind === 'monthly') {
+                assert.deepEqual(new Set(artifact.monthly_review!.fact_refs.map(ref => ref.fact_id + ':' + ref.revision)), allRefs);
+                if (i === 1)
+                    assert(artifact.monthly_review!.summary.includes('Accepted page 0'));
+                const { createMonthlyConsumer } = await import('../../src/consumers/monthly/index.ts');
+                assert.equal((await createMonthlyConsumer(s, c).publishMonthlyReview(artifact)).status, 'complete');
+            }
+            else {
+                assert.deepEqual(new Set(artifact.analysis!.snapshot.observations.flatMap(observation => observation.evidence_refs.map(ref => ref.fact_id + ':' + ref.revision))), allRefs);
+                assert(artifact.analysis!.proposed_confirmations.length <= 3);
+                assert.equal((await analytics.consume()).status, 'complete');
+            }
+            offset = fp.next_offset!;
+            if (i === 0)
+                assert(offset > fp.offset);
+            if (i === 0)
+                page = (await reviewer.prepare({ kind, lane: 'history', period: kind === 'weekly' ? '2026-10-04' : '2026-09', cutoff, fact_snapshot: snapshotId, fact_offset: offset }))[0];
+        }
+    }
+    s.close();
+});

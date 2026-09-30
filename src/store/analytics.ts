@@ -109,8 +109,15 @@ export class AnalyticsRepository {
         return rows.filter(fact => fact.action !== 'retract' && fact.fact_ref.revision === max.get(fact.fact_ref.fact_id) && fact.fact_ref.revision > (retired.get(fact.fact_ref.fact_id) ?? 0));
     }
     facts(): ProfessionalFact[] { return this.effectiveRecords().filter(fact => fact.projection && fact.aggregate).map(fact => ({ schema_version: 1, fact_ref: fact.fact_ref, projection: fact.projection!, kind: fact.kind, occurred_at: fact.occurred_at })); }
-    lookupFacts(refs: FactRef[]): ProfessionalFact[] { return refs.flatMap(ref => { const row = this.db.prepare('SELECT json FROM analytics_facts WHERE id=? AND revision=?').get(ref.fact_id, ref.revision); if (!row)
-        return []; const fact = json<StoredProfessionalFact>(row); return fact.projection && fact.aggregate ? [{ schema_version: 1 as const, fact_ref: fact.fact_ref, kind: fact.kind, occurred_at: fact.occurred_at, projection: fact.projection }] : []; }); }
+    lookupFacts(refs: FactRef[]): ProfessionalFact[] {
+        return refs.flatMap(ref => {
+            const row = this.db.prepare('SELECT json FROM analytics_facts WHERE id=? AND revision=?').get(ref.fact_id, ref.revision);
+            if (!row)
+                return [];
+            const fact = json<StoredProfessionalFact>(row);
+            return fact.projection && fact.aggregate ? [{ schema_version: 1 as const, fact_ref: fact.fact_ref, kind: fact.kind, occurred_at: fact.occurred_at, projection: fact.projection }] : [];
+        });
+    }
     exclusions(): {
         fact_ref: FactRef;
         reason: string;
@@ -224,6 +231,12 @@ export class AnalyticsRepository {
     }
     applyReview(input: AnalyticsReviewInput, config: BookkeepingConfig, withinTransaction = false): ReviewReceipt[] {
         const operation = (): ReviewReceipt[] => {
+            if (input.kind === 'capability_candidate') {
+                if (input.definition.status !== 'candidate')
+                    throw new Error('New capability definition must be candidate');
+                this.saveTarget(input.definition.definition_ref, 'capability_definition', input.definition);
+                return [{ schema_version: 1, review_id: 'registration:' + analysisKey(input.definition.definition_ref), target_ref: input.definition.definition_ref, status: 'pending', reason: 'Candidate capability requires exact user confirmation' }];
+            }
             if (input.kind !== 'review') {
                 const contract = input.contract;
                 if (contract.confirmed)

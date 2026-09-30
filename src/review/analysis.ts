@@ -37,15 +37,21 @@ function finishPage(bundle: ReviewBundle, page: FactsPage, end: number): void {
         bundle.unfinished.push(gap(`Frozen fact page ${page.offset}..${end}/${page.total}; continue with the same cutoff/snapshot and next_offset`));
     }
 }
-async function workIds(store: Store, kind: string, period: string, cutoff:string): Promise<string[]> { return (await store.listWork(kind, 'pending')).filter(item => Date.parse(item.updated_at)<=Date.parse(cutoff) && (kind === 'analytics_prepare' ? item.payload.week_end === period : item.payload.month === period)).map(item => item.work_id).sort(); }
-function fitIds(bundle: ReviewBundle, ids: string[], limit: number): string[] { const context = bundle.analysis_context ?? bundle.monthly_context!; context.prepared_work_ids = []; for (const id of ids.slice(0, 32)) {
-    context.prepared_work_ids.push(id);
-    if (Buffer.byteLength(canonical(bundle)) + 2048 > limit) {
-        context.prepared_work_ids.pop();
-        break;
+async function workIds(store: Store, kind: string, period: string, cutoff: string): Promise<string[]> { return (await store.listWork(kind, 'pending')).filter(item => Date.parse(item.updated_at) <= Date.parse(cutoff) && (kind === 'analytics_prepare' ? item.payload.week_end === period : item.payload.month === period)).map(item => item.work_id).sort(); }
+function fitIds(bundle: ReviewBundle, ids: string[], limit: number): string[] {
+    const context = bundle.analysis_context ?? bundle.monthly_context!;
+    context.prepared_work_ids = [];
+    for (const id of ids.slice(0, 32)) {
+        context.prepared_work_ids.push(id);
+        if (Buffer.byteLength(canonical(bundle)) + 2048 > limit) {
+            context.prepared_work_ids.pop();
+            break;
+        }
     }
-} if (context.prepared_work_ids.length < ids.length)
-    bundle.unfinished.push(gap(`Preparation work IDs omitted by budget: ${context.prepared_work_ids.length}/${ids.length}`)); return context.prepared_work_ids; }
+    if (context.prepared_work_ids.length < ids.length)
+        bundle.unfinished.push(gap(`Preparation work IDs omitted by budget: ${context.prepared_work_ids.length}/${ids.length}`));
+    return context.prepared_work_ids;
+}
 async function save(store: Store, bundle: ReviewBundle, limit: number): Promise<ReviewBundle[]> {
     bundle.bundle_id = 'bundle:' + digest(canonical(bundle));
     if (Buffer.byteLength(canonical(bundle)) > limit)
@@ -57,7 +63,7 @@ export async function prepareWeeklyBundle(store: Store, config: BookkeepingConfi
     const week = request.period ?? analysisWeekEnd(request.cutoff), context = await prepareWeeklyAnalysis(store, config, week), repository = analyticsRepository(store);
     const eligible = store instanceof SqliteStore ? store.effectiveFactRefsAt(request.cutoff) : [];
     const all = repository.lookupFacts(eligible).filter(fact => fact.occurred_at.value && Date.parse(fact.occurred_at.value) >= Date.parse(context.range.from) && Date.parse(fact.occurred_at.value) < Date.parse(context.range.to));
-    const snapshot = frozen(store, request, week, all.map(fact => fact.fact_ref), await workIds(store, 'analytics_prepare', week,request.cutoff));
+    const snapshot = frozen(store, request, week, all.map(fact => fact.fact_ref), await workIds(store, 'analytics_prepare', week, request.cutoff));
     context.facts_page = snapshot.page;
     const material = repository.lookupFacts(snapshot.refs);
     const byRef = new Map(material.map(fact => [factKey(fact.fact_ref), fact]));
@@ -125,14 +131,30 @@ export async function prepareMonthlyBundle(store: Store, config: BookkeepingConf
         throw new Error('Monthly pagination requires transactional Store');
     context.coverage_status = coverageStatus(config, context.coverage, context.range);
     context.manual_baselines = await Promise.all(context.manual_baselines.map(page => readPageBaseline(config, page.path, Math.max(64, Math.floor(config.limits.bundle_bytes / 8)))));
+    const explicitPaths = [...new Set(request.page_paths ?? [])].slice(0, 16);
+    const explicitIssues: CoverageGap[] = [];
+    const excerptBudget = Math.max(64, Math.floor(config.limits.bundle_bytes / (8 * (explicitPaths.length + 1))));
+    for (const path of explicitPaths) {
+        try {
+            const page = await readPageBaseline(config, path, excerptBudget);
+            if (!context.manual_baselines.some(existing => existing.path === page.path))
+                context.manual_baselines.push(page);
+            if (page.context_excerpt)
+                explicitIssues.push(gap(page.excerpt_reason!));
+        }
+        catch (error) {
+            explicitIssues.push(gap('Explicit monthly page unavailable: ' + String(error)));
+        }
+    }
     const atCutoff = new Set(store.effectiveFactRefsAt(request.cutoff).map(factKey));
-    const snapshot = frozen(store, request, month, context.facts.filter(fact => atCutoff.has(factKey(fact))).map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), await workIds(store, 'prepare_monthly', month,request.cutoff));
+    const snapshot = frozen(store, request, month, context.facts.filter(fact => atCutoff.has(factKey(fact))).map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), await workIds(store, 'prepare_monthly', month, request.cutoff));
     context.facts_page = snapshot.page;
     const material = new Map(store.lookupFactRevisions(snapshot.refs).map(fact => [factKey(fact), fact])), coverage = context.coverage;
     context.facts = [];
     context.coverage = [];
     const bundle: ReviewBundle = { schema_version: 1, bundle_id: '', kind: 'monthly', lane: request.lane, period: month, cutoff: request.cutoff, chunks: [{ schema_version: 1, chunk_id: 'monthly:' + snapshot.page.snapshot_id + ':' + snapshot.page.offset, events: [], context_events: [], body_bytes: 0 }], existing_facts: [], baselines: context.manual_baselines, coverage: [], unfinished: [], monthly_context: context };
     const limit = config.limits.bundle_bytes;
+    bundle.unfinished.push(...explicitIssues);
     context.prepared_work_ids = [];
     let end = snapshot.page.offset;
     for (; end < snapshot.refs.length; end++) {

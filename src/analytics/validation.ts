@@ -41,6 +41,15 @@ export function validateAnalyticsInput(value: unknown): AnalyticsReviewInput {
             ids.add(event.review_id);
         }
     }
+    else if (input.kind === 'capability_candidate') {
+        const definition = version(input.definition, 'capability definition');
+        ref(definition.definition_ref);
+        text(definition.label, 'label');
+        for (const word of array(definition.keywords, 'keywords'))
+            text(word, 'keyword');
+        if (definition.status !== 'candidate')
+            throw new Error('New capability definition must be candidate');
+    }
     else if (input.kind === 'goal_contract' || input.kind === 'decision_contract') {
         const contract = version(input.contract);
         ref(contract.contract_ref);
@@ -127,7 +136,7 @@ export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalys
         checkAction(snapshot.validation_action.evidence_refs);
     const previous = input.prior_action;
     const disposition = result.prior_action_disposition;
-    if (previous?.state === 'active') {
+    if (previous?.state === 'active' && !reuse) {
         if (!disposition || analysisKey(disposition.action_ref) !== analysisKey(previous.action_ref))
             throw new Error('Prior active action requires explicit disposition');
         checkAction(disposition.evidence_refs);
@@ -138,7 +147,7 @@ export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalys
         if (disposition.disposition === 'abandon' && snapshot.validation_action?.state === 'active' && snapshot.validation_action.action_ref.logical_id === previous.action_ref.logical_id)
             throw new Error('Abandon cannot retain the previous active action');
     }
-    else if (disposition)
+    else if (disposition && previous?.state !== 'active')
         throw new Error('Prior action disposition has no prepared action');
     const targets = new Set([analysisKey(snapshot.analysis_ref), ...snapshot.observations.map(observation => analysisKey(observation.observation_ref)), ...(snapshot.validation_action ? [analysisKey(snapshot.validation_action.action_ref)] : [])]);
     if (result.proposed_confirmations.some(ref => !targets.has(analysisKey(ref))))

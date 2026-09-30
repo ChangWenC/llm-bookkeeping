@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { ReviewResult, ReviewCommit, ReviewBundle, FactRevision, FactRef, JournalPatch, SourceEvent, Lane, SourceCoverage, WorkItem, FactArtifact } from '../contracts/types.ts';
 import { validateReviewResult } from '../contracts/validation.ts';
+import { accumulateMonthly, accumulateWeekly, type SemanticPage } from '../analytics/pages.ts';
 import { validateAnalysisAgainstInput } from '../analytics/validation.ts';
 import { canonical } from '../analytics/serialization.ts';
 import { utc, normalized, version, unique, refKey, factWeek, weekFor } from './domain.ts';
@@ -46,7 +47,6 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             if (bundle.kind !== 'weekly' || !bundle.analysis_context)
                 throw new Error('Weekly analysis requires a prepared analysis_context');
             validateAnalysisAgainstInput(result.analysis, bundle.analysis_context);
-            store.analyticsHistoryRepository().reserveAnalysis(result.analysis);
         }
         if (result.monthly_review) {
             const review = result.monthly_review;
@@ -210,10 +210,24 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             for (const coverage of reviewedCoverage)
                 store.db.prepare('UPDATE coverage SET json=? WHERE id=?').run(canonical(coverage), coverage.coverage_id);
         const artifact: FactArtifact = { schema_version: 1, batch_id: batchId, created_at: result.created_at, facts, coverage: reviewedCoverage, affected_dates: [...new Set(facts.flatMap(f => f.journal_date.value ? [f.journal_date.value] : []))].sort(), affected_weeks: [] };
-        if (result.analysis)
-            artifact.analysis = structuredClone(result.analysis);
-        if (result.monthly_review)
-            artifact.monthly_review = structuredClone(result.monthly_review);
+        const pageContext = bundle.analysis_context ?? bundle.monthly_context;
+        if (pageContext?.facts_page && (result.analysis || result.monthly_review)) {
+            const value = result.analysis ?? result.monthly_review!;
+            store.db.prepare('INSERT INTO semantic_pages VALUES(?,?,?,?)').run(pageContext.facts_page.snapshot_id, pageContext.facts_page.offset, bundle.kind, canonical(value));
+            const pages = store.db.prepare('SELECT offset,json FROM semantic_pages WHERE snapshot_id=? AND kind=? ORDER BY offset').all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
+            if (result.analysis)
+                artifact.analysis = accumulateWeekly(pages, result.analysis);
+            if (result.monthly_review)
+                artifact.monthly_review = accumulateMonthly(pages);
+        }
+        else {
+            if (result.analysis)
+                artifact.analysis = structuredClone(result.analysis);
+            if (result.monthly_review)
+                artifact.monthly_review = structuredClone(result.monthly_review);
+        }
+        if (artifact.analysis)
+            store.analyticsHistoryRepository().reserveAnalysis(artifact.analysis);
         // Corrections can move dates; downstream recomputes both original and replacement periods.
         const affectedFacts = [...facts];
         for (const fact of facts)
