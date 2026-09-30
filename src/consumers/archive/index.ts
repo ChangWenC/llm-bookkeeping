@@ -11,7 +11,11 @@ interface ArchiveSnapshot { month: string; date: string; path: string; source_di
 interface ArchivePlan extends ArchiveSnapshot { delete_operation: string; links: LinkPlan[] }
 export interface ArchivePageOutcome { date: string; path: string; status: 'eligible' | 'retained' | 'applied' | 'noop' | 'pending' | 'conflict'; archive_path: string | null; reason: string | null }
 export interface ArchiveResult { schema_version: 1; month: string; mode: 'report' | 'apply'; status: 'complete' | 'partial' | 'pending'; pages: ArchivePageOutcome[]; reason: string | null; issues?: ArchiveReadIssue[] }
-export interface ArchiveOptions extends WriterOptions { faultArchive?: (stage: 'snapshots_saved' | 'plan_saved' | 'archive_saved' | 'links_saved' | 'before_delete' | 'after_delete', path: string) => void | Promise<void> }
+export interface ArchiveOptions extends WriterOptions {
+  /** Internal publisher recovery scope; backlink scans remain Wiki-wide. */
+  resumePaths?: readonly string[];
+  faultArchive?: (stage: 'snapshots_saved' | 'plan_saved' | 'archive_saved' | 'links_saved' | 'before_delete' | 'after_delete', path: string) => void | Promise<void>;
+}
 const success = (outcome: FileOutcome) => outcome.status === 'applied' || outcome.status === 'noop';
 const dailyTargets = (path: string): Set<string> => {
   const stem = path.replace(/\.md$/, '');
@@ -95,14 +99,15 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
     if (!lock) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages: [], reason: 'Wiki writer is active' };
     const pages: ArchivePageOutcome[] = [];
     try {
-      const pendingPlans = (await store.listWork('archive_plan', 'pending')).filter(work => work.payload.month === request.month);
+      const inScope = (path: string) => !options.resumePaths || options.resumePaths.includes(path);
+      const pendingPlans = (await store.listWork('archive_plan', 'pending')).filter(work => work.payload.month === request.month && inScope(String(work.payload.path)));
       const byPath = new Map(pendingPlans.map(work => [String(work.payload.path), work]));
       // Include plans whose source was already deleted just before a crash.
-      const paths = new Set([...await listMarkdown(config.wiki_root), ...byPath.keys()]);
+      const paths = new Set([...await listMarkdown(config.wiki_root), ...byPath.keys()].filter(inScope));
       const snapshots = new Map<string, ArchiveSnapshot>();
       const snapshotWork = new Map<string, WorkItem>();
       const skipped = new Set<string>();
-      const priorSnapshots = (await store.listWork('archive_snapshot', 'pending')).filter(work => work.payload.month === request.month);
+      const priorSnapshots = (await store.listWork('archive_snapshot', 'pending')).filter(work => work.payload.month === request.month && inScope(String(work.payload.path)));
       const allPlans = await store.listWork('archive_plan');
       for (const work of priorSnapshots) {
         const path = String(work.payload.path); paths.add(path);

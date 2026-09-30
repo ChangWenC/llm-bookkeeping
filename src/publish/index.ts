@@ -180,7 +180,8 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
       const { createArchiveService } = await import('../consumers/archive/index.ts');
       for (const month of months) {
         try {
-          const archived = await createArchiveService(store, config, options).run({ month, mode: 'apply' });
+          const resumePaths = deferred.filter(outcome => plans.some(work => work.payload.month === month && work.payload.delete_operation === outcome.operation_id && work.payload.path === outcome.path)).map(outcome => outcome.path);
+          const archived = await createArchiveService(store, config, { ...options, resumePaths }).run({ month, mode: 'apply' });
           for (const outcome of deferred) {
             const plan = plans.find(work => work.payload.month === month && work.payload.delete_operation === outcome.operation_id && work.payload.path === outcome.path);
             if (!plan) continue;

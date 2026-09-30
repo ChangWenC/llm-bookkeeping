@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createStore } from '../../src/store/index.ts';
 import { createArchiveService, readArchiveRecords } from '../../src/consumers/archive/index.ts';
-import { createPublisher } from '../../src/publish/index.ts';
+import { createPublisher, createSafeWikiWriter, acquireWikiLock } from '../../src/publish/index.ts';
 import { config as base } from '../../test/fixtures/basic.ts';
 const now = () => new Date('2026-10-01T12:00:00Z');
 const daily = 'wiki/personal/journals/日记_2026_07_01.md';
@@ -86,4 +86,22 @@ test('final re-enumeration protects daily when a new root backlink appears after
   assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), original);
   assert.equal(await readFile(join(f.config.wiki_root, 'late-handoff.md'), 'utf8'), link);
   assert.ok(result.pages.some(page => /backlink appeared/.test(page.reason ?? '')));
+});
+test('generic writer recovery refuses an extant archive delete; publisher retries only saved delete paths', async t => {
+  const f = await fixture(t); await interrupt(f, 'after_intent');
+  const intent = (await f.store.listFileIntents()).find(intent => intent.operation_id.startsWith('archive-delete:'))!;
+  const lock = await acquireWikiLock(f.config.wiki_root); assert.ok(lock);
+  try {
+    const blocked = await createSafeWikiWriter(f.store, f.config, { now }).recoverLocked(intent, lock);
+    assert.equal(blocked.status, 'pending');
+    assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), original);
+  } finally { await lock.release(); }
+  const next = 'wiki/personal/journals/日记_2026_07_02.md', nextBytes = '# New sibling\n新出现的独立合成日记。\n';
+  await writeFile(join(f.config.wiki_root, next), nextBytes);
+  const resumed = await createPublisher(f.store, f.config, { now }).resume();
+  assert.ok(resumed.files.some(file => file.operation_id === intent.operation_id && file.status === 'applied'));
+  await assert.rejects(readFile(join(f.config.wiki_root, daily)), { code: 'ENOENT' });
+  assert.equal(await readFile(join(f.config.wiki_root, next), 'utf8'), nextBytes);
+  assert.equal((await readArchiveRecords(f.config)).length, 1);
+  assert.ok(!(await f.store.listWork('archive_plan')).some(work => work.payload.path === next));
 });
