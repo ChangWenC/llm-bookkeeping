@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { realpath, writeFile, rename } from 'node:fs/promises';
-import { relative, isAbsolute, join } from 'node:path';
+import { relative, isAbsolute, join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, canonicalLocation } from '../src/config.ts';
@@ -8,6 +8,7 @@ import { createStore } from '../src/store/index.ts';
 import { createArchiveService, readArchiveRecords } from '../src/consumers/archive/index.ts';
 import { createPublisher, createSafeWikiWriter } from '../src/publish/index.ts';
 import { digestBytes, readWikiTarget } from '../src/publish/files.ts';
+import type { FileIntent } from '../src/contracts/types.ts';
 
 const acceptanceRoot = '/private/tmp/bookkeeping-acceptance';
 const month = '2026-08', monthly = 'wiki/personal/journals/reviews/回顾_2026_08.md';
@@ -19,6 +20,36 @@ function isolated(path: string): void {
 function equalBytes(actual: Buffer | null, expected: Buffer, label: string): void {
   // Never include private bytes in stdout or failed assertion diagnostics.
   assert.ok(actual?.equals(expected), label);
+}
+// Independent acceptance expectation: only links to the two selected sources
+// may change. Preserve aliases, unaliased display text and every other byte.
+function expectedBacklinks(original: Buffer, targets: readonly string[]): Buffer {
+  const text = original.toString('utf8');
+  if (!Buffer.from(text).equals(original)) return original;
+  const allowed = new Set(targets.flatMap(path => {
+    const stem = path.replace(/\.md$/, '');
+    return [basename(stem), stem, stem.replace(/^wiki\//, ''), stem.replace(/^wiki\/personal\//, ''), `${basename(stem)}.md`, path];
+  }));
+  return Buffer.from(text.replace(/\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g, (whole, target: string, alias: string | undefined) =>
+    allowed.has(target.split('#')[0]) ? `[[回顾_2026_08|${alias ?? target}]]` : whole));
+}
+export function verifyRetainedPage(path: string, original: Buffer, actual: Buffer | null, intents: FileIntent[]): void {
+  const expected = expectedBacklinks(original, selected);
+  equalBytes(actual, expected, 'Retained page differs beyond exact required backlink migration');
+  if (expected.equals(original)) return;
+  let previous = original;
+  const chain = intents.filter(intent => intent.path === path && intent.state === 'applied');
+  assert.ok(chain.length > 0, 'Retained backlink migration requires complete writer backups');
+  for (const intent of chain) {
+    assert.ok(intent.operation_id.startsWith('archive-link:'), 'Retained mutation must be an archive backlink intent');
+    assert.ok(intent.backup_bytes_base64 !== null && intent.desired_bytes_base64 !== null, 'Retained migration cannot delete bytes or omit backups');
+    const backup = Buffer.from(intent.backup_bytes_base64!, 'base64'), desired = Buffer.from(intent.desired_bytes_base64!, 'base64');
+    equalBytes(backup, previous, 'Retained backup chain preserves the full preceding original');
+    assert.ok(intent.baseline_digest === digestBytes(backup) && intent.desired_digest === digestBytes(desired), 'Retained backup and desired digests match complete bytes');
+    assert.ok([selected.slice(0, 1), selected.slice(1), selected].some(targets => expectedBacklinks(previous, targets).equals(desired)), 'Retained intent contains only exact required backlink replacements');
+    previous = desired;
+  }
+  equalBytes(previous, expected, 'Retained applied backup chain reaches exact expected bytes');
 }
 /** Coordinator only: real data COPIES under a controlled clock, never scheduled
  * or production deletion evidence. All diagnostics contain counts/labels only. */
@@ -88,7 +119,8 @@ export async function runArchiveReview9Acceptance(configPath: string, now: strin
       equalBytes(Buffer.from(String(record.original_bytes_base64), 'base64'), originals.get(path)!, 'Original bytes preserved across every stage');
       assert.equal(record.original_digest, digestBytes(originals.get(path)!));
     }
-    for (const page of report.pages.filter(page => page.status === 'retained')) equalBytes((await readWikiTarget(config.wiki_root, page.path)).bytes, originals.get(page.path)!, 'Retained handwritten page unchanged');
+    const intents = await store.listFileIntents();
+    for (const page of report.pages.filter(page => page.status === 'retained')) verifyRetainedPage(page.path, originals.get(page.path)!, (await readWikiTarget(config.wiki_root, page.path)).bytes, intents);
     const logText = (await readWikiTarget(config.wiki_root, 'log.md')).bytes!.toString('utf8');
     assert.ok(logText.includes('[[回顾_2026_08|验收保留显示文本]]') && logText.includes('[[回顾_2026_08|第二篇显示文本]]'), 'Root log aliases migrate exactly');
     assert.equal((await service.run({ month, mode: 'apply' })).status, 'complete', 'Repeat archive completes without duplicate deletion');

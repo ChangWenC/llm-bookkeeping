@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runArchiveAcceptance } from '../../tools/archive-acceptance.ts';
-import { runArchiveReview9Acceptance } from '../../tools/archive-review9-acceptance.ts';
+import { runArchiveReview9Acceptance, verifyRetainedPage } from '../../tools/archive-review9-acceptance.ts';
+import { createStore } from '../../src/store/index.ts';
 import { config as base } from '../../test/fixtures/basic.ts';
 test('controlled-clock archive helper confines writes, preserves full originals and aliases, repeats without deletion duplicates', async t => {
   const baseDir = '/private/tmp/bookkeeping-acceptance'; await mkdir(baseDir, { recursive: true });
@@ -31,7 +32,7 @@ test('review9 helper uses only isolated copies, creates an explicit synthetic mi
   const wiki = join(root, 'wiki'), config = { ...base, wiki_root: wiki, data_dir: join(root, 'data') };
   const journals = join(wiki, 'wiki/personal/journals'); await mkdir(journals, { recursive: true });
   for (const day of ['01', '02']) await writeFile(join(journals, `日记_2026_08_${day}.md`), `---\ntype: journal\njournal_class: daily-active\n---\n完整合成原文 ${day} [[日记_2026_08_${day === '01' ? '02' : '01'}|互链原描述]]\n`);
-  const retained = join(journals, '日记_2026_08_03.md'), retainedBytes = '---\npinned: true # intentional handwritten\n---\n原样保留合成手写页。\n';
+  const retained = join(journals, '日记_2026_08_03.md'), retainedBytes = '---\npinned: true # intentional handwritten\n---\n原样保留合成手写页。[[日记_2026_08_01|手写原描述]] [[wiki/personal/journals/日记_2026_08_02#细节]] [[其它页面|不改此描述]]\n';
   await writeFile(retained, retainedBytes);
   await writeFile(join(wiki, 'log.md'), '# 日志\n原有人工正文。[[日记_2026_08_01|原日志描述]]\n');
   const path = join(root, 'config.json'); await writeFile(path, JSON.stringify(config));
@@ -40,7 +41,18 @@ test('review9 helper uses only isolated copies, creates an explicit synthetic mi
   assert.equal(result.preserved_and_deleted, 2); assert.equal(result.retained, 1);
   assert.equal(result.review_precondition, 'acceptance-only-synthetic-review');
   assert.equal(result.production_writes, false); assert.equal(result.scheduled_evidence, false);
-  assert.equal(await readFile(retained, 'utf8'), retainedBytes);
+  assert.equal(await readFile(retained, 'utf8'), retainedBytes.replace('[[日记_2026_08_01|手写原描述]]', '[[回顾_2026_08|手写原描述]]').replace('[[wiki/personal/journals/日记_2026_08_02#细节]]', '[[回顾_2026_08|wiki/personal/journals/日记_2026_08_02#细节]]'));
+  const store = await createStore(config);
+  try {
+    const page = 'wiki/personal/journals/日记_2026_08_03.md', original = Buffer.from(retainedBytes), actual = await readFile(retained);
+    const intents = (await store.listFileIntents()).filter(intent => intent.path === page);
+    assert.equal(intents.length, 2); assert(intents.every(intent => intent.state === 'applied'));
+    assert.deepEqual(Buffer.from(intents[0].backup_bytes_base64!, 'base64'), original);
+    verifyRetainedPage(page, original, actual, intents);
+    assert.throws(() => verifyRetainedPage(page, original, Buffer.concat([actual, Buffer.from('unapproved manual delta')]), intents), /differs beyond/);
+    assert.throws(() => verifyRetainedPage(page, original, actual, intents.map((intent, i) => i ? intent : { ...intent, backup_bytes_base64: null })), /omit backups/);
+    assert.throws(() => verifyRetainedPage(page, original, actual, intents.map((intent, i) => i ? intent : { ...intent, backup_bytes_base64: Buffer.from('incomplete original').toString('base64') })), /full preceding original/);
+  } finally { store.close(); }
   assert.ok((await readFile(join(wiki, 'log.md'), 'utf8')).includes('原有人工正文。[[回顾_2026_08|原日志描述]]'));
   await assert.rejects(runArchiveReview9Acceptance(path, '2026-10-02T12:00:00Z'), /2026-10-01/);
   await writeFile(path, JSON.stringify({ ...config, data_dir: '/private/tmp/outside-review9' }));
