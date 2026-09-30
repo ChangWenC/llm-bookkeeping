@@ -1,4 +1,4 @@
-import { opendir, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import type {
   SourceAdapter,
@@ -13,6 +13,7 @@ import type {
 } from "../contracts/types.ts";
 import { coverage, gap, hash } from "./common.ts";
 import type { ParseState } from "./parsers.ts";
+import { buildManifest, consumeManifest, manifestDirectory, type DirectoryManifest, type ManifestBudget } from "./discovery-manifest.ts";
 import {
   openApprovedSource,
   parseHeader,
@@ -30,6 +31,7 @@ const HEAD = 64 * 1024,
 interface DirectoryCursor {
   path: string;
   skip: number;
+  manifest?: DirectoryManifest;
 }
 interface Discovery {
   directories: DirectoryCursor[];
@@ -37,6 +39,7 @@ interface Discovery {
   root_index: number;
   cycle: number;
   known_skip?: number;
+  incomplete_directories?: DirectoryCursor[];
 }
 interface FileCursor {
   identity: string;
@@ -63,10 +66,6 @@ interface FileCursor {
 }
 export class FileAdapter implements SourceAdapter {
   readonly provider: string;
-  private directoryHandles = new Map<
-    string,
-    { dir: Awaited<ReturnType<typeof opendir>>; index: number }
-  >();
   private source: ProviderConfig;
   private config: BookkeepingConfig;
   constructor(source: ProviderConfig, config: BookkeepingConfig) {
@@ -79,54 +78,64 @@ export class FileAdapter implements SourceAdapter {
     candidates: string[],
     limit: number,
     deadline: number,
+    duration: number,
+    scope: string,
   ): Promise<CoverageGap[]> {
     let visited = 0;
     const discoveryGaps: CoverageGap[] = [];
-    while (d.directories.length && visited < limit && Date.now() < deadline) {
+    const options = this.source.options.discovery_manifest_budget as any;
+    const finite = (value: unknown, fallback: number, maximum: number) =>
+      typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(maximum, Math.floor(value)) : fallback;
+    const budget: ManifestBudget = {
+      deadline: Math.min(deadline, Date.now() + Math.min(duration / 4, finite(options?.max_duration_ms, 5000, 30000))),
+      remaining: finite(options?.max_bytes, 4 * STEP, 64 * STEP),
+    };
+    let storage: string;
+    try { storage = await manifestDirectory(this.config, this.source, scope); }
+    catch (error: any) { return [gap(`discovery_manifest_unavailable:${error.message}`, this.config.data_dir)]; }
+    while (d.directories.length && visited < limit && Date.now() < budget.deadline && budget.remaining > 0) {
       const current = d.directories[0];
-      const startingSkip = current.skip;
       let completed = false;
       try {
-        let cached = this.directoryHandles.get(current.path);
-        if (cached && cached.index !== current.skip) {
-          await cached.dir.close();
-          this.directoryHandles.delete(current.path);
-          cached = undefined;
+        if (!current.manifest) {
+          current.manifest = await buildManifest(current.path, storage, this.source, budget);
+          // A legacy skip is an index into an unstable native enumeration, not a
+          // seek cookie. Restart the immutable list once; stable event IDs dedup.
+          current.skip = 0;
         }
-        if (!cached) {
-          cached = {
-            dir: await opendir(current.path, { bufferSize: 1 }),
-            index: 0,
-          };
-          this.directoryHandles.set(current.path, cached);
-        }
-        while (visited < limit && Date.now() < deadline) {
-          const entry = await cached.dir.read();
-          if (!entry) {
-            completed = true;
-            await cached.dir.close();
-            this.directoryHandles.delete(current.path);
-            break;
-          }
+        const consumed = await consumeManifest(storage, current.manifest, limit - visited, budget);
+        for (const entry of consumed.entries) {
           visited++;
-          cached.index++;
-          if (cached.index <= current.skip) continue;
-          current.skip = cached.index;
+          current.skip++;
           const loc = path.join(current.path, entry.name);
-          if (entry.isDirectory() && !entry.isSymbolicLink())
+          if (entry.kind === "directory")
             d.directories.push({ path: loc, skip: 0 });
-          else if (entry.isFile() && /\.jsonl$/i.test(entry.name))
+          else if (entry.kind === "file" && /\.jsonl$/i.test(entry.name))
             candidates.push(loc);
         }
-        if (!completed && current.skip === startingSkip && startingSkip > 0)
+        if (!current.manifest.complete) {
           discoveryGaps.push(
-            gap(
-              `directory_resume_budget_exhausted:minimum_directory_budget:${current.skip + 1}:scanned_prefix:${cached.index}`,
-              current.path,
-            ),
+            gap(`directory_manifest_partial:${current.manifest.reason}:entries:${current.manifest.entries}:bytes:${current.manifest.bytes}:raise_discovery_manifest_budget_or_narrow_root`, current.path),
           );
+          if (consumed.done) {
+            d.incomplete_directories ??= [];
+            d.incomplete_directories = d.incomplete_directories.filter(item => item.path !== current.path);
+            d.incomplete_directories.push(current);
+          }
+        } else if (consumed.done) {
+          d.incomplete_directories = d.incomplete_directories?.filter(item => item.path !== current.path);
+        }
+        completed = consumed.done;
       } catch (error: any) {
         completed = true;
+        if (current.manifest) {
+          // Missing/corrupt derived metadata is rebuildable. Do not certify the
+          // source directory as complete because its local cache failed.
+          current.manifest = undefined;
+          current.skip = 0;
+          d.incomplete_directories ??= [];
+          if (!d.incomplete_directories.some(item => item.path === current.path)) d.incomplete_directories.push(current);
+        }
         if (error.code !== "ENOENT" || this.source.roots.includes(current.path))
           discoveryGaps.push(
             gap(`directory_unavailable:${error.code ?? "error"}`, current.path),
@@ -135,6 +144,8 @@ export class FileAdapter implements SourceAdapter {
       if (completed) d.directories.shift();
       else break;
     }
+    for (const current of d.incomplete_directories ?? [])
+      discoveryGaps.push(gap(`directory_manifest_pending:${current.manifest?.reason ?? "metadata_unavailable"}:raise_discovery_manifest_budget_or_narrow_root`, current.path));
     return discoveryGaps;
   }
   async *collect(
@@ -285,10 +296,12 @@ export class FileAdapter implements SourceAdapter {
       candidates,
       request.budget.max_directory_entries,
       deadline,
+      request.budget.max_duration_ms,
+      scope,
     );
     const fileGaps: CoverageGap[] = [];
     const discoveryComplete =
-      d.directories.length === 0 && d.files.length === 0;
+      d.directories.length === 0 && d.files.length === 0 && !d.incomplete_directories?.length;
     // Sort bounded discovered files only; mtime is scheduling evidence, never time coverage.
     const ranked: { p: string; mtime: number }[] = [];
     for (const p of [...new Set(candidates)]) {
@@ -644,13 +657,12 @@ export class FileAdapter implements SourceAdapter {
       [checkpoint("@discovery", "0", d as unknown as Record<string, unknown>)],
       [],
       null,
-      ranked.length === 0 && discoveryGaps.length ? "unavailable" : undefined,
+      ranked.length === 0 && discoveryGaps.some(item => item.reason.startsWith("directory_unavailable") || item.reason.startsWith("discovery_manifest_unavailable")) ? "unavailable" : undefined,
     );
   }
   async close(): Promise<void> {
-    for (const cached of this.directoryHandles.values())
-      await cached.dir.close();
-    this.directoryHandles.clear();
+    // Source and manifest handles close in each bounded operation; no process-
+    // local directory handle is required for resumption.
   }
   private excluded(cwd: string | null, meta: Record<string, unknown>): boolean {
     const options = this.source.options;

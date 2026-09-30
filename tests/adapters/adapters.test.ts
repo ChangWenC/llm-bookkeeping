@@ -9,6 +9,7 @@ import {
   readFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   createAdapters,
@@ -27,7 +28,7 @@ import type {
 const cfg = (provider = "codex", roots: string[] = []): BookkeepingConfig => ({
   schema_version: 1,
   wiki_root: "/synthetic/wiki",
-  data_dir: "/synthetic/data",
+  data_dir: path.join(tmpdir(), "bk-adapter-state-" + createHash("sha256").update(JSON.stringify(roots)).digest("hex").slice(0, 16)),
   journal_timezone: "Europe/Amsterdam",
   analysis_timezone: "Europe/Amsterdam",
   cutover_at: "2026-09-30T00:00:00Z",
@@ -753,7 +754,7 @@ test("real-shaped realtime_item envelope and turn context; analysis is excluded"
   assert.equal(e[0].context.cwd, "/synthetic/project");
   assert.equal(e[1].channel, "final_answer");
 });
-test("2000-entry cap reports actual skipped budget, explicit raised budget resumes across restart", async () => {
+test("2000 candidate cap resumes a persisted manifest across restart without raising the entry budget", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "bk-entries-"));
   const { mkdir } = await import("node:fs/promises");
   for (let i = 0; i < 2010; i++)
@@ -761,21 +762,14 @@ test("2000-entry cap reports actual skipped budget, explicit raised budget resum
   const config = cfg("codex", [dir]);
   const first = await collect(config);
   const firstCp = checkpoints(first);
-  const restarted = await collect(config, req(), firstCp);
-  assert(
-    restarted
-      .flatMap((b) => b.coverage)
-      .some((c) =>
-        c.gaps.some((g) => g.reason.includes("minimum_directory_budget:2001")),
-      ),
-  );
-  config.providers[0].options.max_directory_entries = 8192;
-  const resumed = await collect(config, req(), checkpoints(restarted, firstCp));
-  assert(
-    resumed
-      .flatMap((b) => b.coverage)
-      .some((c) => c.capture_status === "complete"),
-  );
+  let saved = firstCp;
+  let completed = false;
+  for (let round = 0; round < 8 && !completed; round++) {
+    const restarted = await collect(config, req(), saved);
+    saved = checkpoints(restarted, saved);
+    completed = restarted.flatMap(batch => batch.coverage).some(coverage => coverage.capture_status === "complete");
+  }
+  assert.equal(completed, true);
 });
 test("wechat per-chat numeric real_sender_id never uses a global magic self ID", () => {
   const config = wxconfig();

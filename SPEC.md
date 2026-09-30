@@ -68,7 +68,7 @@ SQLite 用一致性 backup API 或 VACUUM INTO，不仅复制活 db 漏 WAL；re
 ## 5. 实时、历史与来源
 
 切换记录 T0，S=切换日确认日记时区00:00转UTC固定。每轮冻结 cutoff，live范围[max(S,cutoff-48h),cutoff)，其余历史/漏跑/迟到/未扫前缀独立排队。live采集审阅发布优先，history随后，失败项延后避免队首堵塞。23:30后消息下轮按真实日期补，不虚构全天截止。
-空库大文件：优先已知日期目录/近期活动/持久发现游标，mtime只排序。新文件读至多64KiB头部身份，再从冻结EOF以1MiB倒读至多8MiB；完整行解析，边缘半行留缺口。未读前缀独立queue，live append offset与history offset分开，不把EOF当连续完成。每provider live90秒/64MiB/2000目录项可续跑轮转，history30秒/32MiB。无法识别身份/时间局部pending，不妨碍其他日记。不能因遇一条早时间戳推定前缀全旧；可部分发布，不假完整。
+空库大文件：优先已知日期目录/近期活动/持久发现游标，mtime只排序。新文件读至多64KiB头部身份，再从冻结EOF以1MiB倒读至多8MiB；完整行解析，边缘半行留缺口。未读前缀独立queue，live append offset与history offset分开，不把EOF当连续完成。每provider来源正文live90秒/64MiB，history30秒/32MiB。目录发现用本机data_dir内的持久清单，每轮默认消费至多2000个清单条目；已知文件另做同等有限轮转，来源读取仍共用时间/字节总预算。Node没有跨进程目录seek cookie，所以清单构建与候选消费分开计预算：provider.options.discovery_manifest_budget默认最多5秒/4MiB序列化元数据构建及清单读取，时间最多占本轮provider的四分之一；只枚举名/类型，不读取来源正文。完整清单的字节cursor跨进程推进；截断/目录变化/预算不足保留已发现前缀并明确partial，可操作提高有限metadata预算或缩小root，不宣称任意大目录都能自动完整发现。清单丢失时局部重新枚举，不把旧offset套到新清单；完成一轮后新epoch刷新发现新增文件。无法识别身份/时间局部pending，不妨碍其他日记。不能因遇一条早时间戳推定前缀全旧；可部分发布，不假完整。
 
 Codex：支持event_msg.user_message、真实user response_item、显式role/id/session的realtime transcript_segment、assistant final_answer，有价值commentary作候选；请求/尝试/验证结果分开，工具输出不直接归因Roy。
 Claude：同message ID多block保留，多个不同final保留，未完turn待审；已证明镜像才去重。
