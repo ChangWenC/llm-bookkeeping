@@ -12,7 +12,7 @@ export const unknown = <T>(
   value: T | null,
   reason: string | null = value === null ? "unknown" : null,
 ) => ({ schema_version: 1 as const, value, reason });
-/** Parse integer tokens before JSON.parse can round 64-bit source IDs. */
+/** Preserve source ID and numeric time tokens before JSON.parse can round them. */
 export function parseLossless(text: string): any {
   let out = "",
     i = 0;
@@ -36,9 +36,10 @@ export function parseLossless(text: string): any {
         continue;
       }
       const n = m[0];
+      const validNumericToken = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(n);
       out +=
-        (epochTimeKey && /^\d{10}\.\d{1,9}$/.test(n)) ||
-        (/^-?\d+$/.test(n) && !Number.isSafeInteger(Number(n)))
+        validNumericToken && ((epochTimeKey && /[.eE]/.test(n)) ||
+        (/^-?\d+$/.test(n) && !Number.isSafeInteger(Number(n))))
           ? JSON.stringify(n)
           : n;
       epochTimeKey = false;
@@ -74,7 +75,9 @@ function comparableUtc(value: string): string {
 /** Resolve the whole second with Date/Intl, retaining ISO fractional digits as text. */
 export function parseTime(raw: unknown, zone?: string): ParsedTime {
   if (typeof raw === "number" ||
-      (typeof raw === "string" && /^\d{10}(?:\.\d+)?$/.test(raw))) {
+      (typeof raw === "string" && (/^-?\d{10}$/.test(raw) ||
+        /^-?(?:0|[1-9]\d*)(?:\.\d+)(?:[eE][+-]?\d+)?$/.test(raw) ||
+        /^-?(?:0|[1-9]\d*)[eE][+-]?\d+$/.test(raw)))) {
     const text = typeof raw === "number" && String(raw).includes("e")
       ? raw.toFixed(9).replace(/0+$/, "").replace(/\.$/, "") : String(raw);
     const epoch = text.match(/^(-?\d+)(?:\.(\d{1,9}))?$/);

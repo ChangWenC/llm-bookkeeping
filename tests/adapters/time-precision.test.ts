@@ -115,6 +115,28 @@ test('source numeric epoch time lexemes are preserved before Number while unrela
   assert.equal(parseTime(rounded).reason, 'numeric_time_precision_unproven');
 });
 
+test('unsupported numeric time precision and exponent remain unknown without rounding or accepting invalid JSON', () => {
+  for (const token of ['1790769660.1230000001', '1790769660.0000000001', '1790769660e-1', '1.790769660123456789e9']) {
+    const parsed = parseLossless(`{"timestamp":${token}}`);
+    assert.equal(parsed.timestamp, token);
+    assert.equal(parseTime(parsed.timestamp).utc, null);
+    assert.equal(parseTime(parsed.timestamp).precision, 'unknown');
+  }
+  for (const token of ['0123456789.123', '-0123456789.123', '01234567890123456789']) {
+    assert.throws(() => parseLossless(`{"timestamp":${token}}`), SyntaxError);
+  }
+  for (const [token, utc] of [
+    ['946684800.123456789', '2000-01-01T00:00:00.123456789Z'],
+    ['-0.000000001', '1969-12-31T23:59:59.999999999Z'],
+    ['-946684800.123456789', '1940-01-01T23:59:59.876543211Z'],
+  ]) {
+    const parsed = parseLossless(`{"create_time":${token}}`);
+    assert.equal(parsed.create_time, token);
+    assert.equal(parseTime(parsed.create_time).utc, utc);
+    assert.equal(parseTime(parsed.create_time).precision, 'nanosecond');
+  }
+});
+
 test('numeric WeChat wire fractions reach actual SQLite nanosecond boundaries without lexical rounding', async t => {
   const { store } = await fixture(t);
   const config: BookkeepingConfig = {
