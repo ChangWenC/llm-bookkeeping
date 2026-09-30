@@ -28,6 +28,17 @@ export const unique = (ids: string[], label: string) => {
 // Correct the known Date millisecond truncation only when the unchanged source
 // timestamp independently proves both the old truncation and the exact instant.
 function preciseOriginalUtc(original: string | null): { exact: string; truncated: string; precision: SourceEvent['time_precision'] } | null {
+    // The adapter contract interprets exactly ten integer digits as epoch seconds;
+    // never infer units for millisecond epochs or another numeric width.
+    const epoch = original?.match(/^(\d{10})\.(\d{4,9})$/);
+    if (epoch) {
+        const second = Number(epoch[1]) * 1000;
+        return {
+            exact: new Date(second).toISOString().slice(0, 19) + '.' + epoch[2].padEnd(9, '0') + 'Z',
+            truncated: normalized(new Date(Number(original) * 1000).toISOString()),
+            precision: epoch[2].length > 6 ? 'nanosecond' : 'microsecond',
+        };
+    }
     const match = original?.match(/^(\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d)\.(\d{4,9})(Z|[+-]\d\d:?\d\d)$/);
     if (!match || !Number.isFinite(Date.parse(original!)))
         return null;
@@ -41,7 +52,9 @@ function preciseOriginalUtc(original: string | null): { exact: string; truncated
     };
 }
 export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): SourceEvent {
-    if (previous.source.message_id !== null && canonical(previous.source) === canonical(incoming.source)
+    const provenSource = previous.source.message_id !== null
+        || (previous.event_id === incoming.event_id && previous.locator === incoming.locator && previous.generation === incoming.generation);
+    if (provenSource && canonical(previous.source) === canonical(incoming.source)
         && previous.body === incoming.body && previous.original_time.value === incoming.original_time.value
         && previous.utc_time.value && incoming.utc_time.value) {
         const proof = preciseOriginalUtc(previous.original_time.value);
