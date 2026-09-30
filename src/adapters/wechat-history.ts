@@ -16,6 +16,9 @@ export interface LateSweep {
   queue: HistoryWindow[];
   blocked: HistoryWindow[];
   window_ms: number;
+  deferred?: HistoryWindow[];
+  prefer_deferred_next?: boolean;
+  deferred_turn_due?: boolean;
   next_cycle_at: string | null;
 }
 export interface HistoryCursor {
@@ -77,10 +80,22 @@ export function prepareLateSweep(cursor: HistoryCursor, request: CollectRequest,
   const end = Math.min(Date.parse(request.range.to), Date.parse(request.cutoff) - 2 * DAY);
   if (end <= Date.parse(cursor.root_from)) return;
   const prior = cursor.late_sweep;
+  if (prior) {
+    prior.deferred ??= [];
+    const delayed = prior.queue.filter(window => window.retry_after);
+    prior.queue = prior.queue.filter(window => !window.retry_after);
+    prior.deferred.push(...delayed);
+    // Upgrade a checkpoint stalled by a failed old window without erasing its debt.
+    if (!prior.next_cycle_at && !prior.queue.length && Date.parse(prior.frontier) <= Date.parse(prior.root_from))
+      prior.next_cycle_at = delayed.length ? delayed.map(window => window.retry_after!).sort()[0]
+        : new Date(Date.parse(request.cutoff) + sweepInterval(options)).toISOString();
+  }
   if (prior && (!prior.next_cycle_at || Date.parse(prior.next_cycle_at) > Date.parse(request.cutoff))) return;
   cursor.late_sweep = {
     root_from: cursor.root_from, root_to: new Date(end).toISOString(), frontier: new Date(end).toISOString(),
-    queue: [], blocked: prior?.blocked ?? [], window_ms: sweepBase(options), next_cycle_at: null,
+    queue: [], blocked: prior?.blocked ?? [], deferred: prior?.deferred ?? [], prefer_deferred_next: false,
+    deferred_turn_due: prior?.deferred_turn_due ?? prior?.prefer_deferred_next ?? false,
+    window_ms: sweepBase(options), next_cycle_at: null,
   };
 }
 /** Exclude irreducible seconds already retained as import gaps; ordinary failures remain retries. */
@@ -100,56 +115,74 @@ function excludeBlocked(from: number, to: number, blocks: HistoryWindow[]): Hist
     from: new Date(piece.from).toISOString(), to: new Date(piece.to).toISOString(), depth: 0,
   }));
 }
-function takeLateWindow(cursor: HistoryCursor, request: CollectRequest, options: Record<string, unknown>): HistoryWindow | undefined {
+function takeLateWindow(
+  cursor: HistoryCursor, request: CollectRequest, options: Record<string, unknown>,
+  allowFresh: boolean, allowDeferred: boolean, singleSlot: boolean,
+): { window: HistoryWindow; deferred: boolean } | undefined {
   const sweep = cursor.late_sweep;
-  if (!sweep || sweep.next_cycle_at) return;
-  let index = sweep.queue.findIndex(window => !window.retry_after);
-  // Fresh older windows proceed ahead of failed windows, so a bad shard cannot block the sweep.
-  while (index < 0 && Date.parse(sweep.frontier) > Date.parse(sweep.root_from)) {
-    const to = Date.parse(sweep.frontier);
-    const from = Math.max(Date.parse(sweep.root_from), to - sweep.window_ms);
-    sweep.frontier = new Date(from).toISOString();
-    sweep.queue.unshift(...excludeBlocked(from, to, [...cursor.blocked, ...sweep.blocked]));
-    index = sweep.queue.findIndex(window => !window.retry_after);
-  }
-  if (index < 0) index = sweep.queue.findIndex(window => Date.parse(window.retry_after!) <= Date.parse(request.cutoff));
-  if (index >= 0) {
-    const window = sweep.queue.splice(index, 1)[0];
+  if (!sweep) return;
+  sweep.deferred ??= [];
+  const deferredIndex = sweep.deferred.findIndex(window => !window.retry_after || Date.parse(window.retry_after) <= Date.parse(request.cutoff));
+  const takeDeferred = () => {
+    const window = sweep.deferred!.splice(deferredIndex, 1)[0];
     delete window.retry_after;
-    return window;
+    sweep.prefer_deferred_next = false;
+    sweep.deferred_turn_due = false;
+    return { window, deferred: true };
+  };
+  if (allowDeferred && deferredIndex >= 0 && (sweep.prefer_deferred_next || (singleSlot && sweep.deferred_turn_due) || !allowFresh || sweep.next_cycle_at))
+    return takeDeferred();
+  if (allowFresh && !sweep.next_cycle_at) {
+    while (!sweep.queue.length && Date.parse(sweep.frontier) > Date.parse(sweep.root_from)) {
+      const to = Date.parse(sweep.frontier);
+      const from = Math.max(Date.parse(sweep.root_from), to - sweep.window_ms);
+      sweep.frontier = new Date(from).toISOString();
+      sweep.queue.push(...excludeBlocked(from, to, [...cursor.blocked, ...sweep.blocked]));
+    }
+    if (sweep.queue.length) {
+      sweep.prefer_deferred_next = true;
+      sweep.deferred_turn_due = true;
+      return { window: sweep.queue.shift()!, deferred: false };
+    }
+    sweep.next_cycle_at = new Date(Date.parse(request.cutoff) + sweepInterval(options)).toISOString();
   }
-  if (!sweep.queue.length) sweep.next_cycle_at = new Date(Date.parse(request.cutoff) + sweepInterval(options)).toISOString();
+  if (allowDeferred && deferredIndex >= 0) return takeDeferred();
 }
 export function chooseHistoryWindow(
-  cursor: HistoryCursor, request: CollectRequest, options: Record<string, unknown>, lateAlreadyRead: boolean,
-): { window: HistoryWindow; late: boolean } | undefined {
+  cursor: HistoryCursor, request: CollectRequest, options: Record<string, unknown>,
+  lateAlreadyRead: boolean, deferredAlreadyRead = false, singleSlot = false,
+): { window: HistoryWindow; late: boolean; deferred?: boolean } | undefined {
   prepareLateSweep(cursor, request, options);
-  const sweep = cursor.late_sweep;
-  const canTryLate = !lateAlreadyRead && sweep && !sweep.next_cycle_at;
-  if (canTryLate && (!cursor.queue.length || cursor.prefer_late_next)) {
-    const window = takeLateWindow(cursor, request, options);
-    if (window) { cursor.prefer_late_next = false; return { window, late: true }; }
+  const takeLate = () => takeLateWindow(cursor, request, options, !lateAlreadyRead, !deferredAlreadyRead, singleSlot);
+  if (!cursor.queue.length || cursor.prefer_late_next) {
+    const selected = takeLate();
+    if (selected) { cursor.prefer_late_next = false; return { ...selected, late: true }; }
   }
   const primary = takeHistoryWindow(cursor);
   if (primary) { cursor.prefer_late_next = true; return { window: primary, late: false }; }
-  if (canTryLate) {
-    const window = takeLateWindow(cursor, request, options);
-    if (window) { cursor.prefer_late_next = false; return { window, late: true }; }
-  }
+  const selected = takeLate();
+  if (selected) { cursor.prefer_late_next = false; return { ...selected, late: true }; }
 }
 export function recordLateWindow(
   cursor: HistoryCursor, window: HistoryWindow, capped: boolean, rows: number,
-  request: CollectRequest, options: Record<string, unknown>, failure = false,
+  request: CollectRequest, options: Record<string, unknown>, failure = false, deferred = false,
 ): void {
   const sweep = cursor.late_sweep!;
   if (failure) {
-    sweep.queue.push({ ...window, retry_after: new Date(Date.parse(request.cutoff) + sweepInterval(options)).toISOString() });
+    const delayed = { ...window, retry_after: new Date(Date.parse(request.cutoff) + sweepInterval(options)).toISOString() };
+    const debts = sweep.deferred ??= [];
+    const existing = debts.findIndex(item => item.from === window.from && item.to === window.to && item.purpose === window.purpose);
+    if (existing >= 0) debts[existing] = delayed;
+    else debts.push(delayed);
+    if (!sweep.next_cycle_at && !sweep.queue.length && Date.parse(sweep.frontier) <= Date.parse(sweep.root_from))
+      sweep.next_cycle_at = new Date(Date.parse(request.cutoff) + sweepInterval(options)).toISOString();
     return;
   }
-  recordHistoryWindow(sweep, window, capped);
+  if (deferred) recordHistoryWindow({ queue: sweep.deferred ??= [], blocked: sweep.blocked }, window, capped);
+  else recordHistoryWindow(sweep, window, capped);
   const maximum = Math.max(sweepBase(options), finiteOption(options, "late_sweep_max_window_days", 3650, 3650) * DAY);
   sweep.window_ms = rows === 0 && !capped ? Math.min(maximum, sweep.window_ms * 4) : sweepBase(options);
-  if (!sweep.queue.length && Date.parse(sweep.frontier) <= Date.parse(sweep.root_from))
+  if (!sweep.next_cycle_at && !sweep.queue.length && Date.parse(sweep.frontier) <= Date.parse(sweep.root_from))
     sweep.next_cycle_at = new Date(Date.parse(request.cutoff) + sweepInterval(options)).toISOString();
 }
 export function historyGaps(cursor: HistoryCursor, chat: string): CoverageGap[] {
@@ -164,6 +197,9 @@ export function historyGaps(cursor: HistoryCursor, chat: string): CoverageGap[] 
   const sweep = cursor.late_sweep;
   if (sweep && !sweep.next_cycle_at && (sweep.queue.length || Date.parse(sweep.frontier) > Date.parse(sweep.root_from)))
     gaps.push(gap(`wechat_late_arrivals_pending:windows:${sweep.queue.length}:frontier:${sweep.frontier}:snapshot:${sweep.root_to}`, chat));
+  for (const window of sweep?.deferred ?? [])
+    gaps.push({ schema_version: 1, range: { schema_version: 1, from: window.from, to: window.to },
+      reason: `wechat_late_arrival_retry_deferred:${window.retry_after ?? "ready"}`, locator: chat, resumable: true });
   return gaps;
 }
 /** Context is a separate exact window, never an expansion of a core paging query. */

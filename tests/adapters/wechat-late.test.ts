@@ -130,7 +130,7 @@ test('late shard failure rotates behind fresh older windows while newly extended
   const run = runner(config, [], calls, (_from, to) => to === failEnd);
   const first = await collect(config, req, checkpoints, run);
   checkpoints = advance(checkpoints, first);
-  const failed = cursor(checkpoints).late_sweep!.queue.find(window => window.retry_after)!;
+  const failed = cursor(checkpoints).late_sweep!.deferred!.find(window => window.retry_after)!;
   assert(failed);
   const next = request('2026-10-02T00:00:00Z');
   const before = calls.length;
@@ -139,7 +139,7 @@ test('late shard failure rotates behind fresh older windows while newly extended
   assert(secondCalls.some(call => call.from === Date.parse(req.cutoff) / 1000 && call.to === Date.parse(next.cutoff) / 1000));
   assert(secondCalls.some(call => call.to === Date.parse(failed.from) / 1000));
   assert.equal(cursor(checkpoints).queue.length, 0);
-  assert(cursor(checkpoints).late_sweep!.queue.some(window => window.retry_after));
+  assert(cursor(checkpoints).late_sweep!.deferred!.some(window => window.retry_after));
 });
 
 test('late same-second cap stays an explicit import gap and is not retried on every round or next cycle', async () => {
@@ -201,4 +201,63 @@ test('late group context queue is retained after the final core sweep window and
   assert.equal(history().late_sweep!.queue.length, 0);
   assert(history().late_sweep!.next_cycle_at);
   assert.equal(history().late_sweep!.blocked.length, 0);
+});
+
+test('permanent deferred shard cannot freeze sweep snapshots across daily cutoffs and failed debt survives', async () => {
+  const config = fixtureConfig();
+  const first = request('2026-10-01T00:00:00Z');
+  first.range.from = '2026-09-28T00:00:00Z';
+  const checkpoint = oldCheckpoint(config, first);
+  (checkpoint.cursor.history as unknown as HistoryCursor).root_to = first.cutoff;
+  let checkpoints = [checkpoint];
+  const calls: { from: number; to: number }[] = [];
+  const failedFrom = Date.parse(first.range.from) / 1000;
+  const failedTo = Date.parse(first.cutoff) / 1000 - 2 * DAY / 1000;
+  const lateRecord = row('newly-aged-late', '2026-09-30T12:00:00Z');
+  const run = runner(config, [lateRecord], calls, (from, to) => from === failedFrom && to === failedTo);
+  checkpoints = advance(checkpoints, await collect(config, first, checkpoints, run));
+  assert.equal(cursor(checkpoints).late_sweep!.deferred!.length, 1);
+  assert(cursor(checkpoints).late_sweep!.next_cycle_at);
+  for (const cutoff of ['2026-10-02T01:00:00Z', '2026-10-03T02:00:00Z']) {
+    const next = request(cutoff); next.range.from = first.range.from;
+    const before = calls.length;
+    const batches = await collect(config, next, checkpoints, run);
+    assert(calls.length - before <= 4);
+    checkpoints = advance(checkpoints, batches);
+    assert.equal(cursor(checkpoints).late_sweep!.root_to, new Date(Date.parse(cutoff) - 2 * DAY).toISOString());
+    assert(cursor(checkpoints).late_sweep!.deferred!.some(window => Date.parse(window.from) === failedFrom * 1000 && Date.parse(window.to) === failedTo * 1000));
+    assert(batches.flatMap(batch => batch.coverage).some(coverage => coverage.gaps.some(gap => gap.reason.startsWith('wechat_late_arrival_retry_deferred'))));
+  }
+  assert(calls.filter(call => call.from === failedFrom && call.to === failedTo).length >= 2, 'old failed debt receives a bounded retry');
+  assert(calls.some(call => call.to === Date.parse('2026-10-01T02:00:00Z') / 1000), 'latest completed range entered a refreshed sweep');
+});
+
+test('one-query budget preserves deferred preference across cycles instead of starving failed old debt', async () => {
+  const config = fixtureConfig(); config.providers[0].options.history_queries_per_round = 1;
+  const req = request(); req.range.from = '2026-09-28T00:00:00Z';
+  const checkpoint = oldCheckpoint(config, req);
+  const failedFrom = Date.parse(req.range.from) / 1000, failedTo = Date.parse(req.cutoff) / 1000 - 2 * DAY / 1000;
+  checkpoint.cursor.history = {
+    root_from: req.range.from, root_to: req.cutoff, queue: [], blocked: [], initial_core_complete: true,
+    late_sweep: { root_from: req.range.from, root_to: new Date(failedTo * 1000).toISOString(), frontier: req.range.from,
+      window_ms: 7 * DAY, queue: [], blocked: [], next_cycle_at: req.cutoff, deferred_turn_due: true,
+      deferred: [{ from: req.range.from, to: new Date(failedTo * 1000).toISOString(), depth: 0, retry_after: req.cutoff }] },
+  };
+  let checkpoints = [checkpoint];
+  const calls: { from: number; to: number }[] = [];
+  const run = runner(config, [], calls, (from, to) => from === failedFrom && to === failedTo);
+  const first = await collect(config, req, checkpoints, run);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { from: failedFrom, to: failedTo });
+  checkpoints = advance(checkpoints, first);
+  assert.equal(cursor(checkpoints).late_sweep!.deferred_turn_due, false);
+  for (let day = 2; day <= 9; day++) {
+    const next = request(`2026-10-${String(day).padStart(2, '0')}T01:00:00Z`); next.range.from = req.range.from;
+    const before = calls.length;
+    checkpoints = advance(checkpoints, await collect(config, next, checkpoints, run));
+    assert(calls.length - before <= 1);
+  }
+  assert(calls.some(call => call.from === failedFrom && call.to > failedTo), 'fresh late work still advances under a one-query budget');
+  assert(calls.filter(call => call.from === failedFrom && call.to === failedTo).length >= 2);
+  assert(cursor(checkpoints).late_sweep!.deferred!.length >= 1);
 });
