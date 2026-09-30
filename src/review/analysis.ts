@@ -6,6 +6,7 @@ import { canonical, digest } from '../analytics/serialization.ts';
 import { createMonthlyConsumer } from '../consumers/monthly/index.ts';
 import { readPageBaseline } from './baselines.ts';
 import { coverageStatus, factKey } from '../analytics/model.ts';
+import { addArchiveContexts } from './archives.ts';
 const gap = (reason: string): CoverageGap => ({ schema_version: 1, range: null, reason, locator: null, resumable: true });
 function frozen(store: Store, request: PrepareRequest, period: string, initial: FactRef[], work_ids: string[]): {
     refs: FactRef[];
@@ -177,6 +178,7 @@ export async function prepareMonthlyBundle(store: Store, config: BookkeepingConf
         reads.add(factKey(fact));
     if (snapshot.refs.every(ref => reads.has(factKey(ref))))
         fitIds(bundle, snapshot.work_ids, limit);
+    await addArchiveContexts(store, config, bundle, request.archive_context_offset ?? 0);
     for (const record of coverage) {
         if (Buffer.byteLength(canonical(context.coverage)) + Buffer.byteLength(canonical(record)) > 16384)
             break;

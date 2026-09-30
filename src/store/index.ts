@@ -237,6 +237,14 @@ export class SqliteStore implements Store {
         const status = events.length ? done === events.length ? 'complete' : (done || any) ? 'partial' : 'pending' : explicitEmpty && coverage.capture_status === 'complete' && !coverage.gaps.length ? 'complete' : 'pending';
         return { ...coverage, review_status: status };
     }
+    freezeArchiveWork(snapshotId: string, ids: string[]): string[] {
+        return this.transaction(() => {
+            const row = this.db.prepare('SELECT json FROM archive_material_work WHERE snapshot_id=?').get(snapshotId) as any;
+            if (row) return JSON.parse(row.json);
+            this.db.prepare('INSERT INTO archive_material_work VALUES(?,?)').run(snapshotId, canonical(ids));
+            return ids;
+        });
+    }
     freezeFactMaterial(kind: 'weekly' | 'monthly', period: string, cutoff: string, refs: FactRef[], work_ids: string[] = []): string { utc(cutoff); const value = { schema_version: 1, kind, period, cutoff, refs, work_ids }; const id = 'fact-material:' + digest(canonical(value)); this.immutable('fact_material_snapshots', id, value); return id; }
     getFactMaterial(id: string): {
         kind: 'weekly' | 'monthly';

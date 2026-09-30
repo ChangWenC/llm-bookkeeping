@@ -10,7 +10,7 @@ export function accumulateMonthly(pages: SemanticPage<MonthlyReviewResult>[]): M
     const sorted = [...pages].sort((a, b) => a.offset - b.offset), latest = sorted.at(-1)!.result;
     if (sorted.length === 1)
         return structuredClone(latest);
-    return { ...latest, summary: sorted.map(page => page.result.summary).join('\n\n'), supplement_text: sorted.map(page => page.result.supplement_text).filter(Boolean).join('\n\n'), fact_refs: uniqueRefs(sorted.flatMap(page => page.result.fact_refs)), coverage_status: 'partial' };
+    return { ...latest, summary: sorted.map(page => page.result.summary).join('\n\n'), supplement_text: sorted.map(page => page.result.supplement_text).filter(Boolean).join('\n\n'), fact_refs: uniqueRefs(sorted.flatMap(page => page.result.fact_refs)), completed_work_ids: [...new Set(sorted.flatMap(page => page.result.completed_work_ids ?? []))], completed_archive_context_ids: [...new Set(sorted.flatMap(page => page.result.completed_archive_context_ids ?? []))], coverage_status: 'partial' };
 }
 export function accumulateWeekly(pages: SemanticPage<WeeklyAnalysisResult>[], current: WeeklyAnalysisResult): WeeklyAnalysisResult {
     const sorted = [...pages].sort((a, b) => a.offset - b.offset);

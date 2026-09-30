@@ -4,6 +4,8 @@ export function initializeSchema(db: DatabaseSync): void {
       CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       INSERT OR IGNORE INTO metadata VALUES('schema','1');
       CREATE TABLE IF NOT EXISTS semantic_pages(snapshot_id TEXT NOT NULL,offset INTEGER NOT NULL,kind TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(snapshot_id,offset));
+      CREATE TABLE IF NOT EXISTS semantic_material_pages(snapshot_id TEXT NOT NULL,material_id TEXT NOT NULL,offset INTEGER NOT NULL,kind TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(snapshot_id,material_id));
+      CREATE TABLE IF NOT EXISTS archive_material_work(snapshot_id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS fact_material_reads(snapshot_id TEXT NOT NULL,fact_id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(snapshot_id,fact_id,revision));
       CREATE TABLE IF NOT EXISTS fact_material_snapshots(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS collections(id TEXT PRIMARY KEY,json TEXT NOT NULL);

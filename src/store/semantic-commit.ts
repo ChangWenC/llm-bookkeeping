@@ -3,7 +3,7 @@ import type { ReviewResult, ReviewCommit, ReviewBundle, FactRevision, FactRef, J
 import { validateReviewResult } from '../contracts/validation.ts';
 import { accumulateMonthly, accumulateWeekly, type SemanticPage } from '../analytics/pages.ts';
 import { validateAnalysisAgainstInput } from '../analytics/validation.ts';
-import { canonical } from '../analytics/serialization.ts';
+import { canonical, digest } from '../analytics/serialization.ts';
 import { utc, normalized, version, unique, refKey, factWeek, weekFor } from './domain.ts';
 import type { AnalyticsRepository } from './analytics.ts';
 interface SemanticStore {
@@ -64,6 +64,11 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 unique(review.completed_work_ids, 'completed monthly work IDs');
                 if (review.completed_work_ids.some(id => !context.prepared_work_ids?.includes(id)))
                     throw new Error('Completed monthly work ID outside prepared context');
+            }
+            if (review.completed_archive_context_ids) {
+                unique(review.completed_archive_context_ids, 'completed archive context IDs');
+                if (review.completed_archive_context_ids.some(id => !context.archive_contexts?.some(item => item.work_id === id && item.excerpt_reason === null)))
+                    throw new Error('Completed archive context must be fully displayed in this prepared page');
             }
         }
         unique(result.chunks.map(c => c.chunk_id), 'reviewed chunks');
@@ -213,8 +218,18 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         const pageContext = bundle.analysis_context ?? bundle.monthly_context;
         if (pageContext?.facts_page && (result.analysis || result.monthly_review)) {
             const value = result.analysis ?? result.monthly_review!;
-            store.db.prepare('INSERT INTO semantic_pages VALUES(?,?,?,?)').run(pageContext.facts_page.snapshot_id, pageContext.facts_page.offset, bundle.kind, canonical(value));
-            const pages = store.db.prepare('SELECT offset,json FROM semantic_pages WHERE snapshot_id=? AND kind=? ORDER BY offset').all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
+            // The machine-produced monthly target changes after publishing. It is not a new source material page.
+            const automaticPath = `wiki/personal/journals/reviews/回顾_${bundle.period?.replace('-', '_')}.md`;
+            const sources = bundle.kind === 'monthly' ? bundle.monthly_context!.manual_baselines.filter(page => page.path !== automaticPath).map(page => ({ path: page.path, digest: page.digest, content: page.content })) : [];
+            const materialId = digest(canonical({ offset: pageContext.facts_page.offset, sources, archives: bundle.monthly_context?.archive_contexts?.map(item => ({ work_id: item.work_id, original_digest: item.original_digest, content_excerpt: item.content_excerpt })), archive_page: bundle.monthly_context?.archive_context_page }));
+            const oldPage = store.db.prepare('SELECT json FROM semantic_material_pages WHERE snapshot_id=? AND material_id=?').get(pageContext.facts_page.snapshot_id, materialId) as any;
+            if (oldPage && oldPage.json !== canonical(value))
+                throw new Error('Accepted material page semantic content conflict');
+            store.db.prepare('INSERT OR IGNORE INTO semantic_material_pages VALUES(?,?,?,?,?)').run(pageContext.facts_page.snapshot_id, materialId, pageContext.facts_page.offset, bundle.kind, canonical(value));
+            const pages = store.db.prepare('SELECT offset,json FROM semantic_material_pages WHERE snapshot_id=? AND kind=? ORDER BY offset,rowid').all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
+            // Preserve accepted pages from the earlier new schema without rewriting their immutable conclusions.
+            const legacyPages = store.db.prepare('SELECT offset,json FROM semantic_pages WHERE snapshot_id=? AND kind=? ORDER BY offset').all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
+            pages.unshift(...legacyPages.filter(page => !pages.some(current => current.offset === page.offset && canonical(current.result) === canonical(page.result))));
             if (result.analysis)
                 artifact.analysis = accumulateWeekly(pages, result.analysis);
             if (result.monthly_review)

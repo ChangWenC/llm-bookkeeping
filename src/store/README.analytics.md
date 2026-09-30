@@ -21,3 +21,8 @@ Reviewer daily `page_paths` accepts at most sixteen explicit safe Wiki paths. It
 Collection identity rows now store a versioned digest, IDs and fragment hashes; original raw bytes are held once by immutable fragments rather than duplicated in every collection. Existing new-format full collection rows remain replay-compatible. No historical raw deletion or automatic database rewrite is performed.
 
 Verification uses Node 25.8, synthetic messages and temporary Wiki roots. Live private projections, weekly Codex semantics, production locks/scheduling and production migrations are not exercised by these module tests.
+# 原文材料续读
+
+月准备支持明确 `page_paths` 与 `archive_context_offset`。归档仅读取已入队、精确路径的 immutable v2 JSON；原文 bytes/digest/date/locator 必须相符。首次事实快照同时冻结归档 work 列表（含已完成项），之后完成任务与后到任务不会移动偏移。上下文不分配新事实。
+
+截断项保留 pending，并说明原文 bytes 和重读同偏移所需 `limits.bundle_bytes`；提高预算可以读到尾部。`completed_archive_context_ids` 仅接受本页完整显示项，月发布成功后由月 consumer 精确完成。材料页身份包含事实偏移、明确源页及归档原文身份；零事实多页也累积已接受摘要，重读同页不会重复累加。旧 `semantic_pages` 接受记录仍参与汇总。
