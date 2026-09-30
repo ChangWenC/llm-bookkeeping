@@ -84,16 +84,37 @@ export interface WeeklyAnalysisInput extends Versioned {
   observation_candidates?: WeeklyObservation[];
   confirmed_goals?: GoalContract[];
   facts_page?: FactsPage; prepared_work_ids?: string[];
+  analytics_catalog?: AnalyticsCatalog; goal_page_baselines?: PageBaseline[];
 }
 export interface WeeklyAnalysisResult extends Versioned {
   snapshot: WeeklyAnalysisSnapshot; prior_action_disposition: PriorActionDisposition | null;
   proposed_confirmations: AnalysisRevisionRef[]; freshness_at: string;
   completed_work_ids?: string[];
 }
+export interface AnalyticsDefinition extends Versioned {
+  definition_ref: AnalysisRevisionRef; label: string; keywords: string[]; status: 'candidate' | 'formal';
+}
+export interface AnalyticsProjectMapping extends Versioned {
+  id: string; wiki_prefix: string; repo_hint: string | null; direction_id: string | null;
+}
+export interface AnalyticsCatalog extends Versioned {
+  capabilities: AnalyticsDefinition[]; directions: AnalyticsDefinition[]; project_mappings: AnalyticsProjectMapping[];
+}
+export interface AnalyticsAttributionPair extends Versioned {
+  observation_ref: AnalysisRevisionRef; capability_ref: AnalysisRevisionRef;
+}
+export interface AnalyticsPilotStats extends Versioned {
+  range: TimeRange; weeks: string[];
+  coverage: { complete: number; partial: number; unknown: number };
+  reviews: { confirmed_pairs: number; corrected_pairs: number; rejected_pairs: number; retracted_reviews: number };
+  notifications: { generated: number; active: number };
+  actions: { continued: number; narrowed: number; abandoned: number; completed: number; active: number };
+}
 export interface AnalyticsReviewEvent extends Versioned {
   review_id: string; target_ref: AnalysisRevisionRef;
   action: 'confirm' | 'reject' | 'correct' | 'retract';
   correction: string | null; evidence_refs: FactRef[]; created_at: string;
+  selected_pairs?: AnalyticsAttributionPair[]; retracts_review_id?: string | null;
 }
 export interface GoalContract extends Versioned {
   contract_ref: AnalysisRevisionRef; subject: string; description: string;
@@ -108,7 +129,8 @@ export interface MajorDecisionContract extends Versioned {
 export type AnalyticsReviewInput =
   | { schema_version: SchemaVersion; kind: 'review'; events: AnalyticsReviewEvent[] }
   | { schema_version: SchemaVersion; kind: 'goal_contract'; contract: GoalContract }
-  | { schema_version: SchemaVersion; kind: 'decision_contract'; contract: MajorDecisionContract };
+  | { schema_version: SchemaVersion; kind: 'decision_contract'; contract: MajorDecisionContract }
+  | { schema_version: SchemaVersion; kind: 'capability_candidate'; definition: AnalyticsDefinition };
 export interface ReviewReceipt extends Versioned {
   review_id: string; target_ref: AnalysisRevisionRef;
   status: 'applied' | 'already_applied' | 'stale' | 'pending'; reason: string | null;
@@ -169,7 +191,7 @@ export interface FactArtifact extends Versioned {
 }
 export type FileStatus = 'applied' | 'noop' | 'pending' | 'conflict';
 export interface FileOutcome extends Versioned { operation_id: string; path: string; status: FileStatus; reason: string | null }
-export interface ConsumerOutcome extends Versioned { target: string; status: 'complete' | 'pending' | 'partial' | 'unavailable'; reason: string | null }
+export interface ConsumerOutcome extends Versioned { target: string; status: 'complete' | 'pending' | 'partial' | 'unavailable'; reason: string | null; analytics_pilot?: AnalyticsPilotStats }
 export interface PublishResult extends Versioned {
   result_id: string | null; fact_commit: 'committed' | 'already_committed' | 'pending' | 'failed';
   batch_id: string | null; export_status: 'ready' | 'pending' | 'failed';
@@ -221,6 +243,7 @@ export interface BookkeepingConfig extends Versioned {
   limits: { chunk_events: number; chunk_body_bytes: number; bundle_bytes: number; bundles_per_round: number };
   index_commands?: IndexCommands;
   migration_limits?: MigrationLimits;
+  analytics_catalog?: AnalyticsCatalog;
   collection_budgets?: { live: CollectionBudget; history: CollectionBudget };
   project_whitelist: string[]; goal_whitelist: string[];
 }

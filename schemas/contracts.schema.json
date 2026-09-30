@@ -1211,6 +1211,15 @@
           "items": {
             "type": "string"
           }
+        },
+        "analytics_catalog": {
+          "$ref": "#/$defs/AnalyticsCatalog"
+        },
+        "goal_page_baselines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageBaseline"
+          }
         }
       },
       "required": [
@@ -1270,6 +1279,242 @@
         "freshness_at"
       ]
     },
+    "AnalyticsDefinition": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "definition_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "label": {
+          "type": "string"
+        },
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "enum": [
+            "candidate",
+            "formal"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "definition_ref",
+        "label",
+        "keywords",
+        "status"
+      ]
+    },
+    "AnalyticsProjectMapping": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "id": {
+          "type": "string"
+        },
+        "wiki_prefix": {
+          "type": "string"
+        },
+        "repo_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "direction_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "wiki_prefix",
+        "repo_hint",
+        "direction_id"
+      ]
+    },
+    "AnalyticsCatalog": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsDefinition"
+          }
+        },
+        "directions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsDefinition"
+          }
+        },
+        "project_mappings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsProjectMapping"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "capabilities",
+        "directions",
+        "project_mappings"
+      ]
+    },
+    "AnalyticsAttributionPair": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "observation_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "capability_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        }
+      },
+      "required": [
+        "schema_version",
+        "observation_ref",
+        "capability_ref"
+      ]
+    },
+    "AnalyticsPilotStats": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "weeks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "complete": {
+              "type": "number"
+            },
+            "partial": {
+              "type": "number"
+            },
+            "unknown": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "reviews": {
+          "type": "object",
+          "properties": {
+            "confirmed_pairs": {
+              "type": "number"
+            },
+            "corrected_pairs": {
+              "type": "number"
+            },
+            "rejected_pairs": {
+              "type": "number"
+            },
+            "retracted_reviews": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "confirmed_pairs",
+            "corrected_pairs",
+            "rejected_pairs",
+            "retracted_reviews"
+          ]
+        },
+        "notifications": {
+          "type": "object",
+          "properties": {
+            "generated": {
+              "type": "number"
+            },
+            "active": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "generated",
+            "active"
+          ]
+        },
+        "actions": {
+          "type": "object",
+          "properties": {
+            "continued": {
+              "type": "number"
+            },
+            "narrowed": {
+              "type": "number"
+            },
+            "abandoned": {
+              "type": "number"
+            },
+            "completed": {
+              "type": "number"
+            },
+            "active": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "continued",
+            "narrowed",
+            "abandoned",
+            "completed",
+            "active"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "range",
+        "weeks",
+        "coverage",
+        "reviews",
+        "notifications",
+        "actions"
+      ]
+    },
     "AnalyticsReviewEvent": {
       "type": "object",
       "properties": {
@@ -1308,6 +1553,22 @@
         },
         "created_at": {
           "type": "string"
+        },
+        "selected_pairs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsAttributionPair"
+          }
+        },
+        "retracts_review_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2356,6 +2617,9 @@
               "type": "null"
             }
           ]
+        },
+        "analytics_pilot": {
+          "$ref": "#/$defs/AnalyticsPilotStats"
         }
       },
       "required": [
@@ -2995,6 +3259,9 @@
           },
           "additionalProperties": false
         },
+        "analytics_catalog": {
+          "$ref": "#/$defs/AnalyticsCatalog"
+        },
         "collection_budgets": {
           "type": "object",
           "properties": {
@@ -3165,6 +3432,25 @@
             "schema_version",
             "kind",
             "contract"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "kind": {
+              "const": "capability_candidate"
+            },
+            "definition": {
+              "$ref": "#/$defs/AnalyticsDefinition"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "definition"
           ]
         }
       ]

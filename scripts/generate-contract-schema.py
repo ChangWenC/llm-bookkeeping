@@ -74,6 +74,7 @@ definitions['UnknownValue']['allOf'] = [{'if': {'properties': {'value': {'type':
 definitions['FactCandidate']['not'] = {'anyOf': [{'required': ['fact_id']}, {'required': ['revision']}, {'required': ['operation_id']}]}
 definitions['WeeklyAnalysisResult']['properties']['proposed_confirmations']['maxItems'] = 3
 definitions['WeeklyAnalysisInput']['properties']['previous_weeks']['maxItems'] = 4
+definitions['AnalyticsPilotStats']['properties']['weeks']['maxItems'] = 4
 root_types = ['SourceEvent', 'SourceCoverage', 'ReviewBundle', 'ReviewResult', 'FactRevision', 'JournalPatch', 'FactArtifact', 'PublishResult', 'BookkeepingConfig', 'Manifest', 'WeeklyAnalysisInput', 'WeeklyAnalysisResult', 'MonthlyReviewInput', 'MonthlyReviewResult', 'AnalyticsReviewEvent', 'AnalyticsReviewInput']
 result = {'$schema': 'https://json-schema.org/draft/2020-12/schema', '$id': 'https://llm-bookkeeping.local/contracts-v1.schema.json', 'title': 'Bookkeeping version 1 records', 'description': 'Structural DTO schema. Runtime validators additionally enforce identities, temporal ranges, review evidence, coverage and finite budgets.', 'anyOf': [{'$ref': '#/$defs/' + name} for name in root_types], '$defs': definitions}
 Path('schemas/contracts.schema.json').write_text(json.dumps(result, indent=2) + '\n')

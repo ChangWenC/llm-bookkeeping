@@ -14,3 +14,11 @@ test('state paths never overlap Wiki/raw, source trees or iCloud',()=>{
   for(const data_dir of ['/tmp/wiki/data','/tmp/wiki/..state','/tmp','/Users/synthetic/Library/Mobile Documents/com~apple~CloudDocs/state'])assert.throws(()=>validateConfig({...config,data_dir}),/overlap|iCloud/);
   assert.throws(()=>validateConfig({...config,providers:[{schema_version:1,provider:'synthetic',account_id:'owner',enabled:true,roots:[config.data_dir],options:{}}]}),/raw source/);
 });
+
+test('professional catalogue validates stable revisions and mappings without expanding whitelist', () => {
+  const definition = { schema_version: 1, definition_ref: { schema_version: 1, logical_id: 'cap:synthetic', revision: 1 }, label: '合成能力', keywords: ['verification'], status: 'formal' };
+  const catalog = { schema_version: 1, capabilities: [definition], directions: [], project_mappings: [] };
+  assert.deepEqual(validateConfig({ ...config, analytics_catalog: catalog }).project_whitelist, config.project_whitelist);
+  assert.throws(() => validateConfig({ ...config, analytics_catalog: { ...catalog, capabilities: [definition, definition] } }), /Duplicate/);
+  assert.throws(() => validateConfig({ ...config, analytics_catalog: { ...catalog, project_mappings: [{ schema_version: 1, id: 'project:unknown', wiki_prefix: '../private', repo_hint: null, direction_id: null }] } }), /relative/);
+});

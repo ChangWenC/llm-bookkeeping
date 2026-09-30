@@ -69,6 +69,36 @@ function validateProviders(value: unknown): string[] {
   return roots;
 }
 
+function validateAnalyticsCatalog(value: unknown): void {
+  const catalog = version(value, 'analytics_catalog');
+  for (const field of ['capabilities', 'directions']) {
+    const refs = new Set<string>();
+    for (const entry of array(catalog[field], field)) {
+      const definition = version(entry, 'definition');
+      const ref = version(definition.definition_ref, 'definition_ref');
+      string(ref.logical_id, 'definition_ref.logical_id');
+      positiveBudget(ref.revision, 'definition_ref.revision');
+      const key = `${ref.logical_id}:${ref.revision}`;
+      if (refs.has(key)) throw new InputError('Duplicate catalog definition ref: ' + key);
+      refs.add(key);
+      string(definition.label, 'definition.label');
+      array(definition.keywords, 'definition.keywords').forEach(item => string(item, 'definition.keyword'));
+      if (!['candidate', 'formal'].includes(definition.status)) throw new InputError('Definition status must be candidate or formal');
+    }
+  }
+  const mappings = new Set<string>();
+  for (const entry of array(catalog.project_mappings, 'project_mappings')) {
+    const mapping = version(entry, 'project mapping');
+    string(mapping.id, 'mapping.id');
+    if (mappings.has(mapping.id)) throw new InputError('Duplicate project mapping ID');
+    mappings.add(mapping.id);
+    string(mapping.wiki_prefix, 'mapping.wiki_prefix');
+    if (mapping.wiki_prefix.startsWith('/') || mapping.wiki_prefix.split('/').includes('..')) throw new InputError('Mapping Wiki prefix must be relative without traversal');
+    for (const field of ['repo_hint', 'direction_id']) if (mapping[field] !== null) string(mapping[field], 'mapping.' + field);
+    if (mapping.direction_id !== null && !catalog.directions.some((definition: any) => definition.definition_ref.logical_id === mapping.direction_id)) throw new InputError('Mapping references unknown direction definition');
+  }
+}
+
 export function validateConfig(value: unknown): BookkeepingConfig {
   const config = version(value, 'config');
   const sourceRoots = validateProviders(config.providers);
@@ -102,6 +132,7 @@ export function validateConfig(value: unknown): BookkeepingConfig {
       for (const key of ['max_duration_ms', 'max_bytes', 'max_directory_entries']) positiveBudget(budget[key], `${lane}.${key}`);
     }
   }
+  if (config.analytics_catalog !== undefined) validateAnalyticsCatalog(config.analytics_catalog);
   if (config.migration_limits !== undefined) {
     const limits = record(config.migration_limits, 'migration_limits');
     for (const [key, value] of Object.entries(limits)) {
