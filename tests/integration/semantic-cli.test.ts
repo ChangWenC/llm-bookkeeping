@@ -57,7 +57,7 @@ test('CLI typed weekly/monthly/pages publish and all consumers share actual SQLi
     assert.equal(analyticsRepository(store).snapshots().length, 1);
     const oldObservation = analyticsRepository(store).observations()[0];
     const reviewPath = join(root, 'confirmation.json');
-    const confirm = async (id: string, action: 'confirm' | 'retract') => { await writeFile(reviewPath, JSON.stringify({ schema_version: 1, kind: 'review', events: [{ schema_version: 1, review_id: id, target_ref: oldObservation.observation_ref, action, correction: null, evidence_refs: oldObservation.evidence_refs, created_at: '2026-10-05T00:00:00Z' }] })); return cli(['analytics-review', '--input', reviewPath]); };
+    const confirm = async (id: string, action: 'confirm' | 'retract') => { await writeFile(reviewPath, JSON.stringify({ schema_version: 1, kind: 'review', events: [{ schema_version: 1, review_id: id, target_ref: oldObservation.observation_ref, action, correction: null, evidence_refs: oldObservation.evidence_refs, created_at: '2026-10-05T00:00:00Z', ...(action === 'retract' ? { retracts_review_id: 'confirm-cli' } : {}) }] })); return cli(['analytics-review', '--input', reviewPath]); };
     assert.equal((await confirm('confirm-cli', 'confirm'))[0].status, 'applied');
     assert.equal((await confirm('retract-confirm-cli', 'retract'))[0].status, 'applied');
     const m = await prepare('monthly', '2026-09');
