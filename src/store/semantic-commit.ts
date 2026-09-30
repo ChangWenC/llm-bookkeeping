@@ -18,6 +18,7 @@ interface SemanticStore {
     markUnit(event: SourceEvent, kind: string, lane: Lane): void;
     coverageReview(coverage: SourceCoverage, kind: string, explicitEmpty: boolean): SourceCoverage;
     analyticsHistoryRepository(): AnalyticsRepository;
+    markFactMaterialRead(id: string, refs: FactRef[]): void;
 }
 const parse = <T>(row: any): T => JSON.parse(row.json);
 export async function commitSemanticReview(store: SemanticStore, result: ReviewResult): Promise<ReviewCommit> {
@@ -177,6 +178,9 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 store.db.prepare('INSERT OR IGNORE INTO reviewed_units VALUES(?,?,?)').run(bundle.kind, bundle.lane, review.chunk_id);
             store.db.prepare('UPDATE chunks SET state=? WHERE id=?').run(failed.has(review.chunk_id) ? 'partial' : review.status, review.chunk_id);
         }
+        const semanticContext = bundle.analysis_context ?? bundle.monthly_context;
+        if (semanticContext?.facts_page && result.chunks.some(chunk => chunk.status === 'complete') && (result.analysis || result.monthly_review))
+            store.markFactMaterialRead(semanticContext.facts_page.snapshot_id, semanticContext.facts.map(fact => 'fact_ref' in fact ? fact.fact_ref : { schema_version: 1, fact_id: fact.fact_id, revision: fact.revision }));
         store.options.onTransactionStep?.('review_chunks');
         const patches: JournalPatch[] = [];
         for (const page of result.pages) {
@@ -225,7 +229,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             }
         const weeks = new Set(affectedFacts.flatMap(f => factWeek(f) ? [factWeek(f)!] : []));
         const dates = new Set(artifact.affected_dates);
-        for (const c of reviewedCoverage) {
+        for (const c of bundle.kind === 'daily' ? reviewedCoverage : []) {
             let day = new Intl.DateTimeFormat('en-CA', { timeZone: store.journalTimezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(c.query_range.from));
             const last = new Intl.DateTimeFormat('en-CA', { timeZone: store.journalTimezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Date.parse(c.query_range.to) - 1));
             while (day <= last) {
@@ -235,7 +239,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 day = next.toISOString().slice(0, 10);
             }
         }
-        for (const c of reviewedCoverage) {
+        for (const c of bundle.kind === 'daily' ? reviewedCoverage : []) {
             let day = weekFor(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(c.query_range.from)));
             const last = weekFor(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Date.parse(c.query_range.to) - 1)));
             while (day <= last) {
@@ -247,7 +251,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         }
         artifact.affected_dates = [...dates].sort();
         artifact.affected_weeks = [...weeks].sort();
-        artifact.affected_months = [...new Set([...artifact.affected_dates.map(day => day.slice(0, 7)), ...(result.monthly_review ? [result.monthly_review.month] : []), ...(result.analysis ? [result.analysis.snapshot.week_end.slice(0, 7)] : [])])].sort();
+        artifact.affected_months = [...new Set([...artifact.affected_dates.map(day => day.slice(0, 7)), ...(result.monthly_review ? [result.monthly_review.month] : [])])].sort();
         store.db.prepare('INSERT INTO outbox VALUES(?,?,?,NULL)').run(batchId, canonical(artifact), 'pending');
         store.options.onTransactionStep?.('review_outbox');
         const commit: ReviewCommit = { schema_version: 1, result_id: result.result_id, batch_id: batchId, reused: false, facts, patches };

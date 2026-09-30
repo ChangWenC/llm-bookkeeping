@@ -71,6 +71,10 @@ export function validateAnalyticsInput(value: unknown): AnalyticsReviewInput {
 export function validateAnalysisAgainstInput(value: unknown, input: WeeklyAnalysisInput): WeeklyAnalysisResult {
     const result = validateWeeklyAnalysisResult(value);
     const snapshot = result.snapshot;
+    if (result.completed_work_ids) {
+        if (new Set(result.completed_work_ids).size !== result.completed_work_ids.length || result.completed_work_ids.some(id => !input.prepared_work_ids?.includes(id)))
+            throw new Error('Completed weekly work ID outside prepared context');
+    }
     const previousSnapshot = input.previous_snapshot;
     const reuse = previousSnapshot && canonical(snapshot) === canonical(previousSnapshot);
     const unchanged = previousSnapshot && canonical({ ...snapshot, analysis_ref: null }) === canonical({ ...previousSnapshot, analysis_ref: null });

@@ -237,18 +237,36 @@ export class SqliteStore implements Store {
         const status = events.length ? done === events.length ? 'complete' : (done || any) ? 'partial' : 'pending' : explicitEmpty && coverage.capture_status === 'complete' && !coverage.gaps.length ? 'complete' : 'pending';
         return { ...coverage, review_status: status };
     }
+    freezeFactMaterial(kind: 'weekly' | 'monthly', period: string, cutoff: string, refs: FactRef[], work_ids: string[] = []): string { utc(cutoff); const value = { schema_version: 1, kind, period, cutoff, refs, work_ids }; const id = 'fact-material:' + digest(canonical(value)); this.immutable('fact_material_snapshots', id, value); return id; }
+    getFactMaterial(id: string): {
+        kind: 'weekly' | 'monthly';
+        period: string;
+        cutoff: string;
+        refs: FactRef[];
+        work_ids?: string[];
+    } | null { const row = this.db.prepare('SELECT json FROM fact_material_snapshots WHERE id=?').get(id); return row ? parse(row) : null; }
+    getFactMaterialReads(id: string): Set<string> { return new Set(this.db.prepare('SELECT fact_id,revision FROM fact_material_reads WHERE snapshot_id=?').all(id).map((row: any) => row.fact_id + ':' + row.revision)); }
+    markFactMaterialRead(id: string, refs: FactRef[]): void { const snapshot = this.getFactMaterial(id); if (!snapshot || refs.some(ref => !snapshot.refs.some(item => refKey(item) === refKey(ref))))
+        throw new Error('Read fact outside frozen material snapshot'); for (const ref of refs)
+        this.db.prepare('INSERT OR IGNORE INTO fact_material_reads VALUES(?,?,?)').run(id, ref.fact_id, ref.revision); }
+    effectiveFactRefsAt(cutoff: string): FactRef[] { utc(cutoff); return this.effective(cutoff).map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })); }
+    lookupFactRevisions(refs: FactRef[]): FactRevision[] { return refs.flatMap(ref => { const row = this.db.prepare('SELECT json FROM facts WHERE id=? AND revision=?').get(ref.fact_id, ref.revision); return row ? [parse<FactRevision>(row)] : []; }); }
     async getReviewResult(id: string): Promise<ReviewResult | null> { const row = this.db.prepare('SELECT json FROM results WHERE id=?').get(id); return row ? parse(row) : null; }
     private effective(asOf?: string): FactRevision[] {
         const rows = this.db.prepare('SELECT json FROM facts WHERE recorded_at<=? ORDER BY recorded_at,rowid').all(asOf ? normalized(asOf) : '9999-12-31T23:59:59.999Z').map(parse<FactRevision>);
         return foldFacts(rows);
     }
     async commitReview(result: ReviewResult): Promise<ReviewCommit> {
-        return commitSemanticReview({ db: this.db, options: this.options, journalTimezone: this.journalTimezone, transaction: fn => this.transaction(fn), effective: () => this.effective(), allocateId: namespace => this.allocateId(namespace), putWork: item => this.putWork(item), markUnit: (event, kind, lane) => this.markUnit(event, kind, lane), coverageReview: (coverage, kind, empty) => this.coverageReview(coverage, kind, empty), analyticsHistoryRepository: () => this.analyticsHistoryRepository() }, result);
+        return commitSemanticReview({ db: this.db, options: this.options, journalTimezone: this.journalTimezone, transaction: fn => this.transaction(fn), effective: () => this.effective(), allocateId: namespace => this.allocateId(namespace), putWork: item => this.putWork(item), markUnit: (event, kind, lane) => this.markUnit(event, kind, lane), coverageReview: (coverage, kind, empty) => this.coverageReview(coverage, kind, empty), analyticsHistoryRepository: () => this.analyticsHistoryRepository(), markFactMaterialRead: (id, refs) => this.markFactMaterialRead(id, refs) }, result);
     }
     async listPendingPatches(): Promise<JournalPatch[]> { return this.db.prepare("SELECT json FROM patches WHERE status='pending' ORDER BY rowid").all().map(parse<JournalPatch>); }
-    async markPatchStatus(id: string, status: FileStatus, reason: string | null = null) { if (!['applied', 'noop', 'pending', 'conflict'].includes(status))
-        throw new Error('Invalid patch status'); const row = this.db.prepare('UPDATE patches SET status=?,reason=? WHERE id=?').run(status, reason, id); if (!row.changes)
-        throw new Error('Unknown patch'); }
+    async markPatchStatus(id: string, status: FileStatus, reason: string | null = null) {
+        if (!['applied', 'noop', 'pending', 'conflict'].includes(status))
+            throw new Error('Invalid patch status');
+        const row = this.db.prepare('UPDATE patches SET status=?,reason=? WHERE id=?').run(status, reason, id);
+        if (!row.changes)
+            throw new Error('Unknown patch');
+    }
     async readEffectiveFacts(query: FactQuery): Promise<FactRevision[]> {
         rangeCheck(query.range);
         if (query.as_of)

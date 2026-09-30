@@ -60,6 +60,7 @@ test('ready professional ledger, capability semantics and typed weekly publicati
         for (const filename of await readdir(join(f.c.data_dir, 'analytics/batches')))
             assert(!(await readFile(join(f.c.data_dir, 'analytics/batches', filename), 'utf8')).includes('PRIVATE'));
         assert.equal(w.commit.facts.length, 0);
+        const weeklyArtifact=(await f.s.listOutbox()).find(batch=>batch.batch_id===w.commit.batch_id)!.artifact;assert.deepEqual(weeklyArtifact.affected_dates,[]);assert.deepEqual(weeklyArtifact.affected_weeks,[]);assert.deepEqual(weeklyArtifact.affected_months,[]);
     }
     finally {
         f.s.close();

@@ -3,6 +3,8 @@ export function initializeSchema(db: DatabaseSync): void {
     db.exec(`PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       INSERT OR IGNORE INTO metadata VALUES('schema','1');
+      CREATE TABLE IF NOT EXISTS fact_material_reads(snapshot_id TEXT NOT NULL,fact_id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(snapshot_id,fact_id,revision));
+      CREATE TABLE IF NOT EXISTS fact_material_snapshots(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS collections(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS fragments(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,json TEXT NOT NULL,time TEXT,classification TEXT NOT NULL,ordering TEXT NOT NULL);

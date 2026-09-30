@@ -109,6 +109,8 @@ export class AnalyticsRepository {
         return rows.filter(fact => fact.action !== 'retract' && fact.fact_ref.revision === max.get(fact.fact_ref.fact_id) && fact.fact_ref.revision > (retired.get(fact.fact_ref.fact_id) ?? 0));
     }
     facts(): ProfessionalFact[] { return this.effectiveRecords().filter(fact => fact.projection && fact.aggregate).map(fact => ({ schema_version: 1, fact_ref: fact.fact_ref, projection: fact.projection!, kind: fact.kind, occurred_at: fact.occurred_at })); }
+    lookupFacts(refs: FactRef[]): ProfessionalFact[] { return refs.flatMap(ref => { const row = this.db.prepare('SELECT json FROM analytics_facts WHERE id=? AND revision=?').get(ref.fact_id, ref.revision); if (!row)
+        return []; const fact = json<StoredProfessionalFact>(row); return fact.projection && fact.aggregate ? [{ schema_version: 1 as const, fact_ref: fact.fact_ref, kind: fact.kind, occurred_at: fact.occurred_at, projection: fact.projection }] : []; }); }
     exclusions(): {
         fact_ref: FactRef;
         reason: string;
@@ -331,7 +333,7 @@ export class AnalyticsRepository {
     }
 }
 /** Consumer-facing persistence operations expose no SQLite handle or transaction primitives. */
-export type AnalyticsPort = Pick<AnalyticsRepository, 'ingest' | 'facts' | 'exclusions' | 'coverage' | 'observations' | 'snapshots' | 'rawSnapshot' | 'unresolvedHistory' | 'confirmedGoals' | 'applyReview' | 'currentOutput' | 'cockpitRegion' | 'setCockpitRegion' | 'pendingCockpit' | 'setPendingCockpit' | 'target' | 'latestRevision'>;
+export type AnalyticsPort = Pick<AnalyticsRepository, 'ingest' | 'facts' | 'lookupFacts' | 'exclusions' | 'coverage' | 'observations' | 'snapshots' | 'rawSnapshot' | 'unresolvedHistory' | 'confirmedGoals' | 'applyReview' | 'currentOutput' | 'cockpitRegion' | 'setCockpitRegion' | 'pendingCockpit' | 'setPendingCockpit' | 'target' | 'latestRevision'>;
 export function getAnalyticsPort(store: unknown): AnalyticsPort {
     const provider = store as {
         analyticsPort?: () => AnalyticsPort;

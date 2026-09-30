@@ -159,10 +159,6 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                     await options.fault?.('after_output', batch.batch_id);
                     for (const week of batch.analysis ? [] : batch.affected_weeks)
                         await store.enqueueWork({ schema_version: 1, work_id: `analytics-prepare:${batch.batch_id}:${week}`, kind: 'analytics_prepare', lane: 'history', state: 'pending', payload: { batch_id: batch.batch_id, week_end: addCalendarDays(week, 6) }, reason: 'External Codex semantic weekly review required', migration_key: null, updated_at: now() });
-                    if (batch.analysis)
-                        for (const work of await store.listWork('analytics_prepare', 'pending'))
-                            if (work.payload.week_end === batch.analysis.snapshot.week_end)
-                                await store.completeWork(work.work_id);
                     const current = repository.currentOutput(batch.batch_id);
                     const cockpit = await publishCockpit(current);
                     if (cockpit.status !== 'complete') {
@@ -170,6 +166,12 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                         await queueCockpit(output, cockpit.reason);
                         continue;
                     }
+                    if (batch.analysis)
+                        for (const id of batch.analysis.completed_work_ids ?? []) {
+                            const work = (await store.listWork('analytics_prepare', 'pending')).find(item => item.work_id === id);
+                            if (work)
+                                await store.completeWork(id);
+                        }
                     await options.fault?.('before_ack', batch.batch_id);
                     await store.acknowledgeConsumer({ schema_version: 1, consumer: 'analytics', batch_id: batch.batch_id, acknowledged_at: now() });
                     const queue = (await store.listWork('consumer')).find(item => item.work_id === 'consumer:analytics:' + batch.batch_id);
