@@ -4,7 +4,7 @@
 
 ## 当前协调者本机验收（2026-09-30）
 
-以下由协调者 root 在本机执行，只记录结构结果；开发 agent 未自行查询私人数据。生产尚未切换。
+以下由协调者 root 在本机执行，只记录结构结果；开发 agent 未自行查询私人数据。新版 daily 已启用；新版 monthly 恢复因自动审批拒绝而暂时保持 PAUSED，待用户明确授权该删除性归档任务。两次真实 scheduled daily 与退役仍待验收，详见协调者生产切换记录。managed 副本每轮先用 `accounts --json` 只读核对 bundle 与预期账号唯一绑定，再以固定 bundle 查询；不修改 default 或 alias。
 
 | 项目 | 已验证结果 |
 | --- | --- |
@@ -14,9 +14,11 @@
 | 私聊分页 | limit 3，跨 10 个 CLI 进程收齐 8 条 |
 | 群核心/上下文 | limit 10，每轮 4 查询，跨 30 轮收齐 40 条含 8 条本人；core/context queue=0、blocked=0；与大窗基线 ID 双向差集为 0 |
 | 导入重叠 | import/live 两种先后顺序没有重复或冲突 |
+| 迟到轮转无回归 | 隔离 history 连续三个新进程，事件数保持 11；late frontier 从 09-21 推进至 08-24，冻结 root_to 不变，覆盖仍 partial |
+| 失败债务合成回归 | 独立预算 1、连续 80 日日 cutoff、同一旧窗持续失败并重启：primary 40／普通 late 20／deferred 20，旧债最多 1 份且最终保留；实际 SQLite 群密集上下文专项通过 |
 | 已知边界 | 独立副本旧历史明确缺失；媒体不转写；没有人为制造真实来源截断 |
 
-旧历史覆盖缺口仍 partial/import，不把副本可用等同全部主微信历史。公开帮助/签名/许可 probe 的下列历史证据保留原样。
+旧历史覆盖缺口仍 partial/import，不把副本可用等同全部主微信历史。上述真实轮转只证明有界推进和无重复，没有观察到真正迟到插入；迟到插入、永久坏窗、截断及微秒／纳秒边界仍由合成回归验证。公开帮助/签名/许可 probe 的下列历史证据保留原样；其中“未安装／未激活／待实测”均指早期 probe 时点，不是当前待办。
 
 ## 已实测
 
@@ -48,7 +50,9 @@
 - `new-messages` help只有limit/reset，公开文档明确调用推进 `~/.wx-rs/cursor.json`，reset回到now。clone有独立状态目录。**禁止把new-messages纳入Bookkeeping采集**，避免隐式游标先于本机事务推进。history是否完全不改cursor仍需未来本机受控对比。
 - 官方当前install脚本支持 `WECHAT_USE_VERSION=v1.18.16`、`WECHAT_USE_NO_TEST_MESSAGE=1`、`WECHAT_SETUP_DEFER=1`、`WECHAT_USE_INSTALL_SKILL=no`。前两项关闭安装自测，第三项延后setup；安装仍会建立副本/用户工具文件，不是本轮已完成的动作。官方setup应通过 `wechat-use setup --skip-verify` 进入，不能直接使用默认发送验证流程。
 
-## 给协调者／Roy的具体下一步
+## 早期公开 probe 的历史下一步（安装／激活已执行）
+
+以下保留早期计划；安装、激活及副本只读查询已由协调者／Roy 执行。当前路由、覆盖与剩余验收以本页当前状态及协调者生产切换记录为准，以下历史步骤不要求重复执行。
 
 1. Roy本人按上面Telegram流程申请免费激活码；不把code写入repo或聊天证据。
 2. 协调者接手官方固定版本安装：现已保存固定commit的安装器 `public-source/leeguooooo-wechat-use-4f01035/install.sh`，应显式设置上述四个安装选项；本轮没有执行，也没有复制或重签主微信。官方脚本会改用户工具目录/独立副本并含自身quarantine处理，不以本报告作为绕过macOS保护的授权。
