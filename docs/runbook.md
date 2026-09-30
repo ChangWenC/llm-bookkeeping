@@ -36,3 +36,13 @@ Backup must use SQLite consistency API/VACUUM INTO, not copy a live DB. Restore 
 Report code, synthetic and real acceptance independently. Use SPEC's complete matrix, including bounded 2GB tails, source identity variants, timezone/DST, zero facts/partial review, transaction/export/file interruption, writer conflicts, old archive effective folding, Analytics revision privacy, migration, real WeChat and consistent backup.
 
 Production cutover belongs to the coordinator: isolated Wiki acceptance; pause monthly; await old writer exit; consistent snapshot + restore sample; minimal explicit config/T0/S; real manual daily; update existing daily automation preserving schedule/model/effort; update prompts/schema/memory; safe monthly resume; observe two real scheduled runs; retire old dedicated entry points while preserving recoverable snapshots. Do not declare full completion after only M1.
+
+## M1 integration verification (synthetic only)
+
+`npm run check` performs strict TypeScript checking with pinned TypeScript 5.9.3 / @types/node 25.8.0, then recursively discovers only `.test.ts` tests. Fixtures are not counted as test cases. `tests/integration/end-to-end.test.ts` uses actual adapters, SQLite Store, Reviewer, Publisher and CLI orchestration against isolated synthetic roots; only clock/stdout/stderr are injected.
+
+Its seven scenarios cover native mirror versus true repeated text, stable recapture/replay, source disappearance and consistent backup/new-directory restore, bounded 2GB sparse tail plus malformed peer source with partial coverage, partial semantic progress and crash before FileIntent, Wiki lock/conflict with independent ready facts, old-month monthly page outside daily retention, and actual compact bundle bytes/0700 directory/0600 files. Initially failing relocated fragment/monthly retention counterexamples were fixed by A/C and rerun successfully.
+
+Capture exceptions persist unavailable/partial coverage and collection_retry work. Material/backup/state paths cannot overlap Wiki, raw source roots or iCloud, including canonical existing ancestors. prepare writes compact immutable bundles and an atomic manifest; final file bytes cannot exceed configured bundle_bytes. Explicit finite review and collection budgets can exceed defaults.
+
+Current runtime connects collect, prepare, publish/resume, replay, facts, status, backup and restore. Second-wave consumers/archive/import/migration/validation are still unavailable until concrete services are integrated. Weekly/monthly semantic payload publication is explicitly unavailable until Store supports durable validated analysis. This report is synthetic integration evidence, not production, WeChat or scheduled-run acceptance.

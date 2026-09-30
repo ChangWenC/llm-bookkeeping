@@ -8,11 +8,16 @@
     "node": "25.8.0"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node scripts/test.mjs",
     "start": "node src/cli.ts",
-    "check": "node --test"
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "bin": {
     "llm-bookkeeping": "src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "25.8.0",
+    "typescript": "5.9.3"
   }
 }

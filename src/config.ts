@@ -1,25 +1,133 @@
-import { readFile } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, resolve, relative, dirname, basename, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { InputError, record, string, version, array, zone, utc, parseJsonPreservingIntegers } from './contracts/validation.ts';
-import type { BookkeepingConfig } from './contracts/types.ts';
-export const DEFAULT_LIMITS = Object.freeze({ chunk_events:80, chunk_body_bytes:32*1024, bundle_bytes:128*1024, bundles_per_round:4 });
-export function absolutePath(value:unknown, name:string):string { const s=string(value,name);if(!isAbsolute(s))throw new InputError(`${name}: absolute path required`);return resolve(s); }
-export function validateConfig(value:unknown): BookkeepingConfig {
-  const r=version(value,'config');absolutePath(r.wiki_root,'wiki_root');absolutePath(r.data_dir,'data_dir');
-  zone(r.journal_timezone,'journal_timezone');if(r.analysis_timezone!=='Europe/Amsterdam')throw new InputError('analysis_timezone: expected Europe/Amsterdam');
-  utc(r.cutover_at,'cutover_at');utc(r.live_start,'live_start');if(Date.parse(r.live_start)>Date.parse(r.cutover_at))throw new InputError('live_start must not follow cutover_at');
-  const timeline=array(r.journal_timezone_timeline,'journal_timezone_timeline');let previous=-Infinity;
-  for(const entry of timeline){version(entry,'timezone entry');utc(entry.effective_from,'effective_from');zone(entry.timezone,'timezone');string(entry.basis,'basis');const t=Date.parse(entry.effective_from);if(t<=previous)throw new InputError('journal_timezone_timeline must be strictly increasing');previous=t;}
-  if(!timeline.length)throw new InputError('journal_timezone_timeline: at least one explicit entry required');
-  const providers=array(r.providers,'providers');const names=new Set<string>();
-  for(const p of providers){version(p,'provider');string(p.provider,'provider');string(p.account_id,'account_id');if(names.has(`${p.provider}:${p.account_id}`))throw new InputError('duplicate provider/account');names.add(`${p.provider}:${p.account_id}`);if(typeof p.enabled!=='boolean')throw new InputError('provider.enabled: expected boolean');array(p.roots,'roots').forEach(root=>absolutePath(root,'provider.root'));record(p.options,'options');}
-  const limits=record(r.limits,'limits');for(const key of Object.keys(DEFAULT_LIMITS)){if(!Number.isSafeInteger(limits[key])||limits[key]<1||limits[key]>DEFAULT_LIMITS[key as keyof typeof DEFAULT_LIMITS])throw new InputError(`limits.${key}: must be between 1 and ${DEFAULT_LIMITS[key as keyof typeof DEFAULT_LIMITS]}`);}
-  for(const key of ['project_whitelist','goal_whitelist'])array(r[key],key).forEach(item=>string(item,key));
-  return r as BookkeepingConfig;
+import type { BookkeepingConfig, CollectionBudget } from './contracts/types.ts';
+
+export const DEFAULT_LIMITS = Object.freeze({
+  chunk_events: 80,
+  chunk_body_bytes: 32 * 1024,
+  bundle_bytes: 128 * 1024,
+  bundles_per_round: 4,
+});
+export const DEFAULT_COLLECTION_BUDGETS: Readonly<Record<'live' | 'history', CollectionBudget>> = Object.freeze({
+  live: { max_duration_ms: 90_000, max_bytes: 64 * 1024 * 1024, max_directory_entries: 2000 },
+  history: { max_duration_ms: 30_000, max_bytes: 32 * 1024 * 1024, max_directory_entries: 2000 },
+});
+
+export function absolutePath(value: unknown, name: string): string {
+  const path = string(value, name);
+  if (!isAbsolute(path)) throw new InputError(`${name}: absolute path required`);
+  return resolve(path);
 }
-export async function loadConfig(path?:string):Promise<BookkeepingConfig>{
-  const target=absolutePath(path??process.env.BOOKKEEPING_CONFIG??resolve(homedir(),'.config/llm-bookkeeping/config.json'),'config');
-  let text:string;try{text=await readFile(target,'utf8');}catch(e){throw new Error(`Cannot read config ${target}: ${(e as Error).message}`);}
-  return validateConfig(parseJsonPreservingIntegers(text));
+
+function contains(parent: string, child: string): boolean {
+  const remainder = relative(parent, child);
+  return remainder === '' || (remainder !== '..' && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder));
+}
+
+export function validateDataLocation(dataDir: string, wikiRoot: string, sourceRoots: string[] = []): void {
+  const data = absolutePath(dataDir, 'data_dir');
+  const wiki = absolutePath(wikiRoot, 'wiki_root');
+  if (contains(data, wiki) || contains(wiki, data)) throw new InputError('data_dir must not overlap Wiki/raw');
+  if (data.split('/').includes('com~apple~CloudDocs') || data.includes('/Library/Mobile Documents/')) {
+    throw new InputError('data_dir must be local and outside iCloud');
+  }
+  for (const root of sourceRoots) {
+    if (contains(root, data) || contains(data, root)) throw new InputError('data_dir must not overlap raw source roots');
+  }
+}
+
+function positiveBudget(value: unknown, path: string): void {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new InputError(`${path}: expected positive finite safe integer`);
+  }
+}
+
+function validateProviders(value: unknown): string[] {
+  const roots: string[] = [];
+  const names = new Set<string>();
+  for (const provider of array(value, 'providers')) {
+    version(provider, 'provider');
+    string(provider.provider, 'provider');
+    string(provider.account_id, 'account_id');
+    const identity = `${provider.provider}:${provider.account_id}`;
+    if (names.has(identity)) throw new InputError('duplicate provider/account');
+    names.add(identity);
+    if (typeof provider.enabled !== 'boolean') throw new InputError('provider.enabled: expected boolean');
+    for (const root of array(provider.roots, 'roots')) roots.push(absolutePath(root, 'provider.root'));
+    record(provider.options, 'options');
+  }
+  return roots;
+}
+
+export function validateConfig(value: unknown): BookkeepingConfig {
+  const config = version(value, 'config');
+  const sourceRoots = validateProviders(config.providers);
+  validateDataLocation(config.data_dir, config.wiki_root, sourceRoots);
+  zone(config.journal_timezone, 'journal_timezone');
+  if (config.analysis_timezone !== 'Europe/Amsterdam') throw new InputError('analysis_timezone: expected Europe/Amsterdam');
+  utc(config.cutover_at, 'cutover_at');
+  utc(config.live_start, 'live_start');
+  if (Date.parse(config.live_start) > Date.parse(config.cutover_at)) throw new InputError('live_start must not follow cutover_at');
+
+  const timeline = array(config.journal_timezone_timeline, 'journal_timezone_timeline');
+  if (!timeline.length) throw new InputError('journal_timezone_timeline: at least one explicit entry required');
+  let previous = -Infinity;
+  for (const entry of timeline) {
+    version(entry, 'timezone entry');
+    utc(entry.effective_from, 'effective_from');
+    zone(entry.timezone, 'timezone');
+    string(entry.basis, 'basis');
+    const instant = Date.parse(entry.effective_from);
+    if (instant <= previous) throw new InputError('journal_timezone_timeline must be strictly increasing');
+    previous = instant;
+  }
+
+  const limits = record(config.limits, 'limits');
+  for (const key of Object.keys(DEFAULT_LIMITS)) positiveBudget(limits[key], `limits.${key}`);
+  if (limits.chunk_body_bytes > limits.bundle_bytes) throw new InputError('chunk_body_bytes must not exceed bundle_bytes');
+  if (config.collection_budgets !== undefined) {
+    const budgets = record(config.collection_budgets, 'collection_budgets');
+    for (const lane of ['live', 'history']) {
+      const budget = record(budgets[lane], `collection_budgets.${lane}`);
+      for (const key of ['max_duration_ms', 'max_bytes', 'max_directory_entries']) positiveBudget(budget[key], `${lane}.${key}`);
+    }
+  }
+  for (const key of ['project_whitelist', 'goal_whitelist']) {
+    array(config[key], key).forEach(item => string(item, key));
+  }
+  return config as BookkeepingConfig;
+}
+
+/** Resolve even nonexistent leaf directories through their nearest existing ancestor. */
+export async function canonicalLocation(path: string): Promise<string> {
+  const tail: string[] = [];
+  let ancestor = path;
+  while (true) {
+    try { return join(await realpath(ancestor), ...tail.reverse()); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      tail.push(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+export async function validateConfigLocations(config: BookkeepingConfig): Promise<void> {
+  const sources = config.providers.flatMap(provider => provider.roots);
+  const [data, wiki, ...roots] = await Promise.all([config.data_dir, config.wiki_root, ...sources].map(canonicalLocation));
+  validateDataLocation(data, wiki, roots);
+}
+
+export async function loadConfig(path?: string): Promise<BookkeepingConfig> {
+  const target = absolutePath(path ?? process.env.BOOKKEEPING_CONFIG ?? resolve(homedir(), '.config/llm-bookkeeping/config.json'), 'config');
+  let text: string;
+  try { text = await readFile(target, 'utf8'); }
+  catch (error) { throw new Error(`Cannot read config ${target}: ${(error as Error).message}`); }
+  const config = validateConfig(parseJsonPreservingIntegers(text));
+  await validateConfigLocations(config);
+  return config;
 }
