@@ -130,7 +130,8 @@ test("short anchor comparison and legacy empty/short witnesses stay pending with
   }
   const complete = await source.collect();
   assert.equal(source.checkpoint("live").generation, generation);
-  assert.ok(complete.flatMap(batch => batch.coverage).every(coverage => !coverage.gaps.some(gap => gap.reason.includes("anchor"))));
+  assert.ok(complete.flatMap(batch => batch.coverage).some(coverage => coverage.capture_status === "partial" && coverage.gaps.some(gap => gap.reason.startsWith("anchor_uncertainty:"))));
+  assert.equal(source.checkpoint("live").cursor.anchor_uncertainty && (source.checkpoint("live").cursor.anchor_uncertainty as any).to, 10 * MiB);
 });
 
 test("last of multiple files at provider byte limit saves only complete anchors and does not duplicate native IDs", async t => {

@@ -46,6 +46,12 @@ interface FileCursor {
   header_hash: string;
   anchor: string | null;
   anchor_length?: number;
+  anchor_uncertainty?: {
+    from: number;
+    to: number;
+    generation: string;
+    reason: string;
+  };
   inode: string;
   excluded: boolean;
   account_id?: string;
@@ -358,6 +364,7 @@ export class FileAdapter implements SourceAdapter {
         let old = existing?.cursor as unknown as FileCursor | undefined;
         const base = old ?? (live?.cursor as unknown as FileCursor | undefined);
         let generation = existing?.generation ?? live?.generation ?? "0";
+        let anchorUncertainty = base?.anchor_uncertainty;
         let rewritten = false;
         let verifiedAnchor: string | null = null;
         const gaps: CoverageGap[] = [];
@@ -379,12 +386,14 @@ export class FileAdapter implements SourceAdapter {
             // Older code saved hash(empty) when its read budget was exhausted.
             // This is missing evidence, never evidence of a rewritten source.
             gaps.push(gap("legacy_anchor_unproven", p));
+            anchorUncertainty ??= { from: base.offset - expectedLength, to: base.offset, generation, reason: "legacy_anchor_unproven" };
           } else if (hash(anchor) === base.anchor) {
             verifiedAnchor = base.anchor;
           } else if (base.anchor_length !== expectedLength) {
             // An old checkpoint did not record whether its hash covered the full
             // requested range. A mismatch may be an old short read.
             gaps.push(gap("legacy_anchor_length_unproven", p));
+            anchorUncertainty ??= { from: base.offset - expectedLength, to: base.offset, generation, reason: "legacy_anchor_length_unproven" };
           } else {
             rewritten = true;
             generation = hash(
@@ -400,6 +409,8 @@ export class FileAdapter implements SourceAdapter {
         if (!identity.id) gaps.push(gap("session_identity_unknown", p));
         if (rewritten)
           gaps.push(gap("source_truncated_or_rewritten_new_generation", p));
+        if (anchorUncertainty)
+          gaps.push(gap(`anchor_uncertainty:${anchorUncertainty.reason}:${anchorUncertainty.generation}:${anchorUncertainty.from}:${anchorUncertainty.to}:verify_saved_fragment_or_recollect_range`, p));
         if (excluded) {
           yield make(
             [],
@@ -593,6 +604,7 @@ export class FileAdapter implements SourceAdapter {
               header_hash: headerHash,
               anchor,
               anchor_length: anchor ? anchorLength : 0,
+              ...(anchorUncertainty ? { anchor_uncertainty: anchorUncertainty } : {}),
               inode,
               excluded: false,
               pending_line_base64: suffix.toString("base64"),
