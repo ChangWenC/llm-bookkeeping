@@ -3,6 +3,7 @@ import { createSafeWikiWriter, acquireWikiLock, readWikiTarget } from '../../pub
 import { checkMonth, monthlyPath, effectiveMonthFacts, sha } from '../archive/records.ts';
 import type { WriterOptions } from '../../publish/files.ts';
 import { analysisMonthRange } from '../../time.ts';
+import { coverageStatus } from '../../analytics/model.ts';
 import { updateManagedBlock, safeRegionText } from './blocks.ts';
 
 const startPrefix = '<!-- bookkeeping:monthly-supplement:start';
@@ -26,9 +27,8 @@ export function createMonthlyConsumer(store: Store, config: BookkeepingConfig, o
     async prepareMonthlyContext(month: string): Promise<MonthlyReviewInput> {
       const range = analysisMonthRange(month), facts = await effectiveMonthFacts(store, month), coverage = await store.listCoverage(range);
       const baseline = await readWikiTarget(config.wiki_root, monthlyPath(month));
-      const relevant = coverage.filter(item => item.capture_status !== 'disabled');
-      const coverageStatus = !relevant.length ? 'unknown' : relevant.every(item => item.capture_status === 'complete' && item.review_status === 'complete' && !item.gaps.length) ? 'complete' : 'partial';
-      return { schema_version: 1, month, range, facts, coverage, coverage_status: coverageStatus,
+      const status = coverageStatus(config, coverage, range);
+      return { schema_version: 1, month, range, facts, coverage, coverage_status: status,
         manual_baselines: [{ schema_version: 1, path: baseline.path, digest: baseline.digest, content: baseline.bytes?.toString('utf8') ?? null }] };
     },
     async consume(): Promise<ConsumerOutcome> {
@@ -69,7 +69,7 @@ export function createMonthlyConsumer(store: Store, config: BookkeepingConfig, o
             if (recovered.status === 'pending' || recovered.status === 'conflict') return { schema_version: 1, target: 'monthly', status: 'partial', reason: recovered.reason };
           }
           const target = await readWikiTarget(config.wiki_root, path);
-          const content = target.bytes?.toString('utf8') ?? `---\ntitle: 回顾_${review.month.replaceAll('-', '_')}\ntype: monthly-review\n---\n\n# ${review.month} 月回顾\n`;
+          const content = target.bytes?.toString('utf8') ?? `---\ntitle: 回顾_${review.month.replaceAll('-', '_')}\ntype: journal\nnamespace: personal\njournal_class: monthly-review\nsummary: ${JSON.stringify(`${review.month} 月回顾，覆盖与证据见正文`)}\nsources: []\ntags: [monthly-review]\nstatus: stable\naliases: []\nprivacy: private\nperiod: ${review.month}\ncanonical_record_id: month:${review.month}\narchive_target: none\nretention: pinned\ncreated: ${now().slice(0, 10)}\nupdated: ${now().slice(0, 10)}\n---\n\n# ${review.month} 月回顾\n`;
           if (target.bytes && !Buffer.from(content).equals(target.bytes)) throw new Error('Monthly manual body is not lossless UTF-8; preserve and defer');
           const coverage = review.coverage_status === 'complete' ? '覆盖：已采集并审阅的范围完整。' : review.coverage_status === 'partial' ? '覆盖：仍有采集或审阅缺口，不能据此判断整月无活动。' : '覆盖：范围未知，仍待补全。';
           const body = `## 月回顾摘要\n\n${safeRegionText(review.summary)}\n\n${coverage}\n${review.supplement_text ? `\n${safeRegionText(review.supplement_text)}\n` : ''}\n`;
@@ -117,9 +117,17 @@ export function createMonthlyConsumer(store: Store, config: BookkeepingConfig, o
         }
         const represented = new Set<string>();
         for (const intent of await store.listFileIntents(['applied'])) if (intent.path === path && !intent.operation_id.startsWith('monthly-supplement:')) intent.fact_refs.forEach(ref => represented.add(refKey(ref)));
-        const displayed = facts.filter(fact => !represented.has(refKey(fact)));
+        // Imported sealed legacy assertions are existing base context, not newly added supplement prose.
+        const displayed = facts.filter(fact => !(fact.kind === 'legacy_record' && fact.action === 'assert' && fact.legacy_locator !== null) && !represented.has(refKey(fact)));
+        const latestReview = (await store.listWork('monthly_review_record', 'complete')).filter(record => record.payload.month === month)
+          .sort((left, right) => String(right.payload.created_at).localeCompare(String(left.payload.created_at)))[0];
+        const reviewedRefs = (latestReview?.payload.review as FactArtifact['monthly_review'])?.fact_refs ?? [];
+        const effective = new Set(facts.map(refKey));
+        const invalidated = reviewedRefs.filter(ref => !effective.has(refKey(ref)));
+        if (invalidated.length) await enqueue(month, 'invalidated-summary:' + sha(JSON.stringify(invalidated)), { invalidated_fact_refs: invalidated });
+        const invalidationNotice = invalidated.length ? '月回顾摘要的部分依据已更正或撤回，原结论已失效，待重新审阅计算。\n\n' : '';
         const labels = { fact: '事实', inference: '推断', recommendation: '建议', legacy_record: '历史记录，未核验' };
-        const body = `## 补记与更正\n\n${displayed.length ? displayed.map(fact => {
+        const body = `## 补记与更正\n\n${invalidationNotice}${displayed.length ? displayed.map(fact => {
           const date = fact.journal_date.value ?? fact.occurred_at.value?.slice(0, 10) ?? '日期待核对';
           const text = fact.content.replaceAll('<!--', '&lt;!--').replaceAll('-->', '--&gt;').replaceAll('\n', '\n  ');
           return `- ${date}：${text}（${labels[fact.kind]}） <!-- fact-ref:${sha(refKey(fact))} -->`;
