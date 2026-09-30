@@ -139,3 +139,14 @@ test('current asOf views never apply future-dated pair confirmation or its later
     assert.equal(f.repository.currentOutput('undo-effective', f.c, '2026-10-03T12:00:00Z').overlays.find(pair => pair.label === 'design')!.confirmed, false);
     f.s.close();
 });
+test('actual weekly preparation applies its frozen cutoff to future capability confirmation', async () => {
+    const f = await setup();
+    const future = '2026-10-02T12:00:00Z';
+    await f.consumer.review({ schema_version: 1, kind: 'review', events: [{ schema_version: 1, review_id: 'future-capability', target_ref: ref('capability:verify'), action: 'confirm', correction: null, evidence_refs: [], created_at: future }] });
+    const reviewer = createReviewer(f.s, f.c);
+    const before = (await reviewer.prepare({ kind: 'weekly', lane: 'history', period: '2026-10-04', cutoff: at }))[0];
+    assert.equal(before.analysis_context!.analytics_catalog!.capabilities.find(definition => definition.definition_ref.logical_id === 'capability:verify')!.status, 'candidate');
+    const after = (await reviewer.prepare({ kind: 'weekly', lane: 'history', period: '2026-10-04', cutoff: future }))[0];
+    assert.equal(after.analysis_context!.analytics_catalog!.capabilities.find(definition => definition.definition_ref.logical_id === 'capability:verify')!.status, 'formal');
+    f.s.close();
+});
