@@ -75,6 +75,7 @@ export interface WeeklyAnalysisSnapshot extends Versioned {
   validation_action: ValidationAction | null;
 }
 export interface WeeklyAnalysisInput extends Versioned {
+  analysis_ref?: AnalysisRevisionRef; previous_snapshot?: WeeklyAnalysisSnapshot;
   week_end: string; range: TimeRange; analysis_timezone: 'Europe/Amsterdam';
   facts: ProfessionalFact[]; coverage: SourceCoverage[]; coverage_status: AnalysisCoverageStatus;
   previous_weeks: WeeklyAnalysisSnapshot[]; prior_action: ValidationAction | null;

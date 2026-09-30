@@ -1093,6 +1093,12 @@
         "schema_version": {
           "const": 1
         },
+        "analysis_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "previous_snapshot": {
+          "$ref": "#/$defs/WeeklyAnalysisSnapshot"
+        },
         "week_end": {
           "type": "string"
         },
