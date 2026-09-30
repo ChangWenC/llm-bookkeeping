@@ -287,7 +287,6 @@ export async function executeCommand(parsed: ParsedCommand, config: BookkeepingC
     case 'publish': {
       if (options.resume) return services.publisher.resume();
       const result = validateReviewResult(await readJson(required(options, 'input')));
-      if (result.analysis || result.monthly_review) unavailable('weekly/monthly semantic publication pending Store implementation');
       return services.publisher.publish(result);
     }
     case 'consume': return consumeCommand(parsed, services);

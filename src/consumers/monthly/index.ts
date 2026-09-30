@@ -48,8 +48,11 @@ export function createMonthlyConsumer(store: Store, config: BookkeepingConfig, o
         if (typeof patch?.date !== 'string') throw new Error('Supplement lacks original journal date');
         await enqueue(patch.date.slice(0, 7), work.work_id, { supplement_work_id: work.work_id });
       }
+      const acceptedMonthly = new Set(batches.filter(batch => batch.monthly_review).map(batch => `${batch.batch_id}:${batch.monthly_review!.month}`));
       for (const work of await store.listWork('month', 'pending')) {
-        const month = String(work.payload.period); await enqueue(month, work.work_id, { batch_id: work.payload.batch_id }); await store.completeWork(work.work_id);
+        const month = String(work.payload.period);
+        if (!acceptedMonthly.has(`${work.payload.batch_id}:${month}`)) await enqueue(month, work.work_id, { batch_id: work.payload.batch_id });
+        await store.completeWork(work.work_id);
       }
       return { schema_version: 1, target: 'monthly', status: 'complete', reason: batches.length || supplements.length ? 'Monthly preparation work durably queued; semantic review remains separate' : null };
     },
