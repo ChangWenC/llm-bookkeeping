@@ -77,6 +77,7 @@ test('actual CLI exact-pair review fold, candidate promotion and immutable revis
   await f.input('analytics-review', { schema_version: 1, kind: 'capability_candidate', definition: capability('capability:verify', 2, 'candidate') });
   const changedCapability = overlays().find(item => item.capability_id === b.logical_id)!;
   assert.equal(changedCapability.capability_ref.revision, 2); assert.equal(changedCapability.confirmed, false);
+  assert.equal(changedCapability.contested, false, 'A new definition revision inherits no prior correction dispute');
   const second = await f.saveFact('pair-source-replacement', first.fact_ref);
   assert.equal(second.fact_ref.revision, 2);
   assert.ok(overlays().every(item => !item.confirmed), 'Replacement observation revision inherits no old pair confirmation');
@@ -137,6 +138,12 @@ test('actual CLI accepted weekly actions feed four-week professional pilot dispo
     review.analysis = { schema_version: 1, snapshot: { schema_version: 1, analysis_ref: context.analysis_ref!, week_end: context.week_end, coverage_status: context.coverage_status, observations: context.observation_candidates ?? [], capabilities: [], goal_gaps: [], direction: 'unknown', patterns: [`合成第${index + 1}周`], validation_action: action }, prior_action_disposition: disposition, proposed_confirmations: [], freshness_at: reviewTime.toISOString() };
     await f.input('publish', review);
     await f.cli(['consume', '--target', 'analytics']);
+    if (index === 3) {
+      const refreshed = join(f.root, 'closed-action-same-week');
+      const response = await f.cli(['prepare', '--kind', 'weekly', '--lane', 'history', '--period', week, '--output', refreshed]);
+      const sameWeek: ReviewBundle = JSON.parse(await readFile(join(refreshed, response.bundles[0]), 'utf8'));
+      assert.equal(sameWeek.analysis_context!.prior_action, null, 'Explicit current-week closure cannot revive an older week active action');
+    }
     // Identical accepted input reuses the transaction and never duplicates disposition events.
     await f.input('publish', review);
     await f.cli(['consume', '--target', 'analytics']);
