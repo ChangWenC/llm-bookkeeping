@@ -9,7 +9,7 @@ Use Node 25.8.0, `npm ci --ignore-scripts`, then `npm test`. Use an isolated tem
 ## Current daily flow
 
 1. `node src/cli.ts collect --lane live --config /absolute/config.json` freezes cutoff and persists bounded source batches. Capture status is taken from coverage, independently of successful command execution.
-2. `node src/cli.ts prepare --kind daily --lane live --output /absolute/review-dir --config /absolute/config.json` writes bounded bundle JSON files and a manifest. A reviewer writes a versioned ReviewResult using local candidate IDs, explicit chunk progress and zero-fact completion; this CLI never calls an LLM.
+2. `node src/cli.ts prepare --kind daily --lane live --cutoff <collect-returned-UTC> --output /absolute/review-dir --config /absolute/config.json` writes bounded bundle JSON files and a manifest. Use the exact UTC cutoff returned by step 1 so collection and review share one frozen window; otherwise each CLI invocation chooses a new current time. A reviewer writes a versioned ReviewResult using local candidate IDs, explicit chunk progress and zero-fact completion; this CLI never calls an LLM.
 3. `node src/cli.ts publish --input /absolute/ReviewResult.json --config /absolute/config.json` persists the semantic transaction once and independently exports/applies/queues. If interrupted, use `publish --resume`. File conflicts remain drafts and do not revoke committed facts.
 4. `node src/cli.ts consume --target all --config /absolute/config.json` delivers ready exported batches. Monthly queues preparation work. `status` reports durable remaining work. Partial history does not block live.
 
