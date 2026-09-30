@@ -132,3 +132,26 @@ test("coordinator CLI report and apply use a local preview and print counts only
   assert.equal(apply.status, 0, apply.stderr);
   assert.deepEqual(JSON.parse(apply.stdout), { updated: 2, pending: 0 });
 });
+
+test("corrupt checkpoint JSON identity, schema and table scope remain pending under the exact requested primary key", async t => {
+  for (const corruption of ["identity", "schema", "provider", "lane"]) {
+    await t.test(corruption, async child => {
+      const f = await fixture(child);
+      const corrupted = structuredClone(f.legacy);
+      if (corruption === "identity") corrupted.checkpoint_id = f.history.checkpoint_id;
+      if (corruption === "schema") (corrupted as any).schema_version = 2;
+      const tableProvider = corruption === "provider" ? "claude" : f.legacy.provider;
+      const tableLane = corruption === "lane" ? "history" : f.legacy.lane;
+      f.store.db.prepare("UPDATE checkpoints SET json=?,provider=?,lane=? WHERE id=?")
+        .run(JSON.stringify(corrupted), tableProvider, tableLane, f.legacy.checkpoint_id);
+      const before = f.store.db.prepare("SELECT id,json,provider,lane FROM checkpoints ORDER BY id").all();
+      const plan = await reportAnchors(f.config, [f.legacy.checkpoint_id], f.witnessIds);
+      assert.equal(plan.entries.length, 1);
+      assert.equal(plan.entries[0].checkpoint_id, f.legacy.checkpoint_id);
+      assert.equal(plan.entries[0].status, "pending");
+      assert.equal(plan.entries[0].reason, "checkpoint_identity_or_schema_invalid");
+      assert.deepEqual(await applyAnchors(f.config, plan, anchorPlanSha256(plan), true), { updated: 0, pending: 1 });
+      assert.deepEqual(f.store.db.prepare("SELECT id,json,provider,lane FROM checkpoints ORDER BY id").all(), before);
+    });
+  }
+});

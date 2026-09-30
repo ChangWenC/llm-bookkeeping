@@ -137,9 +137,23 @@ async function inspect(config: BookkeepingConfig, checkpointIds: string[], witne
   const remaining = { bytes: MAX_EVIDENCE_BYTES };
   try {
     for (const id of [...checkpointIds].sort()) {
-      const row: any = db.prepare("SELECT json FROM checkpoints WHERE id=?").get(id);
+      const row: any = db.prepare("SELECT json,provider,lane FROM checkpoints WHERE id=?").get(id);
       if (!row) { entries.push({ checkpoint_id: id, checkpoint_sha256: null, status: "pending", reason: "checkpoint_missing", witnesses: [] }); continue; }
-      const result = await inspectCheckpoint(db, config, JSON.parse(row.json), [...witnessIds].sort(), remaining);
+      let checkpoint: SourceCheckpoint;
+      try { checkpoint = JSON.parse(row.json); }
+      catch {
+        entries.push({ checkpoint_id: id, checkpoint_sha256: digest(row.json), status: "pending",
+          reason: "checkpoint_json_invalid", witnesses: [] });
+        continue;
+      }
+      if (!checkpoint || checkpoint.schema_version !== 1 || checkpoint.checkpoint_id !== id ||
+          checkpoint.provider !== row.provider || checkpoint.lane !== row.lane ||
+          !["live", "history"].includes(checkpoint.lane)) {
+        entries.push({ checkpoint_id: id, checkpoint_sha256: digest(canonical(checkpoint)), status: "pending",
+          reason: "checkpoint_identity_or_schema_invalid", witnesses: [] });
+        continue;
+      }
+      const result = await inspectCheckpoint(db, config, checkpoint, [...witnessIds].sort(), remaining);
       entries.push(result.entry);
       if (result.updated) updates.push(result.updated);
     }
