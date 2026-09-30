@@ -32,6 +32,8 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
   }
   async function queueConsumers(artifact: FactArtifact): Promise<void> {
     const months = affectedMonths(artifact);
+    // Evidence independently discovers ready batches and tracks kind:evidence
+    // work. Do not create a second consumer queue for already acknowledged mirrors.
     for (const consumer of ['analytics', 'monthly']) await enqueue('consumer', `${consumer}:${artifact.batch_id}`, { consumer, batch_id: artifact.batch_id,
       affected_dates: artifact.affected_dates, affected_weeks: artifact.affected_weeks, affected_months: months });
     for (const [kind, periods] of [['date', artifact.affected_dates], ['week', artifact.affected_weeks], ['month', months]] as const)
@@ -220,8 +222,8 @@ export function createPublisher(store: Store, config: BookkeepingConfig, options
         intent.state === 'applied' ? 'applied' : intent.state === 'conflict' ? 'conflict' : 'pending', intent.reason));
     }
     const consumers: PublishResult['consumers'] = [...monthly];
-    for (const target of ['analytics', 'monthly']) {
-      const batches = await store.listReadyBatches(target);
+    for (const target of ['analytics', 'monthly', 'evidence']) {
+      const batches = await store.listReadyBatches(target, 1);
       consumers.push({ schema_version: 1, target, status: batches.length || exports.pending.length ? 'pending' : 'complete',
         reason: batches.length || exports.pending.length ? 'Consumer output/acknowledgement outstanding; run consume separately' : null });
     }

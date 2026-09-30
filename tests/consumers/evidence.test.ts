@@ -92,3 +92,43 @@ test('bounded cursor moves beyond conflicted old batches, retries them after wra
   assert.equal((await createEvidenceConsumer(f.store, f.config).consume()).status, 'pending');
   assert.equal(await readFile(f.mirror(old.batch_id), 'utf8'), 'manual conflicting bytes');
 });
+async function finishOtherConsumers(f: Awaited<ReturnType<typeof fixture>>) {
+  for (const consumer of ['analytics', 'monthly']) for (const batch of await f.store.listReadyBatches(consumer))
+    await f.store.acknowledgeConsumer({ schema_version: 1, consumer, batch_id: batch.batch_id, acknowledged_at: '2026-09-30T12:00:00Z' });
+  for (const work of await f.store.listWork('consumer', 'pending')) if (work.payload.consumer !== 'evidence') await f.store.completeWork(work.work_id);
+  for (const work of await f.store.listWork('index', 'pending')) await f.store.completeWork(work.work_id);
+}
+test('PublishResult reports unexecuted or conflicting evidence independently after other consumers complete', async t => {
+  const f = await fixture(t); await f.add('reported-pending');
+  const publisher = createPublisher(f.store, f.config); await publisher.exportFacts(); await finishOtherConsumers(f);
+  const requests: Array<{ consumer: string; limit: number | undefined }> = [], read = f.store.listReadyBatches.bind(f.store);
+  f.store.listReadyBatches = async (consumer, limit, after) => { requests.push({ consumer, limit }); return read(consumer, limit, after); };
+  const unexecuted = await publisher.resume();
+  for (const target of ['analytics', 'monthly', 'index']) assert.equal(unexecuted.consumers.find(outcome => outcome.target === target)!.status, 'complete');
+  assert.equal(unexecuted.consumers.find(outcome => outcome.target === 'evidence')!.status, 'pending');
+  assert.ok(unexecuted.pending.includes('consumer:evidence'));
+  assert.deepEqual(requests.filter(request => ['analytics', 'monthly', 'evidence'].includes(request.consumer)),
+    ['analytics', 'monthly', 'evidence'].map(consumer => ({ consumer, limit: 1 })));
+  const batch = (await read('evidence'))[0];
+  await mkdir(join(f.config.wiki_root, 'wiki/personal/_evidence/bookkeeping/batches'), { recursive: true });
+  await writeFile(f.mirror(batch.batch_id), 'Human changed mirror target');
+  assert.equal((await createEvidenceConsumer(f.store, f.config).consume()).status, 'pending');
+  const conflicted = await publisher.resume();
+  assert.equal(conflicted.consumers.find(outcome => outcome.target === 'evidence')!.status, 'pending');
+  assert.ok(conflicted.pending.includes('consumer:evidence'));
+  assert.equal(await readFile(f.mirror(batch.batch_id), 'utf8'), 'Human changed mirror target');
+  assert.equal((await f.store.listWork('evidence', 'pending')).length, 1);
+});
+test('successful existing evidence acknowledgement reports complete on resume without introducing residual mirror work', async t => {
+  const f = await fixture(t); await f.add('reported-complete');
+  const publisher = createPublisher(f.store, f.config); await publisher.exportFacts();
+  assert.equal((await createEvidenceConsumer(f.store, f.config).consume()).status, 'complete');
+  await finishOtherConsumers(f);
+  for (let index = 0; index < 2; index++) {
+    const result = await publisher.resume();
+    assert.equal(result.consumers.find(outcome => outcome.target === 'evidence')!.status, 'complete');
+    assert.ok(!result.pending.includes('consumer:evidence'));
+    assert.equal((await f.store.listWork('evidence', 'pending')).length, 0);
+    assert.equal((await f.store.listWork('consumer', 'pending')).filter(work => work.payload.consumer === 'evidence').length, 0);
+  }
+});
