@@ -558,5 +558,13 @@ export async function restoreStore(input: string, dataDir: string): Promise<{
     const path = join(dataDir, 'bookkeeping.sqlite');
     await copyFile(source, path, 1);
     await chmod(path, 0o600);
+    // An immutable batch is identified by its accepted artifact, not by a local
+    // projection in the old directory. Consumer acknowledgements and semantic
+    // state survive; Publisher must verify/regenerate bytes before ready here.
+    const restored = new DatabaseSync(path);
+    try {
+        restored.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE; UPDATE outbox SET status='pending',export_path=NULL; COMMIT;");
+    }
+    finally { restored.close(); }
     return { path, sha256: digest(await readFile(path)) };
 }
