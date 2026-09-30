@@ -4,6 +4,8 @@ export interface HistoryWindow {
   from: string;
   to: string;
   depth: number;
+  purpose?: "core" | "context";
+  anchor_times?: number[];
 }
 export interface HistoryCursor {
   root_from: string;
@@ -51,11 +53,13 @@ export function recordHistoryWindow(
   }
   cursor.queue.push(
     {
+      ...window,
       from: window.from,
       to: new Date(middle).toISOString(),
       depth: window.depth + 1,
     },
     {
+      ...window,
       from: new Date(middle).toISOString(),
       to: window.to,
       depth: window.depth + 1,
@@ -69,7 +73,7 @@ export function historyGaps(
   const gaps: CoverageGap[] = cursor.blocked.map((window) => ({
     schema_version: 1 as const,
     range: { schema_version: 1 as const, from: window.from, to: window.to },
-    reason: "wechat_dense_second_or_split_limit_requires_import",
+    reason: window.purpose === "context" ? "wechat_group_context_dense_requires_import" : "wechat_dense_second_or_split_limit_requires_import",
     locator: chat,
     resumable: true,
   }));
@@ -78,4 +82,20 @@ export function historyGaps(
       gap(`wechat_history_windows_pending:${cursor.queue.length}`, chat),
     );
   return gaps;
+}
+
+/** Context is a separate exact window, never an expansion of a core paging query. */
+export function queueGroupContext(cursor: HistoryCursor, anchors: number[], cutoff: string): void {
+  for (const anchor of anchors) {
+    const from = new Date(anchor - 20 * 60_000).toISOString();
+    const to = new Date(Math.min(Date.parse(cutoff), anchor + 20 * 60_000 + 1)).toISOString();
+    const existing = cursor.queue.find(window => window.purpose === "context" && window.from === from && window.to === to);
+    if (existing) existing.anchor_times = [...new Set([...(existing.anchor_times ?? []), anchor])];
+    else cursor.queue.push({ from, to, depth: 0, purpose: "context", anchor_times: [anchor] });
+  }
+}
+
+export function takeHistoryWindow(cursor: HistoryCursor): HistoryWindow | undefined {
+  const firstCore = cursor.queue.findIndex(window => window.purpose !== "context");
+  return cursor.queue.splice(firstCore < 0 ? 0 : firstCore, 1)[0];
 }

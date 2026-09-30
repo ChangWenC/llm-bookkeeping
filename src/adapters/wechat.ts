@@ -14,6 +14,8 @@ import {
   initializeHistory,
   recordHistoryWindow,
   historyGaps,
+  queueGroupContext,
+  takeHistoryWindow,
 } from "./wechat-history.ts";
 const serviceChat = (id: string) =>
   id === "systemholder" ||
@@ -77,7 +79,7 @@ function routeArgs(source: ProviderConfig): string[] {
   return ["--account", source.account_id, "--bundle-id", bundle];
 }
 function historyWindow(chat: string, request: CollectRequest) {
-  const group = chat.endsWith("@chatroom");
+  const group = chat.endsWith("@chatroom") && request.lane !== "history";
   return {
     from: Math.floor(
       (Date.parse(request.range.from) - (group ? 20 * 60000 : 0)) / 1000,
@@ -210,6 +212,7 @@ export function parseWechatHistory(
   chat: string,
   request: CollectRequest,
   config: BookkeepingConfig,
+  contextAnchors?: number[],
 ): { events: SourceEvent[]; gaps: CoverageGap[] } {
   const parsed = parseLossless(text);
   if (!parsed || !parsed.meta || !Array.isArray(parsed.rows))
@@ -339,13 +342,14 @@ export function parseWechatHistory(
     candidates.push(e);
   }
   if (!isGroup) return { events: candidates, gaps };
-  const anchors = candidates
+  const anchors = contextAnchors ?? candidates
     .filter(
       (e) =>
         !e.context.context_only &&
         (e.role === "user" || e.context.is_mentioned),
     )
     .flatMap((e) => (e.utc_time.value ? [Date.parse(e.utc_time.value)] : []));
+  if (contextAnchors) for (const event of candidates) event.context.context_only = true;
   if (!verified) gaps.push(gap("wechat_group_participation_unknown", chat));
   return {
     events: candidates.filter(
@@ -354,7 +358,10 @@ export function parseWechatHistory(
         anchors.some(
           (t) => Math.abs(Date.parse(e.utc_time.value!) - t) <= 20 * 60000,
         ),
-    ),
+    ).map(event => {
+      if (event.role !== "user" && event.context.is_mentioned !== true) event.context.context_only = true;
+      return event;
+    }),
     gaps,
   };
 }
@@ -408,7 +415,7 @@ export class WechatAdapter implements SourceAdapter {
       const id = hash(
         `${this.source.account_id}:${chat}:${request.lane}:${request.cutoff}:${capturedRequest.range.from}:${capturedRequest.range.to}:${raw ?? status}`,
       );
-      return {
+      const batch: CollectionBatch = {
         schema_version: 1,
         batch_id: id,
         events,
@@ -457,6 +464,8 @@ export class WechatAdapter implements SourceAdapter {
               ]
             : [],
       };
+      batch.batch_id = hash(JSON.stringify({ ...batch, batch_id: null }));
+      return batch;
     };
     const deadline =
       Date.now() +
@@ -668,7 +677,7 @@ export class WechatAdapter implements SourceAdapter {
             remaining <= 0)
         )
           break;
-        const window = history?.queue.shift();
+        const window = history ? takeHistoryWindow(history) : undefined;
         const query = window
           ? {
               ...request,
@@ -700,6 +709,7 @@ export class WechatAdapter implements SourceAdapter {
             chat,
             query,
             this.config,
+            window?.purpose === "context" ? window.anchor_times : undefined,
           );
           if (history && window) {
             const rows = parseLossless(raw).rows;
@@ -711,13 +721,15 @@ export class WechatAdapter implements SourceAdapter {
                 g.reason === "wechat_shards_or_truncation_unknown",
             );
             if (unreliable) history.queue.push(window);
-            else
-              recordHistoryWindow(
-                history,
-                window,
-                rows.length >=
-                  Math.min(10000, Number(this.source.options.limit ?? 2000)),
-              );
+            else {
+              const capped = rows.length >= Math.min(10000, Number(this.source.options.limit ?? 2000));
+              recordHistoryWindow(history, window, capped);
+              if (!capped && window.purpose !== "context" && chat.endsWith("@chatroom")) {
+                const anchors = parsed.events.filter(event => !event.context.context_only && (event.role === "user" || event.context.is_mentioned === true))
+                  .flatMap(event => event.utc_time.value ? [Date.parse(event.utc_time.value)] : []);
+                queueGroupContext(history, anchors, request.cutoff);
+              }
+            }
           }
           discoveryGaps.push(
             ...parsed.gaps.filter(
@@ -775,6 +787,7 @@ export class WechatAdapter implements SourceAdapter {
       },
       updated_at: request.cutoff,
     });
+    discoveryBatch.batch_id = hash(JSON.stringify({ ...discoveryBatch, batch_id: null }));
     yield discoveryBatch;
   }
   replay(range: any, context: AdapterContext) {
