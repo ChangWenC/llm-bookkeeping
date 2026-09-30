@@ -149,3 +149,18 @@ test('multiple redundant generations remain bounded and a later pass retains the
     assert.equal(pending.length, 2); assert(pending.some(e => e.event_id === kept.event_id));
     store.close();
 });
+
+test('corrupt row identity or schema refuses the entire manifest before any bundle or source progress', async () => {
+    for (const corruption of ['event_id', 'schema_version'] as const) {
+        const c = await config(), store = await createStore(c), valid = twins('valid'), broken = twins('corrupt');
+        await store.saveCollection(collection([...valid, ...broken]));
+        const damaged: any = structuredClone(broken[1]);
+        if (corruption === 'event_id') damaged.event_id = broken[0].event_id;
+        else damaged.schema_version = 2;
+        store.db.prepare('UPDATE events SET json=? WHERE id=?').run(JSON.stringify(damaged), broken[1].event_id);
+        const input = manifest([valid, broken]), before = truth(store);
+        assert.throws(() => previewNativeDuplicates(c, input), /primary key\/schema mismatch/);
+        await assert.rejects(prepareNativeDuplicates(c, input, '0'.repeat(64), join(dirname(c.data_dir), 'corrupt-material')), /primary key\/schema mismatch/);
+        assert.deepEqual(truth(store), before); store.close();
+    }
+});

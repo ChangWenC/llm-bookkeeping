@@ -51,6 +51,7 @@ function readCurrent(db: DatabaseSync, id: string): SavedEvent {
     const row = db.prepare('SELECT rowid,json FROM events WHERE id=?').get(id) as { rowid: number; json: string } | undefined;
     if (!row) throw new Error('Manifest event missing');
     let event = JSON.parse(row.json) as SourceEvent;
+    if (event.schema_version !== 1 || event.event_id !== id) throw new Error('Manifest event primary key/schema mismatch');
     const fragment = (source: SourceEvent): RawFragment | null => {
         const raw = source.fragment_ref && db.prepare('SELECT json FROM fragments WHERE id=?').get(source.fragment_ref) as { json: string } | undefined;
         return raw ? JSON.parse(raw.json) : null;
