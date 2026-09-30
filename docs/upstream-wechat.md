@@ -4,7 +4,7 @@
 
 ## 当前协调者本机验收（2026-09-30）
 
-以下由协调者 root 在本机执行，只记录结构结果；开发 agent 未自行查询私人数据。新版 daily 已启用；新版 monthly 恢复因自动审批拒绝而暂时保持 PAUSED，待用户明确授权该删除性归档任务。两次真实 scheduled daily 与退役仍待验收，详见协调者生产切换记录。managed 副本每轮先用 `accounts --json` 只读核对 bundle 与预期账号唯一绑定，再以固定 bundle 查询；不修改 default 或 alias。
+以下由协调者 root 在本机执行，只记录结构结果；开发 agent 未自行查询私人数据。新版 daily 已启用；Roy 于2026-09-30明确授权后，新版 monthly 已通过正式工具恢复 ACTIVE，调度器读回下次为阿姆斯特丹时间10月3日03:30。两次真实 scheduled daily 与退役仍待验收，详见协调者生产切换记录。managed 副本每轮先用 `accounts --json` 只读核对 bundle 与预期账号唯一绑定，再以固定 bundle 查询；不修改 default 或 alias。
 
 | 项目 | 已验证结果 |
 | --- | --- |
