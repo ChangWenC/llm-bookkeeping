@@ -19,7 +19,7 @@ All commands accept `--config /absolute/config.json`.
 
 - `collect --lane history`
 - `prepare --kind weekly|monthly --lane live|history [--period YYYY-MM-DD|YYYY-MM] --output DIR`
-- `consume --target analytics|monthly|index|all`
+- `consume --target analytics|monthly|evidence|index|all`
 - `archive --month YYYY-MM --report|--apply`
 - `import --manifest FILE` / `migrate --manifest FILE`
 - `replay --source PROVIDER --from UTC --to UTC`
@@ -45,9 +45,13 @@ Its seven scenarios cover native mirror versus true repeated text, stable recapt
 
 Capture exceptions persist unavailable/partial coverage and collection_retry work. Material/backup/state paths cannot overlap Wiki, raw source roots or iCloud, including canonical existing ancestors. prepare writes compact immutable bundles and an atomic manifest; final file bytes cannot exceed configured bundle_bytes. Explicit finite review and collection budgets can exceed defaults.
 
-Daily capture/review/export/publication and source-independent facts/status/backup/restore are integrated. Monthly/archive/index and manifest import/migration now invoke concrete services. Typed weekly/monthly semantic acceptance, all three consumers, Analytics review and changed/all health validation now call the delivered implementations. Synthetic integration evidence is separate from production and scheduled-run acceptance.
+Daily capture/review/export/publication and source-independent facts/status/backup/restore are integrated. Monthly/archive/index and manifest import/migration now invoke concrete services. Typed weekly/monthly semantic acceptance, all four consumers, Analytics review and changed/all health validation now call the delivered implementations. Synthetic integration evidence is separate from production and scheduled-run acceptance.
 
 ## M2 service composition
+
+`consume --target evidence` independently mirrors ready accepted FactArtifact JSON to `wiki/personal/_evidence/bookkeeping/batches/<sha256(batch_id)>.json`. It copies no raw fragments and uses shared writer locks, full FileIntents and byte verification before its own acknowledgement. Existing batches already acknowledged by Analytics/monthly still backfill. Each run processes at most 20 batches with bounded ready-batch reads; a disposable local cursor advances past conflicts and wraps for retry. Lost cursors safely restart. Busy locks, changed mirror bytes and disk failures remain pending without revoking facts or Analytics acknowledgements. `consume all` runs Analytics, monthly, evidence, then index so mirror index debt is consumed in the same round. See `docs/evidence-interface.md`.
+
+Coordinator-only isolated archive acceptance helper: `node tools/archive-acceptance.ts --config /private/tmp/bookkeeping-acceptance/COPY/config.json --now 2026-10-01T12:00:00Z`. Config, canonical Wiki and data paths must all be descendants of that temporary acceptance root. Only August 1/2 may be eligible; other eligible sources are rejected. It executes report/apply/repeat and verifies complete saved originals, deletion idempotence and retained pages; archive service enforces exact backlink transitions. Output contains counts only. This is a controlled-clock isolated-copy acceptance, neither scheduled evidence nor production-month deletion.
 
 `consume --target monthly|index` and `archive --month YYYY-MM --report|--apply` now call the actual consumer/archive factories in `docs/archive-monthly-index-interface.md`. Index commands are configured in `index_commands:{schema_version:1,lint,build_index,qmd}`, each command `{schema_version:1,executable,args,timeout_ms?}`. Defaults use the current pinned Node for `scripts/lint.mjs` and `scripts/build_index.mjs`, then `qmd update`; no shell and no pull. Explicit executable paths are supported. An index stage failure retains durable work and reports pending/partial independently of facts.
 

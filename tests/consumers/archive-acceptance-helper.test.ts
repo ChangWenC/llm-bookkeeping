@@ -1,0 +1,25 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { runArchiveAcceptance } from '../../tools/archive-acceptance.ts';
+import { config as base } from '../../test/fixtures/basic.ts';
+test('controlled-clock archive helper confines writes, preserves full originals and aliases, repeats without deletion duplicates', async t => {
+  const baseDir = '/private/tmp/bookkeeping-acceptance'; await mkdir(baseDir, { recursive: true });
+  const root = await mkdtemp(join(baseDir, 'synthetic-helper-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const wiki = join(root, 'wiki'), config = { ...base, wiki_root: wiki, data_dir: join(root, 'data') };
+  const journals = join(wiki, 'wiki/personal/journals'); await mkdir(join(journals, 'reviews'), { recursive: true });
+  for (const day of ['01', '02']) await writeFile(join(journals, `日记_2026_08_${day}.md`), `---\ntype: journal\njournal_class: daily-active\n---\n\n完整合成原文 ${day}。\n`);
+  const retained = join(journals, '日记_2026_08_03.md'); await writeFile(retained, '---\njournal_class: pinned-daily\n---\n\n保留合成原文。\n');
+  const monthly = join(journals, 'reviews/回顾_2026_08.md');
+  await writeFile(monthly, '# 八月回顾\n\n已实质审阅[[日记_2026_08_01|原有描述]]及[[日记_2026_08_02]]。\n');
+  const path = join(root, 'config.json'); await writeFile(path, JSON.stringify(config));
+  const report = await runArchiveAcceptance(path, '2026-10-01T12:00:00Z');
+  assert.equal(report.preserved_and_deleted, 2); assert.equal(report.retained, 1); assert.equal(report.scheduled_evidence, false);
+  assert.ok((await readFile(monthly, 'utf8')).includes('[[回顾_2026_08|原有描述]]'));
+  assert.ok((await readFile(monthly, 'utf8')).includes('[[回顾_2026_08|2026-08-02 日记]]'));
+  assert.ok((await readFile(retained, 'utf8')).includes('保留合成原文'));
+  await writeFile(path, JSON.stringify({ ...config, wiki_root: '/private/tmp/outside-helper' }));
+  await assert.rejects(runArchiveAcceptance(path, '2026-10-01T12:00:00Z'), /descendants/);
+});

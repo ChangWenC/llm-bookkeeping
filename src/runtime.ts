@@ -75,7 +75,7 @@ export async function createRuntime(config: BookkeepingConfig, command?: string,
     if (!command || command === 'consume') {
       const module = await loadModule('./consumers/index.ts');
       const target = options.target;
-      const targets = typeof target === 'string' && target !== 'all' ? [target] : ['analytics', 'monthly', 'index'];
+      const targets = typeof target === 'string' && target !== 'all' ? [target] : ['analytics', 'monthly', 'evidence', 'index'];
       services.consumers = await module.createConsumers(store, config, targets, { now });
     }
     if (!command || command === 'archive') {

@@ -37,7 +37,7 @@ collect --lane live|history
 prepare --kind daily|weekly|monthly --lane live|history [--period 日期/周结束日/月份] --output 目录
 publish --input ReviewResult.json
 publish --resume
-consume --target analytics|monthly|index|all
+consume --target analytics|monthly|evidence|index|all
 archive --month YYYY-MM --report|--apply
 import --manifest 文件
 migrate --manifest 文件
@@ -98,7 +98,7 @@ major-decision由用户确认有效contract（subject,目标版本,期限,trigge
 ## 8. 微信与导入
 
 wechat-use首选readonly PoC，候选v1.18.16，实际安装help/output/license固定记录；https://github.com/leeguooooo/wechat-use 。独立4.1.9副本不假设有主微信全部历史；登录/激活/系统授权由Roy处理，不自行发消息。
-先实测主副本真实历史范围、新收发含本人、离线重登录补读、account/chat/self/member identity、同名联系人、超页/同秒多条/顺序/迟到/截断、上游cursor是否隐式推进、重复查询/导入与64bitIDs。doctor通过不等于覆盖通过。只history/sessions/contacts，无发送机器人朋友圈。媒体转写默认off，留缺口。高密度窗无法枚举partial+import，不无限缩窗。
+先实测主副本真实历史范围、新收发含本人、离线重登录补读、account/chat/self/member identity、同名联系人、超页/同秒多条/顺序/迟到/截断、上游cursor是否隐式推进、重复查询/导入与64bitIDs。doctor通过不等于覆盖通过。业务只history/sessions/contacts，另允许accounts只读核对副本与账号绑定；禁止发送/机器人/朋友圈。媒体转写默认off，留缺口。高密度窗无法枚举partial+import，不无限缩窗。
 保私聊FileHelper及本人参与/被提及群聊±20分钟上下文；迁移ignored/pinned/self aliases；公众号systemholder默认排除，不自动建人物。CLI sender语义必须按会话类型实测。
 importer支持旧导出+ChatLab0.0.2 JSON/JSONL(header/member/message)，规范https://github.com/ChatLab/ChatLab/blob/main/docs/cn/standard/chatlab-format.md 。manifest明确account/chat/owner/time来源/时区/已知范围。旧complete仅声明非完整证明，分页上限/重复页/截断/未知zone均缺口，raw保留。wechat未通过明确未完成，A日更继续。
 

@@ -42,7 +42,7 @@ test('CLI typed weekly/monthly/pages publish and all consumers share actual SQLi
     daily.candidates[0].content = 'PRIVATE synthetic household detail and parser work';
     await publish(daily);
     const consumed = await cli(['consume', '--target', 'all']);
-    assert.deepEqual(consumed.consumers.map((item: any) => item.target), ['analytics', 'monthly', 'index']);
+    assert.deepEqual(consumed.consumers.map((item: any) => item.target), ['analytics', 'monthly', 'evidence', 'index']);
     assert.ok(consumed.consumers.every((item: any) => item.status === 'complete'));
     const w = await prepare('weekly', '2026-10-04');
     assert.ok(w.analysis_context); assert.ok(!JSON.stringify(w).includes('PRIVATE'));
