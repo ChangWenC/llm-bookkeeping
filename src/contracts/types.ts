@@ -17,7 +17,7 @@ export interface SourceIdentity extends Versioned {
 export interface SourceEvent extends Versioned {
   event_id: string; source: SourceIdentity; role: string; kind: string; channel: string | null;
   body: string | null; fragment_ref: string | null; physical_order: string;
-  original_time: UnknownValue<string>; time_precision: 'second' | 'millisecond' | 'microsecond' | 'day' | 'unknown';
+  original_time: UnknownValue<string>; time_precision: 'minute' | 'second' | 'millisecond' | 'microsecond' | 'day' | 'unknown';
   utc_time: UnknownValue<string>; wire_timezone: UnknownValue<string>;
   journal_timezone: UnknownValue<string>; journal_timezone_basis: string | null;
   journal_date: UnknownValue<string>; classification: 'main' | 'subagent' | 'automation' | 'unknown';
@@ -41,12 +41,88 @@ export interface PageBaseline extends Versioned { path: string; digest: string; 
 export interface ReviewChunk extends Versioned {
   chunk_id: string; events: SourceEvent[]; context_events: SourceEvent[]; body_bytes: number;
 }
+export interface AnalysisRevisionRef extends Versioned { logical_id: string; revision: number }
+export interface ProfessionalFact extends Versioned {
+  fact_ref: FactRef; projection: AnalyticsProjection; kind: FactKind;
+  occurred_at: UnknownValue<string>;
+}
+export type AnalysisCoverageStatus = 'complete' | 'partial' | 'unknown';
+export interface ValidationAction extends Versioned {
+  action_ref: AnalysisRevisionRef; subject: string; description: string;
+  evidence_refs: FactRef[]; state: 'active' | 'completed' | 'abandoned';
+}
+export interface PriorActionDisposition extends Versioned {
+  action_ref: AnalysisRevisionRef; disposition: 'continue' | 'narrow' | 'abandon';
+  reason: string; evidence_refs: FactRef[];
+}
+export interface WeeklyObservation extends Versioned {
+  observation_ref: AnalysisRevisionRef; summary: string; subject: string;
+  kind: 'fact' | 'inference' | 'recommendation'; evidence_refs: FactRef[];
+  capability_ids: string[]; responsibility_basis: string;
+  stage: 'candidate' | 'formal';
+}
+export interface CapabilityAssessment extends Versioned {
+  capability_id: string; trend: 'improving' | 'stable' | 'declining' | 'unknown';
+  explanation: string; evidence_refs: FactRef[];
+}
+export interface GoalGap extends Versioned {
+  goal_ref: AnalysisRevisionRef; description: string; evidence_refs: FactRef[];
+}
+export interface WeeklyAnalysisSnapshot extends Versioned {
+  analysis_ref: AnalysisRevisionRef; week_end: string; coverage_status: AnalysisCoverageStatus;
+  observations: WeeklyObservation[]; capabilities: CapabilityAssessment[]; goal_gaps: GoalGap[];
+  direction: 'aligned' | 'divergent' | 'unknown'; patterns: string[];
+  validation_action: ValidationAction | null;
+}
+export interface WeeklyAnalysisInput extends Versioned {
+  week_end: string; range: TimeRange; analysis_timezone: 'Europe/Amsterdam';
+  facts: ProfessionalFact[]; coverage: SourceCoverage[]; coverage_status: AnalysisCoverageStatus;
+  previous_weeks: WeeklyAnalysisSnapshot[]; prior_action: ValidationAction | null;
+  confirmed_goal_refs: AnalysisRevisionRef[];
+}
+export interface WeeklyAnalysisResult extends Versioned {
+  snapshot: WeeklyAnalysisSnapshot; prior_action_disposition: PriorActionDisposition | null;
+  proposed_confirmations: AnalysisRevisionRef[]; freshness_at: string;
+}
+export interface AnalyticsReviewEvent extends Versioned {
+  review_id: string; target_ref: AnalysisRevisionRef;
+  action: 'confirm' | 'reject' | 'correct' | 'retract';
+  correction: string | null; evidence_refs: FactRef[]; created_at: string;
+}
+export interface GoalContract extends Versioned {
+  contract_ref: AnalysisRevisionRef; subject: string; description: string;
+  target_version: string; deadline: string | null; confirmed: boolean;
+}
+export interface MajorDecisionContract extends Versioned {
+  contract_ref: AnalysisRevisionRef; subject: string; goal_ref: AnalysisRevisionRef;
+  valid_from: string; valid_to: string;
+  trigger: { schema_version: SchemaVersion; name: string; expected_value: string };
+  confirmed: boolean;
+}
+export type AnalyticsReviewInput =
+  | { schema_version: SchemaVersion; kind: 'review'; events: AnalyticsReviewEvent[] }
+  | { schema_version: SchemaVersion; kind: 'goal_contract'; contract: GoalContract }
+  | { schema_version: SchemaVersion; kind: 'decision_contract'; contract: MajorDecisionContract };
+export interface ReviewReceipt extends Versioned {
+  review_id: string; target_ref: AnalysisRevisionRef;
+  status: 'applied' | 'already_applied' | 'stale' | 'pending'; reason: string | null;
+}
+export interface MonthlyReviewInput extends Versioned {
+  month: string; range: TimeRange; facts: FactRevision[]; coverage: SourceCoverage[];
+  coverage_status: AnalysisCoverageStatus; manual_baselines: PageBaseline[];
+}
+export interface MonthlyReviewResult extends Versioned {
+  month: string; summary: string; fact_refs: FactRef[];
+  supplement_text: string; coverage_status: AnalysisCoverageStatus;
+}
 export interface ReviewBundle extends Versioned {
   bundle_id: string; kind: ReviewKind; lane: Lane; period: string | null; cutoff: string;
   chunks: ReviewChunk[]; existing_facts: FactRevision[]; baselines: PageBaseline[];
   coverage: SourceCoverage[]; unfinished: CoverageGap[];
+  analysis_context?: WeeklyAnalysisInput; monthly_context?: MonthlyReviewInput;
 }
-export interface AnalyticsProjection extends Versioned { summary: string; scope: string[]; subject: string; event_refs: EventRef[]; attribution: Record<string, unknown> }
+export interface ExplicitVerification extends Versioned { name: string; value: string; subject: string; verified_at: string; event_refs: EventRef[]; basis: 'user_explicit_verification' }
+export interface AnalyticsProjection extends Versioned { summary: string; scope: string[]; subject: string; event_refs: EventRef[]; attribution: Record<string, unknown>; verification?: ExplicitVerification }
 /** Model-produced IDs are local candidate IDs; the application allocates permanent IDs. */
 export interface FactCandidate extends Versioned {
   candidate_id: string; chunk_id: string; disposition: 'keep' | 'add' | 'replace' | 'retract';
@@ -65,6 +141,7 @@ export interface JournalSuggestion extends Versioned {
 export interface ReviewResult extends Versioned {
   result_id: string; bundle_id: string; chunks: ChunkReview[]; candidates: FactCandidate[];
   pages: JournalSuggestion[]; created_at: string;
+  analysis?: WeeklyAnalysisResult; monthly_review?: MonthlyReviewResult;
 }
 export interface FactRevision extends Versioned {
   fact_id: string; revision: number; event_refs: EventRef[]; content: string; subject: string;
@@ -80,6 +157,7 @@ export interface JournalPatch extends Versioned {
 export interface FactArtifact extends Versioned {
   batch_id: string; created_at: string; facts: FactRevision[]; coverage: SourceCoverage[];
   affected_dates: string[]; affected_weeks: string[];
+  affected_months?: string[]; analysis?: WeeklyAnalysisResult; monthly_review?: MonthlyReviewResult;
 }
 export type FileStatus = 'applied' | 'noop' | 'pending' | 'conflict';
 export interface FileOutcome extends Versioned { operation_id: string; path: string; status: FileStatus; reason: string | null }
@@ -115,6 +193,8 @@ export interface CollectionBudget { max_duration_ms: number; max_bytes: number; 
 export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig }
 export interface SourceAdapter {
   readonly provider: string;
+  readonly account_id?: string;
+  close?(): void | Promise<void>;
   collect(request: CollectRequest, context: AdapterContext): AsyncIterable<CollectionBatch>;
   replay?(range: TimeRange, context: AdapterContext): AsyncIterable<CollectionBatch>;
 }
@@ -127,6 +207,7 @@ export interface BookkeepingConfig extends Versioned {
   wiki_root: string; data_dir: string; journal_timezone: string; analysis_timezone: 'Europe/Amsterdam';
   cutover_at: string; live_start: string; journal_timezone_timeline: JournalTimezoneEntry[]; providers: ProviderConfig[];
   limits: { chunk_events: number; chunk_body_bytes: number; bundle_bytes: number; bundles_per_round: number };
+  collection_budgets?: { live: CollectionBudget; history: CollectionBudget };
   project_whitelist: string[]; goal_whitelist: string[];
 }
 /** One SQLite owner. commitReview MUST atomically persist result, allocated revisions,
@@ -176,6 +257,7 @@ export interface ArchiveRequest { month: string; mode: 'report' | 'apply' }
 export interface Manifest extends Versioned { manifest_id: string; kind: 'import' | 'migration'; entries: Record<string, unknown>[] }
 /** CLI composition port. Optional capabilities fail explicitly when unavailable. */
 export interface RuntimeServices {
+  close?(): void | Promise<void>;
   store: Store; adapters: SourceAdapter[]; reviewer: Reviewer; publisher: Publisher;
   consumers: Consumer[];
   archive?: (request: ArchiveRequest) => Promise<unknown>;

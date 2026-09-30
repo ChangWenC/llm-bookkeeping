@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-bookkeeping.local/contracts-v1.schema.json",
   "title": "Bookkeeping version 1 records",
-  "description": "Runtime semantic validation additionally checks IDs, dates, explicit zero facts, refs, limits and bundle membership.",
+  "description": "Structural DTO schema. Runtime validators additionally enforce identities, temporal ranges, review evidence, coverage and finite budgets.",
   "anyOf": [
     {
       "$ref": "#/$defs/SourceEvent"
@@ -33,6 +33,21 @@
     },
     {
       "$ref": "#/$defs/Manifest"
+    },
+    {
+      "$ref": "#/$defs/WeeklyAnalysisInput"
+    },
+    {
+      "$ref": "#/$defs/WeeklyAnalysisResult"
+    },
+    {
+      "$ref": "#/$defs/MonthlyReviewInput"
+    },
+    {
+      "$ref": "#/$defs/MonthlyReviewResult"
+    },
+    {
+      "$ref": "#/$defs/AnalyticsReviewEvent"
     }
   ],
   "$defs": {
@@ -286,6 +301,7 @@
         },
         "time_precision": {
           "enum": [
+            "minute",
             "second",
             "millisecond",
             "microsecond",
@@ -726,6 +742,719 @@
         "body_bytes"
       ]
     },
+    "AnalysisRevisionRef": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "logical_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "logical_id",
+        "revision"
+      ]
+    },
+    "ProfessionalFact": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "fact_ref": {
+          "$ref": "#/$defs/FactRef"
+        },
+        "projection": {
+          "$ref": "#/$defs/AnalyticsProjection"
+        },
+        "kind": {
+          "enum": [
+            "fact",
+            "inference",
+            "recommendation",
+            "legacy_record"
+          ]
+        },
+        "occurred_at": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "fact_ref",
+        "projection",
+        "kind",
+        "occurred_at"
+      ]
+    },
+    "ValidationAction": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "action_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "state": {
+          "enum": [
+            "active",
+            "completed",
+            "abandoned"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "action_ref",
+        "subject",
+        "description",
+        "evidence_refs",
+        "state"
+      ]
+    },
+    "PriorActionDisposition": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "action_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "disposition": {
+          "enum": [
+            "continue",
+            "narrow",
+            "abandon"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "action_ref",
+        "disposition",
+        "reason",
+        "evidence_refs"
+      ]
+    },
+    "WeeklyObservation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "observation_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "fact",
+            "inference",
+            "recommendation"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "capability_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "responsibility_basis": {
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "candidate",
+            "formal"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "observation_ref",
+        "summary",
+        "subject",
+        "kind",
+        "evidence_refs",
+        "capability_ids",
+        "responsibility_basis",
+        "stage"
+      ]
+    },
+    "CapabilityAssessment": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "capability_id": {
+          "type": "string"
+        },
+        "trend": {
+          "enum": [
+            "improving",
+            "stable",
+            "declining",
+            "unknown"
+          ]
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "capability_id",
+        "trend",
+        "explanation",
+        "evidence_refs"
+      ]
+    },
+    "GoalGap": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "goal_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "description": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "goal_ref",
+        "description",
+        "evidence_refs"
+      ]
+    },
+    "WeeklyAnalysisSnapshot": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "analysis_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "week_end": {
+          "type": "string"
+        },
+        "coverage_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeeklyObservation"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityAssessment"
+          }
+        },
+        "goal_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GoalGap"
+          }
+        },
+        "direction": {
+          "enum": [
+            "aligned",
+            "divergent",
+            "unknown"
+          ]
+        },
+        "patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "validation_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValidationAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "analysis_ref",
+        "week_end",
+        "coverage_status",
+        "observations",
+        "capabilities",
+        "goal_gaps",
+        "direction",
+        "patterns",
+        "validation_action"
+      ]
+    },
+    "WeeklyAnalysisInput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "week_end": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "analysis_timezone": {
+          "const": "Europe/Amsterdam"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProfessionalFact"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCoverage"
+          }
+        },
+        "coverage_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "previous_weeks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeeklyAnalysisSnapshot"
+          },
+          "maxItems": 4
+        },
+        "prior_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValidationAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmed_goal_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalysisRevisionRef"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "week_end",
+        "range",
+        "analysis_timezone",
+        "facts",
+        "coverage",
+        "coverage_status",
+        "previous_weeks",
+        "prior_action",
+        "confirmed_goal_refs"
+      ]
+    },
+    "WeeklyAnalysisResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "snapshot": {
+          "$ref": "#/$defs/WeeklyAnalysisSnapshot"
+        },
+        "prior_action_disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PriorActionDisposition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposed_confirmations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalysisRevisionRef"
+          },
+          "maxItems": 3
+        },
+        "freshness_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "snapshot",
+        "prior_action_disposition",
+        "proposed_confirmations",
+        "freshness_at"
+      ]
+    },
+    "AnalyticsReviewEvent": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "review_id": {
+          "type": "string"
+        },
+        "target_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "action": {
+          "enum": [
+            "confirm",
+            "reject",
+            "correct",
+            "retract"
+          ]
+        },
+        "correction": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "review_id",
+        "target_ref",
+        "action",
+        "correction",
+        "evidence_refs",
+        "created_at"
+      ]
+    },
+    "GoalContract": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "contract_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "target_version": {
+          "type": "string"
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "contract_ref",
+        "subject",
+        "description",
+        "target_version",
+        "deadline",
+        "confirmed"
+      ]
+    },
+    "MajorDecisionContract": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "contract_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "goal_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "valid_from": {
+          "type": "string"
+        },
+        "valid_to": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "name": {
+              "type": "string"
+            },
+            "expected_value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "name",
+            "expected_value"
+          ]
+        },
+        "confirmed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "contract_ref",
+        "subject",
+        "goal_ref",
+        "valid_from",
+        "valid_to",
+        "trigger",
+        "confirmed"
+      ]
+    },
+    "ReviewReceipt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "review_id": {
+          "type": "string"
+        },
+        "target_ref": {
+          "$ref": "#/$defs/AnalysisRevisionRef"
+        },
+        "status": {
+          "enum": [
+            "applied",
+            "already_applied",
+            "stale",
+            "pending"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "review_id",
+        "target_ref",
+        "status",
+        "reason"
+      ]
+    },
+    "MonthlyReviewInput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "month": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCoverage"
+          }
+        },
+        "coverage_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "manual_baselines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageBaseline"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "month",
+        "range",
+        "facts",
+        "coverage",
+        "coverage_status",
+        "manual_baselines"
+      ]
+    },
+    "MonthlyReviewResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "month": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "fact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "supplement_text": {
+          "type": "string"
+        },
+        "coverage_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "month",
+        "summary",
+        "fact_refs",
+        "supplement_text",
+        "coverage_status"
+      ]
+    },
     "ReviewBundle": {
       "type": "object",
       "properties": {
@@ -790,6 +1519,12 @@
           "items": {
             "$ref": "#/$defs/CoverageGap"
           }
+        },
+        "analysis_context": {
+          "$ref": "#/$defs/WeeklyAnalysisInput"
+        },
+        "monthly_context": {
+          "$ref": "#/$defs/MonthlyReviewInput"
         }
       },
       "required": [
@@ -804,6 +1539,44 @@
         "baselines",
         "coverage",
         "unfinished"
+      ]
+    },
+    "ExplicitVerification": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "verified_at": {
+          "type": "string"
+        },
+        "event_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventRef"
+          }
+        },
+        "basis": {
+          "const": "user_explicit_verification"
+        }
+      },
+      "required": [
+        "schema_version",
+        "name",
+        "value",
+        "subject",
+        "verified_at",
+        "event_refs",
+        "basis"
       ]
     },
     "AnalyticsProjection": {
@@ -832,6 +1605,9 @@
         },
         "attribution": {
           "type": "object"
+        },
+        "verification": {
+          "$ref": "#/$defs/ExplicitVerification"
         }
       },
       "required": [
@@ -1131,6 +1907,12 @@
         },
         "created_at": {
           "type": "string"
+        },
+        "analysis": {
+          "$ref": "#/$defs/WeeklyAnalysisResult"
+        },
+        "monthly_review": {
+          "$ref": "#/$defs/MonthlyReviewResult"
         }
       },
       "required": [
@@ -1383,6 +2165,18 @@
           "items": {
             "type": "string"
           }
+        },
+        "affected_months": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "analysis": {
+          "$ref": "#/$defs/WeeklyAnalysisResult"
+        },
+        "monthly_review": {
+          "$ref": "#/$defs/MonthlyReviewResult"
         }
       },
       "required": [
@@ -2002,6 +2796,59 @@
             "chunk_body_bytes",
             "bundle_bytes",
             "bundles_per_round"
+          ]
+        },
+        "collection_budgets": {
+          "type": "object",
+          "properties": {
+            "live": {
+              "type": "object",
+              "properties": {
+                "max_duration_ms": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_bytes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_directory_entries": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "max_duration_ms",
+                "max_bytes",
+                "max_directory_entries"
+              ]
+            },
+            "history": {
+              "type": "object",
+              "properties": {
+                "max_duration_ms": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_bytes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_directory_entries": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "max_duration_ms",
+                "max_bytes",
+                "max_directory_entries"
+              ]
+            }
+          },
+          "required": [
+            "live",
+            "history"
           ]
         },
         "project_whitelist": {

@@ -51,7 +51,7 @@ export function validateSourceEvent(value: unknown): SourceEvent {
   unknownValue(r.original_time,'original_time');unknownValue(r.utc_time,'utc_time',utc);
   unknownValue(r.wire_timezone,'wire_timezone');unknownValue(r.journal_timezone,'journal_timezone',zone);
   unknownValue(r.journal_date,'journal_date',date);nullableString(r.journal_timezone_basis,'journal_timezone_basis');
-  choice(r.time_precision,['second','millisecond','microsecond','day','unknown'],'time_precision');
+  choice(r.time_precision,['minute','second','millisecond','microsecond','day','unknown'],'time_precision');
   choice(r.classification,['main','subagent','automation','unknown'],'classification');record(r.context,'context');return r as SourceEvent;
 }
 export function validateCoverage(value:unknown): SourceCoverage {
@@ -72,7 +72,7 @@ export function validateReviewResult(value: unknown, bundle?: ReviewBundle): Rev
   const ids=new Set<string>();array(r.candidates,'candidates').forEach(c=>{version(c,'candidate');string(c.candidate_id,'candidate_id');if(ids.has(c.candidate_id))fail('candidate_id','duplicate');ids.add(c.candidate_id);string(c.chunk_id,'chunk_id');if(!chunks.has(c.chunk_id))fail('candidate.chunk_id','missing chunk review');choice(c.disposition,['keep','add','replace','retract'],'disposition');string(c.content,'content');string(c.subject,'subject');unknownValue(c.occurred_at,'occurred_at',utc);unknownValue(c.journal_date,'journal_date',date);choice(c.kind,['fact','inference','recommendation','legacy_record'],'kind');refs(c.event_refs,'event_refs');refs(c.target_refs,'target_refs',true);array(c.scope,'scope').forEach(v=>string(v,'scope'));record(c.attribution,'attribution');projection(c.analytics_projection);if(['keep','replace','retract'].includes(c.disposition)&&!c.target_refs.length)fail('target_refs','disposition requires explicit targets');if(c.disposition==='add'&&c.target_refs.length)fail('target_refs','add must not have targets');for(const key of ['fact_id','revision','operation_id'])if(key in c)fail(key,'application assigns permanent IDs');});
   array(r.pages,'pages').forEach(p=>{version(p,'page');for(const k of ['suggestion_id','path','baseline_digest'])string(p[k],k);date(p.date,'page.date');choice(p.mode,['append','replace'],'page.mode');nullableString(p.old_text,'page.old_text');if(typeof p.new_text!=='string')fail('new_text','expected string');if(p.mode==='replace'&&(p.old_text===null||!p.old_text.length))fail('old_text','exact replacement requires nonempty old text');array(p.candidate_ids,'candidate_ids').forEach(id=>{if(!ids.has(id))fail('candidate_ids','unknown candidate');});});
   for(const [id,c] of chunks){const n=r.candidates.filter((f:any)=>f.chunk_id===id).length;if(c.zero_facts&&n)fail('zero_facts','chunk has candidates');if(c.status==='complete'&&!n&&!c.zero_facts)fail('zero_facts','complete zero-fact review must be explicit');}
-  if(bundle){const known=new Map(bundle.chunks.map(c=>[c.chunk_id,c]));for(const [id,c] of chunks){const chunk=known.get(id);if(!chunk)fail('chunk_id','not in bundle');const eventIds=new Set(chunk.events.map(e=>e.event_id));for(const e of c.reviewed_event_ids)if(!eventIds.has(e))fail('reviewed_event_ids','not in chunk');if(c.status==='complete'&&new Set(c.reviewed_event_ids).size!==eventIds.size)fail('reviewed_event_ids','complete chunk must cover all events');}const allowed=new Set(bundle.chunks.flatMap(c=>[...c.events,...c.context_events].map(e=>e.event_id)));for(const c of r.candidates)for(const ref of c.event_refs)if(!allowed.has(ref.event_id))fail('event_refs','not in bundle');}
+  if(bundle){const known=new Map(bundle.chunks.map(c=>[c.chunk_id,c]));for(const [id,c] of chunks){const chunk=known.get(id);if(!chunk)fail('chunk_id','not in bundle');const eventIds=new Set(chunk.events.map(e=>e.event_id));for(const e of c.reviewed_event_ids)if(!eventIds.has(e))fail('reviewed_event_ids','not in chunk');if(c.status==='complete'&&new Set(c.reviewed_event_ids).size!==eventIds.size)fail('reviewed_event_ids','complete chunk must cover all events');}const allowed=new Set(bundle.chunks.flatMap(c=>[...c.events,...c.context_events].map(e=>e.event_id)));const derivedAllowed=new Set([...allowed,...bundle.existing_facts.flatMap(f=>f.event_refs.map(ref=>ref.event_id))]);for(const c of r.candidates){if(bundle.kind!=='daily'&&c.disposition==='add'&&c.kind==='fact')fail('candidate','weekly/monthly cannot invent new source facts');for(const ref of c.event_refs)if(!(c.kind==='inference'||c.kind==='recommendation'?derivedAllowed:allowed).has(ref.event_id))fail('event_refs','not in bundle');}}
   return r as ReviewResult;
 }
 export function validateFactArtifact(value:unknown): FactArtifact { const r=version(value);string(r.batch_id,'batch_id');utc(r.created_at,'created_at');array(r.facts,'facts').forEach(f=>{version(f,'fact');string(f.fact_id,'fact_id');if(!Number.isSafeInteger(f.revision)||f.revision<1)fail('revision','expected positive revision');choice(f.action,['assert','replace','retract'],'action');refs(f.event_refs,'event_refs');refs(f.target_refs,'target_refs',true);});array(r.coverage,'coverage').forEach(validateCoverage);array(r.affected_dates,'affected_dates').forEach(v=>date(v,'affected_date'));array(r.affected_weeks,'affected_weeks').forEach(v=>date(v,'affected_week'));return r as FactArtifact; }
@@ -82,4 +82,50 @@ export function parseJsonPreservingIntegers(text:string): unknown {
   let result='',inString=false,escaped=false;
   for(let i=0;i<text.length;){const ch=text[i];if(inString){result+=ch;i++;if(escaped)escaped=false;else if(ch==='\\')escaped=true;else if(ch==='"')inString=false;continue;}if(ch==='"'){inString=true;result+=ch;i++;continue;}if(ch==='-'||/\d/.test(ch)){const m=text.slice(i).match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);if(m){const token=m[0];if(/^-?\d+$/.test(token)&&/^(-?)(0|[1-9]\d*)$/.test(token)&&(BigInt(token)>BigInt(Number.MAX_SAFE_INTEGER)||BigInt(token)<BigInt(Number.MIN_SAFE_INTEGER)))result+=JSON.stringify(token);else result+=token;i+=token.length;continue;}}result+=ch;i++;}
   try{return JSON.parse(result);}catch(e){throw new InputError(`invalid JSON: ${(e as Error).message}`);}
+}
+
+function analysisRef(value: unknown, path: string) {
+  const ref = version(value, path);
+  string(ref.logical_id, `${path}.logical_id`);
+  if (!Number.isSafeInteger(ref.revision) || ref.revision < 1) fail(path, 'expected positive revision');
+}
+
+export function validateWeeklyAnalysisResult(value: unknown): import('./types.ts').WeeklyAnalysisResult {
+  const result = version(value, 'weekly analysis');
+  const snapshot = version(result.snapshot, 'snapshot');
+  analysisRef(snapshot.analysis_ref, 'analysis_ref');
+  const weekEnd = date(snapshot.week_end, 'week_end');
+  if (new Date(`${weekEnd}T12:00:00Z`).getUTCDay() !== 0) fail('week_end', 'expected Sunday');
+  choice(snapshot.coverage_status, ['complete', 'partial', 'unknown'], 'coverage_status');
+  choice(snapshot.direction, ['aligned', 'divergent', 'unknown'], 'direction');
+  if (snapshot.coverage_status !== 'complete' && snapshot.direction !== 'unknown') fail('direction', 'incomplete coverage requires unknown direction');
+  array(snapshot.observations, 'observations').forEach(observation => {
+    version(observation, 'observation'); analysisRef(observation.observation_ref, 'observation_ref');
+    string(observation.summary, 'observation.summary'); string(observation.subject, 'observation.subject');
+    string(observation.responsibility_basis, 'responsibility_basis');
+    choice(observation.kind, ['fact', 'inference', 'recommendation'], 'observation.kind');
+    choice(observation.stage, ['candidate', 'formal'], 'stage'); refs(observation.evidence_refs, 'observation.evidence_refs', true);
+    array(observation.capability_ids, 'capability_ids').forEach(id => string(id, 'capability_id'));
+  });
+  array(snapshot.capabilities, 'capabilities').forEach(capability => {
+    version(capability, 'capability'); string(capability.capability_id, 'capability_id'); string(capability.explanation, 'explanation');
+    choice(capability.trend, ['improving', 'stable', 'declining', 'unknown'], 'trend'); refs(capability.evidence_refs, 'capability.evidence_refs', true);
+    if (snapshot.coverage_status !== 'complete' && capability.trend === 'declining') fail('trend', 'incomplete coverage cannot prove decline');
+  });
+  array(snapshot.goal_gaps, 'goal_gaps').forEach(gap => { version(gap, 'goal gap'); analysisRef(gap.goal_ref, 'goal_ref'); string(gap.description, 'gap.description'); refs(gap.evidence_refs, 'gap.evidence_refs', true); });
+  array(snapshot.patterns, 'patterns').forEach(pattern => string(pattern, 'pattern'));
+  if (snapshot.validation_action !== null) {
+    const action = version(snapshot.validation_action, 'validation_action'); analysisRef(action.action_ref, 'action_ref');
+    string(action.subject, 'action.subject'); string(action.description, 'action.description'); refs(action.evidence_refs, 'action.evidence_refs', true);
+    choice(action.state, ['active', 'completed', 'abandoned'], 'action.state');
+  }
+  const confirmations = array(result.proposed_confirmations, 'proposed_confirmations');
+  if (confirmations.length > 3) fail('proposed_confirmations', 'at most three');
+  confirmations.forEach(ref => analysisRef(ref, 'confirmation'));
+  if (result.prior_action_disposition !== null) {
+    const previous = version(result.prior_action_disposition, 'prior_action_disposition'); analysisRef(previous.action_ref, 'prior action ref');
+    choice(previous.disposition, ['continue', 'narrow', 'abandon'], 'prior action disposition'); string(previous.reason, 'reason'); refs(previous.evidence_refs, 'prior evidence', true);
+  }
+  utc(result.freshness_at, 'freshness_at');
+  return result as import('./types.ts').WeeklyAnalysisResult;
 }
