@@ -23,10 +23,12 @@ function enrichEvent(previous: SourceEvent, incoming: SourceEvent): SourceEvent 
   if(nativeCompatible){
     for(const key of ['sender_id','real_sender_id'])if(previous.context[key]!==undefined&&incoming.context[key]!==undefined&&String(previous.context[key])!==String(incoming.context[key]))throw new Error('Conflicting known sender');
     const retainedContext={...previous.context,...incoming.context};
+    for(const key of ['identity_verified','media_transcribed'])if(previous.context[key]===true)retainedContext[key]=true;
     if(previous.context.context_only===false||incoming.context.context_only===false)retainedContext.context_only=false;
     const candidate={...incoming,physical_order:previous.physical_order,generation:previous.generation,time_precision:previous.time_precision==='unknown'?incoming.time_precision:previous.time_precision,context:retainedContext};
     if(previous.utc_time.value&&incoming.utc_time.value&&previous.original_time.value!==null)candidate.original_time=previous.original_time;
     if(previous.journal_timezone.value===incoming.journal_timezone.value&&previous.journal_date.value===incoming.journal_date.value)candidate.journal_timezone_basis=previous.journal_timezone_basis;
+    if(previous.wire_timezone.value!==null)candidate.wire_timezone=previous.wire_timezone;
     previous={...previous,context:retainedContext};incoming=candidate;
   }
   const merged=structuredClone(previous);
@@ -156,9 +158,17 @@ export class SqliteStore implements Store {
     rangeCheck(query.range); return this.db.prepare("SELECT e.json FROM events e WHERE e.time>=? AND e.time<? AND e.classification='main' AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane=?) ORDER BY e.time,e.ordering,e.id LIMIT ?").all(normalized(query.range.from),normalized(query.range.to),query.lane!,kind,query.lane!,query.limit ?? 1000).map(parse<SourceEvent>);
   }
   getContextEvents(event: SourceEvent): SourceEvent[] {
-    if(!event.utc_time.value)return [];
-    const originalId=(event.context.review_slice as any)?.source_event_id??event.event_id;
-    return this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND (time,ordering,id)<(?,?,?) AND id!=? AND classification='main' ORDER BY time DESC,ordering DESC,id DESC LIMIT 3").all(event.source.provider,event.source.account_id,event.source.conversation_id,normalized(event.utc_time.value),event.physical_order,originalId,originalId).map(parse<SourceEvent>).reverse();
+    if (!event.utc_time.value) return [];
+    const originalId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
+    const group = event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true;
+    if (group) {
+      const anchor = Date.parse(event.utc_time.value);
+      return this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main' ORDER BY ABS(julianday(time)-julianday(?)),time,ordering,id LIMIT 12")
+        .all(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(new Date(anchor - 20 * 60000).toISOString()), normalized(new Date(anchor + 20 * 60000).toISOString()), originalId, normalized(event.utc_time.value))
+        .map(parse<SourceEvent>).sort((a,b) => normalized(a.utc_time.value!).localeCompare(normalized(b.utc_time.value!)) || a.physical_order.localeCompare(b.physical_order));
+    }
+    return this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND (time,ordering,id)<(?,?,?) AND id!=? AND classification='main' ORDER BY time DESC,ordering DESC,id DESC LIMIT 3")
+      .all(event.source.provider,event.source.account_id,event.source.conversation_id,normalized(event.utc_time.value),event.physical_order,originalId,originalId).map(parse<SourceEvent>).reverse();
   }
   private markUnit(event: SourceEvent, kind: string, lane: Lane, mirror = true) {
     if(kind==='daily' && mirror) this.markUnit(event,kind,lane==='live'?'history':'live',false);

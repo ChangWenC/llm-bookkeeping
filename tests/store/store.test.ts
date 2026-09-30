@@ -87,10 +87,16 @@ test('microsecond range boundaries remain precise and projection cannot cite unr
 
 test('proved native import/live transport metadata merges in both orders and context-only requires explicit inrange release',async()=>{
  for(const first of ['import','live']){
- const c=await config();const s=await createStore(c);const imported=event('native');imported.context={source_format:'export',owner_id:'Roy',context_only:true};imported.physical_order='file:offset:1';imported.original_time=value('1790769600');
+ const c=await config();const s=await createStore(c);const imported=event('native');imported.context={source_format:'export',owner_id:'Roy',context_only:true};imported.physical_order='file:offset:1';imported.original_time=value('2026-09-30T11:00:00+02:00');imported.wire_timezone=value('+02:00');imported.context.identity_verified=false;
  const live=event('native');live.context={identity_verified:true,sender_id:'Roy',context_only:false};live.physical_order='timestamp:native:1';live.time_precision='second';
  const a=first==='import'?imported:live;const b=first==='import'?live:imported;await s.saveCollection(collection([a],'live','first'));if(first==='import')assert.deepEqual(await s.listEvents({range}),[]);await s.saveCollection(collection([b],'live','second'));
  assert.equal((await s.status()).events,1);assert.deepEqual(await s.listWork('event_conflict'),[]);assert.equal((await s.listEvents({range}))[0].context.context_only,false);assert.ok((await s.listEvents({range}))[0].context.identity_verified);
  await s.saveCollection(collection([{...live,context:{...live.context,sender_id:'Other'}}],'live','sender-conflict'));assert.equal((await s.listWork('event_conflict')).length,1);s.close();
  }
+});
+
+
+test('group participation context includes both directions only within twenty minutes',async()=>{
+ const c=await config();const s=await createStore(c);const events=[event('outside','outside','2026-09-30T07:00:00Z'),event('before','before','2026-09-30T08:50:00Z'),event('anchor','self','2026-09-30T09:00:00Z'),event('after','after','2026-09-30T09:10:00Z')];
+ for(const e of events){e.source.conversation_id='synthetic@chatroom';e.context.context_only=e.event_id!=='anchor';}await s.saveCollection(collection(events));assert.deepEqual((await s.listEvents({range})).map(e=>e.event_id),['anchor']);assert.deepEqual(s.getContextEvents(events[2]).map(e=>e.event_id),['before','after']);s.close();
 });
