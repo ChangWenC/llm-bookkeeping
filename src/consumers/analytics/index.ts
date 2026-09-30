@@ -65,7 +65,7 @@ export async function prepareWeeklyAnalysis(store: Store, config: BookkeepingCon
     return { schema_version: 1, analysis_ref: { schema_version: 1, logical_id: 'weekly:' + weekEnd, revision: repository.latestRevision('weekly:' + weekEnd) + 1 }, ...(previousSnapshot ? { previous_snapshot: previousSnapshot } : {}), week_end: weekEnd, range, analysis_timezone: 'Europe/Amsterdam', facts, coverage,
         coverage_status: excluded || repository.unresolvedHistory() ? 'partial' : coverageStatus(config, coverage, range), previous_weeks: previous,
         prior_action: previousSnapshot ? (previousSnapshot.validation_action?.state === 'active' ? previousSnapshot.validation_action : null) : latest?.validation_action?.state === 'active' ? latest.validation_action : null,
-        confirmed_goal_refs: goals.map(goal => goal.contract_ref), confirmed_goals: goals, analytics_catalog: repository.catalog(config),
+        confirmed_goal_refs: goals.map(goal => goal.contract_ref), confirmed_goals: goals, analytics_catalog: repository.catalog(config, asOf),
         observation_candidates: repository.observations().filter(observation => observation.evidence_refs.some(ref => currentKeys.has(factKey(ref)))) };
 }
 const START = '<!-- bookkeeping-analytics:begin -->';

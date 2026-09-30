@@ -128,3 +128,14 @@ test('four-week SQL action audit counts continuation, narrowing and abandonment 
     assert.equal(reprepare.analysis_context!.prior_action, null); // A closed current-week action cannot resurrect the older week action.
     f.s.close();
 });
+test('current asOf views never apply future-dated pair confirmation or its later retraction early', async () => {
+    const f = await setup();
+    const future = '2026-10-02T12:00:00Z';
+    await f.consumer.review({ schema_version: 1, kind: 'review', events: [{ schema_version: 1, review_id: 'future-pair', target_ref: f.observation.observation_ref, action: 'confirm', correction: null, evidence_refs: [], created_at: future, selected_pairs: [f.pair('design')] }] });
+    assert.equal(f.repository.currentOutput('before', f.c, at).overlays.find(pair => pair.label === 'design')!.confirmed, false);
+    assert.equal(f.repository.currentOutput('after', f.c, future).overlays.find(pair => pair.label === 'design')!.confirmed, true);
+    await f.consumer.review({ schema_version: 1, kind: 'review', events: [{ schema_version: 1, review_id: 'future-undo', target_ref: f.observation.observation_ref, action: 'retract', correction: null, evidence_refs: [], created_at: '2026-10-03T12:00:00Z', retracts_review_id: 'future-pair' }] });
+    assert.equal(f.repository.currentOutput('still-confirmed', f.c, future).overlays.find(pair => pair.label === 'design')!.confirmed, true);
+    assert.equal(f.repository.currentOutput('undo-effective', f.c, '2026-10-03T12:00:00Z').overlays.find(pair => pair.label === 'design')!.confirmed, false);
+    f.s.close();
+});
