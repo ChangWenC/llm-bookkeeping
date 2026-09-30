@@ -74,6 +74,7 @@ export interface WeeklyAnalysisSnapshot extends Versioned {
   direction: 'aligned' | 'divergent' | 'unknown'; patterns: string[];
   validation_action: ValidationAction | null;
 }
+export interface FactsPage extends Versioned { snapshot_id: string; cutoff: string; offset: number; next_offset: number | null; total: number }
 export interface WeeklyAnalysisInput extends Versioned {
   analysis_ref?: AnalysisRevisionRef; previous_snapshot?: WeeklyAnalysisSnapshot;
   week_end: string; range: TimeRange; analysis_timezone: 'Europe/Amsterdam';
@@ -82,10 +83,12 @@ export interface WeeklyAnalysisInput extends Versioned {
   confirmed_goal_refs: AnalysisRevisionRef[];
   observation_candidates?: WeeklyObservation[];
   confirmed_goals?: GoalContract[];
+  facts_page?: FactsPage; prepared_work_ids?: string[];
 }
 export interface WeeklyAnalysisResult extends Versioned {
   snapshot: WeeklyAnalysisSnapshot; prior_action_disposition: PriorActionDisposition | null;
   proposed_confirmations: AnalysisRevisionRef[]; freshness_at: string;
+  completed_work_ids?: string[];
 }
 export interface AnalyticsReviewEvent extends Versioned {
   review_id: string; target_ref: AnalysisRevisionRef;
@@ -113,7 +116,7 @@ export interface ReviewReceipt extends Versioned {
 export interface MonthlyReviewInput extends Versioned {
   month: string; range: TimeRange; facts: FactRevision[]; coverage: SourceCoverage[];
   coverage_status: AnalysisCoverageStatus; manual_baselines: PageBaseline[];
-  prepared_work_ids?: string[];
+  prepared_work_ids?: string[]; facts_page?: FactsPage;
 }
 export interface MonthlyReviewResult extends Versioned {
   month: string; summary: string; fact_refs: FactRef[];
@@ -192,7 +195,7 @@ export interface LegacyImportResult extends Versioned { migration_key: string; r
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
 export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
-export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[] }
+export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }
 export interface CollectionBudget { max_duration_ms: number; max_bytes: number; max_directory_entries: number }
 export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig }

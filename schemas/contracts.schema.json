@@ -1090,6 +1090,44 @@
         "validation_action"
       ]
     },
+    "FactsPage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "snapshot_id": {
+          "type": "string"
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "number"
+        },
+        "next_offset": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "snapshot_id",
+        "cutoff",
+        "offset",
+        "next_offset",
+        "total"
+      ]
+    },
     "WeeklyAnalysisInput": {
       "type": "object",
       "properties": {
@@ -1164,6 +1202,15 @@
           "items": {
             "$ref": "#/$defs/GoalContract"
           }
+        },
+        "facts_page": {
+          "$ref": "#/$defs/FactsPage"
+        },
+        "prepared_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -1207,6 +1254,12 @@
         },
         "freshness_at": {
           "type": "string"
+        },
+        "completed_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -1445,6 +1498,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "facts_page": {
+          "$ref": "#/$defs/FactsPage"
         }
       },
       "required": [
