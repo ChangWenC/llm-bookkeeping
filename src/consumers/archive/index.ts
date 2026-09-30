@@ -22,7 +22,7 @@ function rewriteLinks(text: string, path: string, date: string, month: string): 
   return text.replace(/\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g, (whole, target: string, alias: string | undefined) => {
     const original = target.split('#')[0];
     if (!targets.has(original)) return whole;
-    return `[[回顾_${month.replaceAll('-', '_')}|${alias ?? `${date} 日记`}]]`;
+    return `[[回顾_${month.replaceAll('-', '_')}|${alias ?? target}]]`;
   });
 }
 function usableReview(bytes: Buffer | null, month: string): boolean {

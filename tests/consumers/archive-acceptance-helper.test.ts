@@ -18,7 +18,7 @@ test('controlled-clock archive helper confines writes, preserves full originals 
   const report = await runArchiveAcceptance(path, '2026-10-01T12:00:00Z');
   assert.equal(report.preserved_and_deleted, 2); assert.equal(report.retained, 1); assert.equal(report.scheduled_evidence, false);
   assert.ok((await readFile(monthly, 'utf8')).includes('[[回顾_2026_08|原有描述]]'));
-  assert.ok((await readFile(monthly, 'utf8')).includes('[[回顾_2026_08|2026-08-02 日记]]'));
+  assert.ok((await readFile(monthly, 'utf8')).includes('[[回顾_2026_08|日记_2026_08_02]]'));
   assert.ok((await readFile(retained, 'utf8')).includes('保留合成原文'));
   await writeFile(path, JSON.stringify({ ...config, wiki_root: '/private/tmp/outside-helper' }));
   await assert.rejects(runArchiveAcceptance(path, '2026-10-01T12:00:00Z'), /descendants/);

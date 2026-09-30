@@ -50,7 +50,7 @@ test('one-month report is read-only; apply preserves exact full originals and pr
   const archive = JSON.parse(await readFile(join(f.wiki, applied.pages.find(page => page.path === source)!.archive_path!), 'utf8'));
   assert.equal(archive.format, 'daily-journal-archive-v2'); assert.equal(Buffer.from(archive.original_bytes_base64, 'base64').toString(), original);
   assert.equal(archive.original_digest, digestBytes(Buffer.from(original))); assert.equal(archive.fact_refs[0].fact_id, 'fact:known');
-  assert.equal(await readFile(join(f.wiki, 'wiki/projects/项目.md'), 'utf8'), '[[回顾_2026_07|原描述]] [[回顾_2026_07|2026-07-15 日记]] [[日记_2026_07_150]]\n');
+  assert.equal(await readFile(join(f.wiki, 'wiki/projects/项目.md'), 'utf8'), '[[回顾_2026_07|原描述]] [[回顾_2026_07|日记_2026_07_15]] [[日记_2026_07_150]]\n');
   assert.equal((await f.store.listWork('archive', 'complete')).length, 1);
 });
 

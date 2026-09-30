@@ -60,3 +60,30 @@ test('prepared archive deletion never overwrites or deletes a manual daily revis
   const records = await readArchiveRecords(f.config);
   assert.equal(Buffer.from(String(records[0].record.original_bytes_base64), 'base64').toString(), original);
 });
+test('archive migrates root maintenance and new managed page backlinks, preserving every displayed label', async t => {
+  const f = await fixture(t);
+  const managed = ['log.md', 'log_archive.md', 'index.md', 'attention.md', 'roadmap.md', 'handoff.md', 'new-manual-page.md'];
+  const linked = '[[日记_2026_07_01|原描述]] [[日记_2026_07_01]] [[日记_2026_07_01#段落|]] [[日记_2026_07_010|相似名称]]';
+  for (const path of managed) await writeFile(join(f.config.wiki_root, path), linked);
+  const excluded = ['raw/source.md', 'wiki/personal/_evidence/frozen.md', 'schemas/personal.md', 'templates/journal.md', 'src/code.md', 'AGENTS.md'];
+  for (const path of excluded) {
+    await mkdir(join(f.config.wiki_root, path, '..'), { recursive: true });
+    await writeFile(join(f.config.wiki_root, path), linked);
+  }
+  const result = await createArchiveService(f.store, f.config, { now }).run({ month: '2026-07', mode: 'apply' });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const migrated = '[[回顾_2026_07|原描述]] [[回顾_2026_07|日记_2026_07_01]] [[回顾_2026_07|]] [[日记_2026_07_010|相似名称]]';
+  for (const path of managed) assert.equal(await readFile(join(f.config.wiki_root, path), 'utf8'), migrated);
+  for (const path of excluded) assert.equal(await readFile(join(f.config.wiki_root, path), 'utf8'), linked);
+  await assert.rejects(readFile(join(f.config.wiki_root, daily)), { code: 'ENOENT' });
+});
+test('final re-enumeration protects daily when a new root backlink appears after planning', async t => {
+  const f = await fixture(t), link = '[[日记_2026_07_01|稍后人工新建]]';
+  const result = await createArchiveService(f.store, f.config, { now, async faultArchive(stage) {
+    if (stage === 'before_delete') await writeFile(join(f.config.wiki_root, 'late-handoff.md'), link);
+  } }).run({ month: '2026-07', mode: 'apply' });
+  assert.equal(result.status, 'pending');
+  assert.equal(await readFile(join(f.config.wiki_root, daily), 'utf8'), original);
+  assert.equal(await readFile(join(f.config.wiki_root, 'late-handoff.md'), 'utf8'), link);
+  assert.ok(result.pages.some(page => /backlink appeared/.test(page.reason ?? '')));
+});

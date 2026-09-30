@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { BookkeepingConfig, Store, FactRevision } from '../../contracts/types.ts';
@@ -20,6 +20,10 @@ export async function effectiveMonthFacts(store: Store, month: string): Promise<
   return (await store.readEffectiveFacts({ range: monthRange(month) })).filter(fact => (fact.journal_date.value ?? fact.occurred_at.value?.slice(0, 10))?.startsWith(month))
     .sort((a, b) => (a.journal_date.value ?? a.occurred_at.value ?? '').localeCompare(b.journal_date.value ?? b.occurred_at.value ?? '') || a.fact_id.localeCompare(b.fact_id) || a.revision - b.revision);
 }
+/** Shared scope for backlink planning AND final deletion checks. Root Markdown
+ * maintenance pages are managed too, including newly created untracked pages.
+ * Bootloaders, code/config/schema/template directories and immutable evidence
+ * are outside this scope; only the wiki subtree is recursively scanned. */
 export async function listMarkdown(root: string): Promise<string[]> {
   const result: string[] = [];
   async function scan(path: string): Promise<void> {
@@ -35,7 +39,11 @@ export async function listMarkdown(root: string): Promise<string[]> {
     }
   }
   await scan('wiki');
-  try { await readFile(join(root, 'index.md')); result.push('index.md'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.name.endsWith('.md') || ['AGENTS.md', 'CLAUDE.md'].includes(entry.name)) continue;
+    if (entry.isSymbolicLink()) throw new Error(`Cannot enumerate Wiki symlink ${entry.name}`);
+    if (entry.isFile()) result.push(entry.name);
+  }
   return result.sort();
 }
 
