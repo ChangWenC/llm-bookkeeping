@@ -2000,6 +2000,9 @@
             "$ref": "#/$defs/CoverageGap"
           }
         },
+        "replay": {
+          "$ref": "#/$defs/SemanticReplayScope"
+        },
         "analysis_context": {
           "$ref": "#/$defs/WeeklyAnalysisInput"
         },
@@ -3163,6 +3166,56 @@
         "reused",
         "facts",
         "patches"
+      ]
+    },
+    "SemanticReplayRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "replay_key": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "cutoff": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "replay_key",
+        "source",
+        "range",
+        "cutoff"
+      ]
+    },
+    "SemanticReplayScope": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        }
+      },
+      "required": [
+        "schema_version",
+        "work_id",
+        "source",
+        "range"
       ]
     },
     "ProviderConfig": {

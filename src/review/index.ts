@@ -117,16 +117,24 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             throw new Error('Invalid review limit ' + key);
     return {
         async prepare(request: PrepareRequest): Promise<ReviewBundle[]> {
+            const replayWork = request.replay_id ? await store.getSemanticReplay(request.replay_id) : null;
+            if (request.replay_id && (!replayWork || request.kind !== 'daily' || request.period))
+                throw new Error('Semantic replay requires its explicit daily work scope without --period');
+            if (replayWork?.state === 'complete') return [];
+            if (replayWork) request = { ...request, cutoff: replayWork.payload.cutoff as string };
             if (request.kind === 'weekly')
                 return prepareWeeklyBundle(store, config, request);
             if (request.kind === 'monthly')
                 return prepareMonthlyBundle(store, config, request);
-            const range = requestRange(request, config);
+            const range = replayWork ? replayWork.payload.range as TimeRange : requestRange(request, config);
             const limits = config.limits;
-            const reviewed = store.getReviewedUnits(request.kind, request.lane);
+            const progressKind = replayWork ? 'replay:' + replayWork.work_id : request.kind;
+            const progressLane = replayWork ? 'history' : request.lane;
+            const reviewed = store.getReviewedUnits(progressKind, progressLane);
             // Each page fetch is bounded; fully reviewed sources are excluded in SQL so a historical prefix cannot starve new work.
-            const events = request.kind === 'daily' ? await store.getReviewableEvents({ range, lane: request.lane, limit: limits.chunk_events * limits.bundles_per_round * 4 }, request.kind) : [];
-            const effectiveFacts = await store.readEffectiveFacts({ range });
+            const events = replayWork ? store.getReplayEvents(replayWork.work_id, limits.chunk_events * limits.bundles_per_round * 4)
+                : request.kind === 'daily' ? await store.getReviewableEvents({ range, lane: request.lane, limit: limits.chunk_events * limits.bundles_per_round * 4 }, request.kind) : [];
+            const effectiveFacts = replayWork ? store.getReplayFacts(replayWork.work_id) : await store.readEffectiveFacts({ range });
             const facts = request.kind === 'daily' ? effectiveFacts : effectiveFacts.flatMap(f => {
                 const projection = f.analytics_projection?.value;
                 if (!projection)
@@ -135,6 +143,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             });
             const coverage = (await store.listCoverage(range)).filter(c => c.lane === request.lane);
             const unfinished = coverage.flatMap(c => c.gaps);
+            if (replayWork) unfinished.push(gap('Explicit semantic replay; only this work’s actual event slices are completed, capture coverage remains independent', range));
             unfinished.push(...store.getClassificationGaps(range).map(item => gap(item.reason, null, item.locator)));
             const requestedBaselines: PageBaseline[] = [];
             if (request.page_paths && (!Array.isArray(request.page_paths) || request.page_paths.some(path => typeof path !== 'string')))
@@ -182,7 +191,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                     else
                         unfinished.push(gap('Conversation context omitted by chunk byte budget', null, context.locator));
                 }
-                const chunk: ReviewChunk = { schema_version: 1, chunk_id: 'chunk:' + digest(canonical([request.kind, request.lane, pending.map(e => e.event_id), contextEvents.map(e => e.event_id)])), events: pending, context_events: contextEvents, body_bytes: bodyBytes };
+                const chunk: ReviewChunk = { schema_version: 1, chunk_id: 'chunk:' + digest(canonical([request.kind, request.lane, ...(replayWork ? [replayWork.work_id] : []), pending.map(e => e.event_id), contextEvents.map(e => e.event_id)])), events: pending, context_events: contextEvents, body_bytes: bodyBytes };
                 chunks.push(chunk);
                 pending = [];
                 bodyBytes = 0;
@@ -191,7 +200,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             const capacity = limits.bundles_per_round;
             const units = function* () {
                 for (const event of events)
-                    for (const unit of slices(event, limits.chunk_body_bytes, store.getReviewedSpans(request.kind, request.lane, event.event_id)))
+                    for (const unit of slices(event, limits.chunk_body_bytes, store.getReviewedSpans(progressKind, progressLane, event.event_id)))
                         if (!reviewed.has(unit.event_id))
                             yield unit;
             };
@@ -214,10 +223,10 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             }
             flush();
             if (!chunks.length) {
-                if (request.kind === 'daily' && !request.page_paths?.length && !events.length && (await store.listEvents({ range, lane: request.lane, limit: 1 })).length)
+                if (!replayWork && request.kind === 'daily' && !request.page_paths?.length && !events.length && (await store.listEvents({ range, lane: request.lane, limit: 1 })).length)
                     return [];
                 // Empty material is an explicit review decision; missing capture remains pending even if zero-facts is accepted.
-                const id = (request.page_paths?.length ? 'pages:' : 'empty:') + digest(canonical([request.kind, request.lane, range, coverage.map(c => ({ ...c, review_status: null })), facts, requestedBaselines]));
+                const id = (request.page_paths?.length ? 'pages:' : 'empty:') + digest(canonical([request.kind, request.lane, ...(replayWork ? [replayWork.work_id] : []), range, coverage.map(c => ({ ...c, review_status: null })), facts, requestedBaselines]));
                 if (reviewed.has(id))
                     return [];
                 chunks.push({ schema_version: 1, chunk_id: id, events: [], context_events: [], body_bytes: 0 });
@@ -225,7 +234,8 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             const bundles: ReviewBundle[] = [];
             let current: ReviewBundle | null = null;
             const omittedMarker = 'Bounded preparation metadata omitted';
-            const initial = (): ReviewBundle => ({ schema_version: 1, bundle_id: '', kind: request.kind, lane: request.lane, period: request.period ?? null, cutoff: request.cutoff, chunks: [], existing_facts: [], baselines: [], coverage: [], unfinished: [gap(omittedMarker, range)] });
+            const initial = (): ReviewBundle => ({ schema_version: 1, bundle_id: '', kind: request.kind, lane: request.lane, period: request.period ?? null, cutoff: request.cutoff, chunks: [], existing_facts: [], baselines: [], coverage: [], unfinished: [gap(omittedMarker, range)],
+                ...(replayWork ? { replay: { schema_version: 1 as const, work_id: replayWork.work_id, source: replayWork.payload.source as string, range } } : {}) });
             const finish = async () => {
                 if (!current)
                     return;

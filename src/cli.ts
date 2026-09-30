@@ -11,9 +11,9 @@ import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, S
 export const COMMANDS = ['collect','prepare','publish','consume','archive','import','migrate','replay','facts','analytics-review','status','backup','restore','validate'] as const;
 export interface ParsedCommand { command: typeof COMMANDS[number]; options: Record<string,string|boolean> }
 const allowed: Record<string, string[]> = {
-  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset'], publish: ['input', 'resume'],
+  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset', 'replay-id'], publish: ['input', 'resume'],
   consume: ['target'], archive: ['month', 'report', 'apply'], import: ['manifest'], migrate: ['manifest'],
-  replay: ['source', 'from', 'to'], facts: ['from', 'to'], 'analytics-review': ['input'],
+  replay: ['source', 'from', 'to', 'replay-key'], facts: ['from', 'to'], 'analytics-review': ['input'],
   status: [], backup: ['output'], restore: ['input', 'data-dir'], validate: ['scope'],
 };
 const booleans = new Set(['resume', 'report', 'apply']);
@@ -62,6 +62,7 @@ export function parseArgs(args: string[]): ParsedCommand {
       const kind = oneOf(options, 'kind', ['daily', 'weekly', 'monthly']);
       oneOf(options, 'lane', ['live', 'history']);
       required(options, 'output');
+      if (options['replay-id'] && (kind !== 'daily' || options.period)) throw new InputError('--replay-id requires daily preparation without --period');
       if (options.cutoff) utc(required(options, 'cutoff'), 'cutoff');
       for (const key of ['fact-offset', 'archive-context-offset']) if (options[key] !== undefined) {
         const value = required(options, key);
@@ -90,7 +91,11 @@ export function parseArgs(args: string[]): ParsedCommand {
       const from = utc(required(options, 'from'), 'from');
       const to = utc(required(options, 'to'), 'to');
       if (utcComparisonKey(from) >= utcComparisonKey(to)) throw new InputError('--from must precede --to');
-      if (command === 'replay') required(options, 'source');
+      if (command === 'replay') {
+        required(options, 'source');
+        if (options['replay-key'] && (!required(options, 'replay-key').trim() || required(options, 'replay-key').length > 512))
+          throw new InputError('--replay-key: nonempty key of at most 512 characters required');
+      }
       break;
     }
     case 'analytics-review': required(options, 'input'); break;
@@ -225,6 +230,12 @@ async function privateAtomicJson(directory: string, name: string, value: unknown
 async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string) {
   const options = parsed.options;
   cutoff = typeof options.cutoff === 'string' ? options.cutoff : cutoff;
+  if (options['replay-id']) {
+    const replay = await services.store.getSemanticReplay(required(options, 'replay-id'));
+    if (!replay) throw new InputError('Unknown semantic replay ID');
+    if (options.cutoff && utcComparisonKey(cutoff) !== utcComparisonKey(replay.payload.cutoff as string)) throw new InputError('Replay requires its original cutoff');
+    cutoff = replay.payload.cutoff as string;
+  }
   const outputDir = resolve(required(options, 'output'));
   await privateDirectory(outputDir, config);
   let pagePaths: string[] | undefined;
@@ -241,6 +252,7 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     fact_offset: options['fact-offset'] === undefined ? undefined : Number(options['fact-offset']),
     fact_snapshot: options['fact-snapshot'] as string | undefined,
     archive_context_offset: options['archive-context-offset'] === undefined ? undefined : Number(options['archive-context-offset']),
+    replay_id: options['replay-id'] as string | undefined,
   });
   if ((options['fact-offset'] !== undefined || options['fact-snapshot']) && bundles.some(bundle => !bundle.analysis_context?.facts_page && !bundle.monthly_context?.facts_page)) unavailable('Frozen fact pagination is not delivered by Reviewer');
   if (options['archive-context-offset'] !== undefined && bundles.some(bundle => !bundle.monthly_context?.archive_context_page)) unavailable('Archive context material reader is not delivered by Reviewer');
@@ -280,7 +292,7 @@ async function manifestCommand(parsed: ParsedCommand, services: RuntimeServices)
   return handler ? handler(manifest) : unavailable(parsed.command);
 }
 
-async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices) {
+async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string) {
   const source = required(parsed.options, 'source');
   const adapter = services.adapters.find(item => item.provider === source);
   if (!adapter) throw new InputError(`Unknown source ${source}`);
@@ -291,7 +303,12 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
     await services.store.saveCollection(batch);
     batches++;
   }
-  return { schema_version: 1, source, batches, range: commandRange(parsed.options) };
+  const range = commandRange(parsed.options);
+  const replayKey = typeof parsed.options['replay-key'] === 'string' ? parsed.options['replay-key']
+    : 'range:' + createHash('sha256').update(JSON.stringify([source, utcComparisonKey(range.from), utcComparisonKey(range.to)])).digest('hex');
+  const work = await services.store.requestSemanticReplay({ schema_version: 1, replay_key: replayKey, source, range, cutoff });
+  return { schema_version: 1, source, batches, range, replay_id: work.work_id, cutoff: work.payload.cutoff, review_state: work.state,
+    next_prepare: `prepare --kind daily --lane history --replay-id ${work.work_id} --output DIR` };
 }
 
 export async function executeCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string): Promise<unknown> {
@@ -309,7 +326,7 @@ export async function executeCommand(parsed: ParsedCommand, config: BookkeepingC
       ? services.archive({ month: required(options, 'month'), mode: options.apply ? 'apply' : 'report' })
       : unavailable('archive');
     case 'import': case 'migrate': return manifestCommand(parsed, services);
-    case 'replay': return replayCommand(parsed, config, services);
+    case 'replay': return replayCommand(parsed, config, services, cutoff);
     case 'facts': return { schema_version: 1, facts: await services.store.readEffectiveFacts({ range: commandRange(options) }) };
     case 'analytics-review': return services.analyticsReview
       ? services.analyticsReview(await readJson(required(options, 'input'))) : unavailable('analytics review');

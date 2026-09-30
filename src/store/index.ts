@@ -15,6 +15,8 @@ export { weekFor } from './domain.ts';
 import { refKey, utc, normalized, rangeCheck, version, unique, enrichEvent, factWeek, weekFor } from './domain.ts';
 import { correctCodexClassification, type ClassificationCorrection } from './codex-automation.ts';
 import type { RawFragment } from '../contracts/types.ts';
+import type { SemanticReplayRequest } from '../contracts/types.ts';
+import { SemanticReplayRepository } from './replay.ts';
 export interface StoreOptions {
     onTransactionStep?: (step: string) => void;
 }
@@ -37,6 +39,13 @@ export class SqliteStore implements Store {
         this.analyticsRepositoryInstance = new AnalyticsRepository(this.db);
     }
     close() { this.db.close(); }
+    private get replayRepository(): SemanticReplayRepository { return new SemanticReplayRepository(this.db); }
+    async requestSemanticReplay(request: SemanticReplayRequest): Promise<WorkItem> { return this.transaction(() => this.replayRepository.request(request)); }
+    async getSemanticReplay(id: string): Promise<WorkItem | null> { return this.replayRepository.get(id); }
+    getReplayEvents(id: string, limit: number): SourceEvent[] { return this.reconcileCodexPage(this.replayRepository.events(id, limit)).filter(event => event.classification === 'main'); }
+    getReplayFacts(id: string): FactRevision[] {
+        return this.effective().filter(fact => fact.event_refs.some(ref => this.replayRepository.contains(id, ref.event_id)));
+    }
     allocateId(namespace: string): string {
         if (!/^[a-z][a-z0-9_-]*$/i.test(namespace))
             throw new Error('Invalid ID namespace');
@@ -336,7 +345,12 @@ export class SqliteStore implements Store {
         if (bundle && !this.db.prepare('SELECT 1 FROM results WHERE bundle_id=?').get(bundle.bundle_id))
             for (const event of bundle.chunks.flatMap(chunk => [...chunk.events, ...chunk.context_events]))
                 this.reconcilePreparedSource(event);
-        return commitSemanticReview({ db: this.db, options: this.options, journalTimezone: this.journalTimezone, transaction: fn => this.transaction(fn), effective: () => this.effective(), allocateId: namespace => this.allocateId(namespace), putWork: item => this.putWork(item), markUnit: (event, kind, lane) => this.markUnit(event, kind, lane), coverageReview: (coverage, kind, empty) => this.coverageReview(coverage, kind, empty), analyticsHistoryRepository: () => this.analyticsHistoryRepository(), markFactMaterialRead: (id, refs) => this.markFactMaterialRead(id, refs) }, result);
+        return commitSemanticReview({ db: this.db, options: this.options, journalTimezone: this.journalTimezone, transaction: fn => this.transaction(fn), effective: () => this.effective(), allocateId: namespace => this.allocateId(namespace), putWork: item => this.putWork(item), markUnit: (event, kind, lane) => this.markUnit(event, kind, lane), coverageReview: (coverage, kind, empty) => this.coverageReview(coverage, kind, empty), analyticsHistoryRepository: () => this.analyticsHistoryRepository(), markFactMaterialRead: (id, refs) => this.markFactMaterialRead(id, refs), replayRepository: () => this.replayRepository, markReplayUnit: (event, id) => {
+            this.markUnit(event, 'replay:' + id, 'history', false);
+            const sourceId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
+            if (!this.db.prepare("SELECT 1 FROM reviewed_sources WHERE kind='daily' AND source_id=? LIMIT 1").get(sourceId))
+                this.markUnit(event, 'daily', 'history');
+        } }, result);
     }
     async listPendingPatches(): Promise<JournalPatch[]> { return this.db.prepare("SELECT json FROM patches WHERE status='pending' ORDER BY rowid").all().map(parse<JournalPatch>); }
     async markPatchStatus(id: string, status: FileStatus, reason: string | null = null) {

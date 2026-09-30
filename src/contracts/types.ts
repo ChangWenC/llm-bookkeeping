@@ -156,6 +156,7 @@ export interface ReviewBundle extends Versioned {
   bundle_id: string; kind: ReviewKind; lane: Lane; period: string | null; cutoff: string;
   chunks: ReviewChunk[]; existing_facts: FactRevision[]; baselines: PageBaseline[];
   coverage: SourceCoverage[]; unfinished: CoverageGap[];
+  replay?: SemanticReplayScope;
   analysis_context?: WeeklyAnalysisInput; monthly_context?: MonthlyReviewInput;
 }
 export interface ExplicitVerification extends Versioned { name: string; value: string; subject: string; verified_at: string; event_refs: EventRef[]; basis: 'user_explicit_verification' }
@@ -224,7 +225,9 @@ export interface LegacyImportResult extends Versioned { migration_key: string; r
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
 export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
-export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number }
+export interface SemanticReplayRequest extends Versioned { replay_key: string; source: string; range: TimeRange; cutoff: string }
+export interface SemanticReplayScope extends Versioned { work_id: string; source: string; range: TimeRange }
+export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number; replay_id?: string }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }
 export interface CollectionBudget { max_duration_ms: number; max_bytes: number; max_directory_entries: number }
 export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig }
@@ -260,6 +263,8 @@ export interface Store {
   close(): void | Promise<void>;
   allocateId(namespace: string): string;
   saveCollection(batch: CollectionBatch): Promise<void>;
+  requestSemanticReplay(request: SemanticReplayRequest): Promise<WorkItem>;
+  getSemanticReplay(work_id: string): Promise<WorkItem | null>;
   getCheckpoints(provider: string, lane: Lane): Promise<SourceCheckpoint[]>;
   listEvents(query: EventQuery): Promise<SourceEvent[]>;
   listCoverage(range: TimeRange): Promise<SourceCoverage[]>;

@@ -22,7 +22,7 @@ All commands accept `--config /absolute/config.json`.
 - `consume --target analytics|monthly|evidence|index|all`
 - `archive --month YYYY-MM --report|--apply`
 - `import --manifest FILE` / `migrate --manifest FILE`
-- `replay --source PROVIDER --from UTC --to UTC`
+- `replay --source PROVIDER --from UTC --to UTC [--replay-key KEY]`
 - `facts --from UTC --to UTC`
 - `analytics-review --input FILE`
 - `backup --output DIR`
@@ -30,6 +30,12 @@ All commands accept `--config /absolute/config.json`.
 - `validate --scope changed|all`
 
 Backup must use SQLite consistency API/VACUUM INTO, not copy a live DB. Restore always targets a new directory and must not overwrite production. Archive starts with one-month report and applies only after complete preserved originals, usable review, exact backlink transition and lock-held digest checks. Recovery compares complete desired/old bytes; it never resets the whole Wiki or database over later manual edits.
+
+After restore, local outbox export paths are reset to pending in the copied database. Run `publish --resume` with the restored data directory to regenerate and verify identical artifact bytes before ready registration. Facts, accepted reviews, user confirmations and each existing consumer acknowledgement are preserved; previously acknowledged consumers do not reprocess those batches.
+
+`replay` now recaptures and creates a durable semantic replay job, returning `replay_id`, its first cutoff and the next preparation command. Use `prepare --kind daily --lane history --replay-id ID --output NEW_DIR --config CONFIG` to review that explicit job; normal prepare still skips ordinarily reviewed sources. The default key is stable for source/from/to, so repeating a command does not reopen completed work. To deliberately review the same range again later, supply a new `--replay-key`. Existing key retries ignore a changed current clock. Events arriving after the first frozen request need a new key; they do not silently expand its scope. Results use explicit keep/add/replace/retract and unchanged original event identities. Partial slices and stale targets remain pending, and old accepted result content remains immutable.
+
+First historical weekly/monthly material uses facts effective at its cutoff; later replacements or withdrawals do not remove the old then-effective revision. Continue with the frozen snapshot and cutoff. An older incorrectly prepared snapshot is retained for audit; locally prepare a new first page without the old `fact_snapshot` rather than modifying accepted history.
 
 Archive freezes and saves all eligible initial original bytes before any backlink migration. Cross-linked daily sources retain their pre-migration originals across crashes; deletion baselines may advance only through matching applied same-month archive-link intents, never arbitrary newer manual bytes. Failed preservation delays related link targets, while independent pages can still archive.
 

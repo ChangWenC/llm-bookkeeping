@@ -6,6 +6,7 @@ import { validateAnalysisAgainstInput } from '../analytics/validation.ts';
 import { canonical, digest } from '../analytics/serialization.ts';
 import { utc, normalized, version, unique, refKey, factWeek, weekFor } from './domain.ts';
 import type { AnalyticsRepository } from './analytics.ts';
+import type { SemanticReplayRepository } from './replay.ts';
 interface SemanticStore {
     db: DatabaseSync;
     options: {
@@ -20,6 +21,8 @@ interface SemanticStore {
     coverageReview(coverage: SourceCoverage, kind: string, explicitEmpty: boolean): SourceCoverage;
     analyticsHistoryRepository(): AnalyticsRepository;
     markFactMaterialRead(id: string, refs: FactRef[]): void;
+    replayRepository(): SemanticReplayRepository;
+    markReplayUnit(event: SourceEvent, workId: string): void;
 }
 const parse = <T>(row: any): T => JSON.parse(row.json);
 export async function commitSemanticReview(store: SemanticStore, result: ReviewResult): Promise<ReviewCommit> {
@@ -37,6 +40,15 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         if (!row)
             throw new Error('Unknown review bundle');
         const bundle = parse<ReviewBundle>(row);
+        if (bundle.replay) {
+            if (bundle.kind !== 'daily') throw new Error('Semantic replay requires daily original event material');
+            store.replayRepository().validate(bundle.replay, bundle.cutoff);
+            for (const event of bundle.chunks.flatMap(chunk => chunk.events)) {
+                const sourceId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
+                if (!store.replayRepository().contains(bundle.replay.work_id, sourceId))
+                    throw new Error('Replay event outside frozen source scope');
+            }
+        }
         for (const event of bundle.chunks.flatMap(chunk => [...chunk.events, ...chunk.context_events])) {
             const id = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
             const current = store.db.prepare('SELECT classification FROM events WHERE id=?').get(id) as any;
@@ -130,7 +142,8 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             if (candidate.occurred_at.value)
                 utc(candidate.occurred_at.value);
             let reason: string | null = null;
-            if (bundle.kind === 'daily' && candidate.disposition === 'add' && candidate.event_refs.every(ref => store.db.prepare("SELECT 1 FROM reviewed_units WHERE kind='daily' AND event_id=? LIMIT 1").get(ref.event_id)))
+            const evidenceKind = bundle.replay ? 'replay:' + bundle.replay.work_id : 'daily';
+            if (bundle.kind === 'daily' && candidate.disposition === 'add' && candidate.event_refs.every(ref => store.db.prepare('SELECT 1 FROM reviewed_units WHERE kind=? AND event_id=? LIMIT 1').get(evidenceKind, ref.event_id)))
                 reason = 'Evidence already semantically reviewed; prepare again with existing facts';
             if (!candidate.subject.trim() || candidate.attribution?.subject_known === false)
                 reason = 'Unknown fact subject';
@@ -184,7 +197,8 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         store.options.onTransactionStep?.('review_facts');
         for (const review of result.chunks) {
             for (const id of review.reviewed_event_ids.filter(id => !heldEvents.has(id)))
-                store.markUnit(chunks.get(review.chunk_id)!.events.find(e => e.event_id === id)!, bundle.kind, bundle.lane);
+                if (bundle.replay) store.markReplayUnit(chunks.get(review.chunk_id)!.events.find(e => e.event_id === id)!, bundle.replay.work_id);
+                else store.markUnit(chunks.get(review.chunk_id)!.events.find(e => e.event_id === id)!, bundle.kind, bundle.lane);
             if (review.status === 'complete' && chunks.get(review.chunk_id)!.events.length === 0)
                 store.db.prepare('INSERT OR IGNORE INTO reviewed_units VALUES(?,?,?)').run(bundle.kind, bundle.lane, review.chunk_id);
             store.db.prepare('UPDATE chunks SET state=? WHERE id=?').run(failed.has(review.chunk_id) ? 'partial' : review.status, review.chunk_id);
@@ -193,6 +207,8 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         if (semanticContext?.facts_page && result.chunks.some(chunk => chunk.status === 'complete') && (result.analysis || result.monthly_review))
             store.markFactMaterialRead(semanticContext.facts_page.snapshot_id, semanticContext.facts.map(fact => 'fact_ref' in fact ? fact.fact_ref : { schema_version: 1, fact_id: fact.fact_id, revision: fact.revision }));
         store.options.onTransactionStep?.('review_chunks');
+        if (bundle.replay && !failed.size && result.chunks.length && result.chunks.every(chunk => chunk.status === 'complete'))
+            store.replayRepository().finish(bundle.replay.work_id, result.created_at);
         const patches: JournalPatch[] = [];
         for (const page of result.pages) {
             version(page);

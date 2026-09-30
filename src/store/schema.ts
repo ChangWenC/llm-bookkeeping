@@ -31,6 +31,7 @@ export function initializeSchema(db: DatabaseSync): void {
       CREATE TABLE IF NOT EXISTS acks(consumer TEXT NOT NULL,batch_id TEXT NOT NULL REFERENCES outbox(id),json TEXT NOT NULL,PRIMARY KEY(consumer,batch_id));
       CREATE TABLE IF NOT EXISTS intents(id TEXT PRIMARY KEY,json TEXT NOT NULL,state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS work(id TEXT PRIMARY KEY,json TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,migration_key TEXT UNIQUE);
+      CREATE TABLE IF NOT EXISTS semantic_replay_events(work_id TEXT NOT NULL REFERENCES work(id),event_id TEXT NOT NULL REFERENCES events(id),PRIMARY KEY(work_id,event_id));
       CREATE TABLE IF NOT EXISTS imports(migration_key TEXT PRIMARY KEY,json TEXT NOT NULL,result_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS legacy_mappings(source_id TEXT PRIMARY KEY,json TEXT NOT NULL);
     `);
