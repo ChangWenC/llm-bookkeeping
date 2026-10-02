@@ -2,6 +2,7 @@ import { MIGRATION_HARD_LIMITS } from '../contracts/migration-limits.ts';
 import { isAbsolute, resolve, relative, basename } from 'node:path';
 import type { Store, BookkeepingConfig, Manifest, WorkItem, FactRevision, LegacyImportBatch, SourceCheckpoint, CollectionBatch } from '../contracts/types.ts';
 import { zone, utc, date } from '../contracts/validation.ts';
+import { wechatConversationScope } from '../adapters/wechat-policy.ts';
 import { parseChatExport } from '../adapters/imports.ts';
 import { hash, unknown, gap } from '../adapters/common.ts';
 import { DataReader, type RecordFrame, type ReaderCheckpoint } from './reader.ts';
@@ -45,6 +46,11 @@ export function createMigrationService(store:Store,config:BookkeepingConfig,opti
         entryCheck(entry);if(/^schema_[a-z_]+\.json$/i.test(basename(entry.path))){result.status='inspected';continue;}
         if(kind==='import'&&entry.kind!=='chat_export'){result.pending.push('import_requires_chat_export_entry');continue;}
         if(kind==='migration'&&entry.kind==='chat_export'){result.pending.push('use_import_for_chat_exports');continue;}
+        if(entry.kind==='chat_export'&&(entry.provider??'wechat')==='wechat'){
+          const source=config.providers.find(source=>source.provider==='wechat'&&source.account_id===entry.account_id);
+          const admission=wechatConversationScope(source?.options??{},entry.conversation_id,entry.conversation_type);
+          if(!admission.admitted){result.status='inspected';result.pending.push(admission.reason!);continue;}
+        }
         if(report.bytes_read>=budget.max_bytes||report.records>=budget.max_records||Date.now()>=deadline){result.pending.push('manifest_budget_unread');continue;}
         const checkpointId='migration:'+hash(stable([entry.source_file_id,entry.kind,hash(stable(entry))]));
         const previous=checkpoints.find(c=>c.checkpoint_id===checkpointId);

@@ -502,7 +502,7 @@ test("ChatLab JSON/JSONL and legacy import preserve IDs, repetitions, no-offset 
   );
   const p = parseChatExport(legacy, "legacy-jsonl", manifest, config);
   assert.equal(p.events[0].utc_time.value, null);
-  assert.equal(p.events[0].role, "other");
+  assert.equal(p.events[0].role, "unknown");
   assert.notEqual(p.events[0].event_id, p.events[1].event_id);
   const zoned = parseChatExport(
     legacy,

@@ -18,12 +18,8 @@ import {
   chooseHistoryWindow,
   recordLateWindow,
 } from "./wechat-history.ts";
-import { selfAlias, selfMention, verifiedAliases } from "./wechat-identity.ts";
-const serviceChat = (id: string) =>
-  id === "systemholder" ||
-  id.toLowerCase() === "openimholder" ||
-  id === "brandservicesessionholder" ||
-  id.startsWith("gh_");
+import { resolveWechatSender, selfMention, verifiedAliases } from "./wechat-identity.ts";
+import { wechatConversationScope, wechatScopeError } from "./wechat-policy.ts";
 const nonemptyShard = (value: unknown) =>
   Array.isArray(value)
     ? value.length > 0
@@ -121,7 +117,7 @@ export function historyArgs(
 export function parseWechatSessions(
   text: string,
   limit: number,
-): { chats: string[]; gaps: CoverageGap[] } {
+): { chats: string[]; chat_types: Record<string, string>; gaps: CoverageGap[] } {
   const parsed = parseLossless(text);
   if (!parsed?.meta || !Array.isArray(parsed.rows))
     throw new Error("wechat_expected_sessions_meta_rows");
@@ -134,6 +130,7 @@ export function parseWechatSessions(
     gaps.push(gap("wechat_sessions_shards_or_status_partial"));
   if (parsed.rows.length >= limit) gaps.push(gap("wechat_sessions_limit_hit"));
   const chats: string[] = [];
+  const chat_types: Record<string, string> = {};
   for (const row of parsed.rows) {
     const id = row.username;
     if (typeof id !== "string" || !id) {
@@ -142,11 +139,11 @@ export function parseWechatSessions(
     }
     if (
       id === "filehelper" ||
-      (["private", "group"].includes(row.chat_type) && !serviceChat(id))
+      (["private", "group"].includes(row.chat_type) && wechatConversationScope({}, id, row.chat_type).admitted)
     )
-      chats.push(id);
+      { chats.push(id); chat_types[id] = row.chat_type; }
   }
-  return { chats: [...new Set(chats)], gaps };
+  return { chats: [...new Set(chats)], chat_types, gaps };
 }
 
 function verifiedRangeGaps(
@@ -217,6 +214,8 @@ export function parseWechatHistory(
   config: BookkeepingConfig,
   contextAnchors?: number[],
 ): { events: SourceEvent[]; gaps: CoverageGap[] } {
+  const admission = wechatConversationScope(source.options, chat);
+  if (!admission.admitted) return { events: [], gaps: [gap(admission.reason!, chat)] };
   const parsed = parseLossless(text);
   if (!parsed || !parsed.meta || !Array.isArray(parsed.rows))
     throw new Error("wechat_expected_meta_rows");
@@ -258,25 +257,13 @@ export function parseWechatHistory(
     meta.truncated === true
   )
     gaps.push(gap("wechat_shards_or_truncation_unknown", chat));
-  const isGroup = chat.endsWith("@chatroom");
+  const isGroup = admission.is_group;
   const candidates: SourceEvent[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < parsed.rows.length; i++) {
     const r = parsed.rows[i];
-    const aliasSelf = selfAlias(r, source.options);
-    const sender = r.sender_wxid ?? r.real_sender_id ?? (aliasSelf ? r.sender_name ?? r.sender_display_name ?? r.sender : null);
-    const senderId = sender == null ? null : String(sender);
-    const localSelf = source.options.self_ids_by_chat as
-      Record<string, unknown> | undefined;
-    const perChatSelf = new Set(
-      Array.isArray(localSelf?.[chat])
-        ? (localSelf![chat] as unknown[]).map(String)
-        : [],
-    );
-    const senderVerified =
-      verified && (r.sender_wxid != null || (r.real_sender_id != null && perChatSelf.size > 0) || aliasSelf);
-    const senderSelf =
-      r.sender_wxid != null ? self.has(senderId!) : r.real_sender_id != null ? perChatSelf.has(senderId!) : aliasSelf;
+    const sender = resolveWechatSender(r, source.options, chat);
+    const senderId = sender.sender_id;
     const native =
       r.server_id && String(r.server_id) !== "0"
         ? String(r.server_id)
@@ -297,7 +284,7 @@ export function parseWechatHistory(
     }
     if (!["text", "Text", 1, "1"].includes(kind))
       gaps.push(gap("wechat_media_not_transcribed", chat));
-    if (!senderId || !senderVerified)
+    if (sender.role === "unknown")
       gaps.push(gap("wechat_sender_unknown", chat));
     const e = event(
       {
@@ -306,12 +293,7 @@ export function parseWechatHistory(
         conversation: chat,
         message: native,
         body,
-        role:
-          senderVerified && senderId && senderSelf
-            ? "user"
-            : senderVerified && senderId
-              ? "other"
-              : "unknown",
+        role: sender.role,
         kind: String(kind),
         time: r.create_time,
         offset: i,
@@ -319,6 +301,8 @@ export function parseWechatHistory(
         generation: "0",
         context: {
           sender_id: senderId,
+          sender_wxid: r.sender_wxid == null ? (sender.role === "user" && senderId && self.has(senderId) ? senderId : null) : String(r.sender_wxid),
+          is_group: isGroup,
           is_mentioned: selfMention(r, body, source.options),
           identity_verified: verified,
           media_transcribed: false,
@@ -485,6 +469,8 @@ export class WechatAdapter implements SourceAdapter {
       yield make([], [], null, "disabled");
       return;
     }
+    const scopeError = wechatScopeError(this.source.options);
+    if (scopeError) { yield make([], [gap(scopeError)], null, "unavailable"); return; }
     let routedSource = this.source;
     if (this.source.options.routing === "managed_bundle") {
       try {
@@ -531,6 +517,7 @@ export class WechatAdapter implements SourceAdapter {
     let chats = Array.isArray(this.source.options.chats)
       ? this.source.options.chats.map(String)
       : [];
+    const chatTypes: Record<string, string> = {};
     const discoveryLocator = "wechat:@discovery";
     const previous = context.checkpoints.find(
       (c) =>
@@ -573,20 +560,14 @@ export class WechatAdapter implements SourceAdapter {
               : []),
           ]),
         ];
+        Object.assign(chatTypes, discovered.chat_types);
         discoveryGaps = discovered.gaps;
       } catch (error: any) {
         discoveryGaps.push(gap(`wechat_sessions_unavailable:${error.message}`));
       }
     }
     chats = [...new Set([...chats, ...(Array.isArray(this.source.options.pinned_chats) ? this.source.options.pinned_chats.map(String) : [])])];
-    chats = chats.filter(
-      (chat) =>
-        !serviceChat(chat) &&
-        !(
-          Array.isArray(this.source.options.ignored_chats) &&
-          this.source.options.ignored_chats.includes(chat)
-        ),
-    );
+    chats = chats.filter(chat => wechatConversationScope(this.source.options, chat, chatTypes[chat]).admitted);
     if (!chats.length) {
       yield make(
         [],

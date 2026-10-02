@@ -4,7 +4,8 @@ import type {
   CoverageGap,
 } from "../contracts/types.ts";
 import { event, gap, hash, parseLossless } from "./common.ts";
-import { selfAlias, selfMention, verifiedAliases } from "./wechat-identity.ts";
+import { wechatConversationScope } from "./wechat-policy.ts";
+import { resolveWechatSender, selfMention, verifiedAliases } from "./wechat-identity.ts";
 export interface ImportMetadata {
   account_id: string;
   conversation_id: string;
@@ -14,6 +15,8 @@ export interface ImportMetadata {
   self_aliases?: string[];
   mention_aliases?: string[];
   aliases_verified?: boolean;
+  self_ids_by_chat?: Record<string, string[]>;
+  sender_is_self_verified?: boolean;
   source_timezone?: string;
   locator: string;
   provider?: string;
@@ -34,13 +37,18 @@ export function parseChatExport(
   manifest: ImportMetadata,
   config: BookkeepingConfig,
 ): ParsedImport {
+  if (!manifest.account_id || !manifest.conversation_id || !manifest.locator)
+    throw new Error("import_requires_account_conversation_locator");
+  const provider = manifest.provider ?? "wechat";
+  const source = config.providers.find(source => source.provider === provider && source.account_id === manifest.account_id);
+  const admission = provider === "wechat" ? wechatConversationScope(source?.options ?? {}, manifest.conversation_id, manifest.conversation_type) : null;
+  if (admission && !admission.admitted)
+    return { events: [], gaps: [gap(admission.reason!, manifest.locator)], members: [], metadata: {} };
   const text = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : bytes;
   const gaps: CoverageGap[] = [];
   const members: any[] = [];
   let meta: any = {};
   const rows: { row: any; offset: number }[] = [];
-  if (!manifest.account_id || !manifest.conversation_id || !manifest.locator)
-    throw new Error("import_requires_account_conversation_locator");
   if (format.endsWith("jsonl")) {
     let offset = 0;
     let header = false;
@@ -92,7 +100,7 @@ export function parseChatExport(
   const self = new Set(
     manifest.self_ids ?? (manifest.owner_id ? [manifest.owner_id] : []),
   );
-  const aliasOptions = { ...manifest };
+  const aliasOptions = { ...manifest, self_ids: [...self] };
   if (!manifest.identity_verified || (!self.size && !verifiedAliases(aliasOptions, "self_aliases").length))
     gaps.push(gap("import_self_identity_unverified", manifest.locator));
   if (!manifest.coverage_verified || !manifest.known_range)
@@ -103,7 +111,8 @@ export function parseChatExport(
   const occurrences = new Map<string, number>();
   for (const { row: r, offset } of rows) {
     const chatlab = format.startsWith("chatlab");
-    const sender = String(r.sender_wxid ?? r.real_sender_id ?? r.sender ?? r.sender_id ?? "");
+    const resolved = resolveWechatSender(r, aliasOptions, manifest.conversation_id, chatlab);
+    const sender = resolved.sender_id;
     const server = r.server_id != null && String(r.server_id) !== "0" ? r.server_id : null;
     const native = r.platformMessageId ?? server ?? r.message_id ?? (r.local_id == null ? r.id : `local:${r.local_id}`);
     const body = r.content ?? r.message_content ?? r.display_text ?? r.text;
@@ -138,12 +147,7 @@ export function parseChatExport(
         message: native == null ? null : String(native),
         block: "0",
         body,
-        role:
-          manifest.identity_verified && (self.has(sender) || selfAlias(r, aliasOptions))
-            ? "user"
-            : manifest.identity_verified && sender
-              ? "other"
-              : "unknown",
+        role: resolved.role,
         time: timestamp,
         wireZone: manifest.source_timezone,
         offset,
@@ -152,6 +156,7 @@ export function parseChatExport(
         kind: String(kind),
         context: {
           sender_id: sender,
+          sender_wxid: r.sender_wxid == null ? (chatlab ? sender : resolved.role === "user" && sender && self.has(sender) ? sender : null) : String(r.sender_wxid),
           identity_verified: manifest.identity_verified === true,
           is_mentioned: selfMention(r, body, aliasOptions),
           media_transcribed: false,
@@ -180,7 +185,7 @@ export function parseChatExport(
     e.context.is_group = isGroup;
     const anchor = manifest.identity_verified === true && (e.role === "user" || e.context.is_mentioned === true);
     const inRange = e.utc_time.value !== null && !!manifest.known_range && Date.parse(e.utc_time.value) >= Date.parse(manifest.known_range.from) && Date.parse(e.utc_time.value) < Date.parse(manifest.known_range.to);
-    e.context.context_only = !inRange || manifest.identity_verified !== true || !sender || (isGroup && !anchor);
+    e.context.context_only = !inRange || manifest.identity_verified !== true || resolved.role === "unknown" || (isGroup && !anchor);
     if (isGroup && !anchor) {
       e.context.participation_window_status = "unknown";
       gaps.push(gap("import_group_participation_window_pending", manifest.locator));
