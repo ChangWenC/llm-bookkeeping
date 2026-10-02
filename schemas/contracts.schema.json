@@ -2000,6 +2000,9 @@
             "$ref": "#/$defs/CoverageGap"
           }
         },
+        "source": {
+          "type": "string"
+        },
         "replay": {
           "$ref": "#/$defs/SemanticReplayScope"
         },
@@ -2389,6 +2392,9 @@
           }
         },
         "created_at": {
+          "type": "string"
+        },
+        "source": {
           "type": "string"
         },
         "analysis": {
@@ -3216,6 +3222,109 @@
         "work_id",
         "source",
         "range"
+      ]
+    },
+    "WechatPersonMapping": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "wxid": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "wiki_path": {
+          "type": "string"
+        },
+        "relationship": {
+          "type": "string"
+        },
+        "verified": {}
+      },
+      "required": [
+        "schema_version",
+        "wxid",
+        "display_name",
+        "wiki_path",
+        "relationship",
+        "verified"
+      ]
+    },
+    "ProviderStageOutcome": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "provider": {
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "prepare",
+            "material",
+            "publish"
+          ]
+        },
+        "execution_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bundle_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "provider",
+        "stage",
+        "execution_status",
+        "reason",
+        "bundle_ids"
+      ]
+    },
+    "PreparationResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "bundles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewBundle"
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderStageOutcome"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "bundles",
+        "providers"
       ]
     },
     "ProviderConfig": {

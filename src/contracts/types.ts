@@ -156,6 +156,7 @@ export interface ReviewBundle extends Versioned {
   bundle_id: string; kind: ReviewKind; lane: Lane; period: string | null; cutoff: string;
   chunks: ReviewChunk[]; existing_facts: FactRevision[]; baselines: PageBaseline[];
   coverage: SourceCoverage[]; unfinished: CoverageGap[];
+  source?: string;
   replay?: SemanticReplayScope;
   analysis_context?: WeeklyAnalysisInput; monthly_context?: MonthlyReviewInput;
 }
@@ -179,6 +180,7 @@ export interface JournalSuggestion extends Versioned {
 export interface ReviewResult extends Versioned {
   result_id: string; bundle_id: string; chunks: ChunkReview[]; candidates: FactCandidate[];
   pages: JournalSuggestion[]; created_at: string;
+  source?: string;
   analysis?: WeeklyAnalysisResult; monthly_review?: MonthlyReviewResult;
 }
 export interface FactRevision extends Versioned {
@@ -223,11 +225,11 @@ export interface LegacyIdMapping extends Versioned { source_id: string; target_i
 export interface LegacyImportBatch extends Versioned { migration_key: string; facts: FactRevision[]; mappings: LegacyIdMapping[]; work: WorkItem[] }
 export interface LegacyImportResult extends Versioned { migration_key: string; reused: boolean; imported_facts: number; unresolved: number }
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
-export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean }
+export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean; source?: string }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
 export interface SemanticReplayRequest extends Versioned { replay_key: string; source: string; range: TimeRange; cutoff: string }
 export interface SemanticReplayScope extends Versioned { work_id: string; source: string; range: TimeRange }
-export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number; replay_id?: string }
+export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number; replay_id?: string; source?: string; max_bundles?: number; range?: TimeRange }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }
 export interface CollectionBudget { max_duration_ms: number; max_bytes: number; max_directory_entries: number }
 export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig }
@@ -238,6 +240,17 @@ export interface SourceAdapter {
   collect(request: CollectRequest, context: AdapterContext): AsyncIterable<CollectionBatch>;
   replay?(range: TimeRange, context: AdapterContext): AsyncIterable<CollectionBatch>;
 }
+/** Private inline configuration: never commit real entries. Stable native contact IDs only. */
+export interface WechatPersonMapping extends Versioned {
+  wxid: string; display_name: string; wiki_path: string; relationship: string; verified: true;
+}
+/** Undefined allowlist retains prior participation policy; [] excludes every group. */
+export interface WechatScopeOptions { group_allowlist?: string[]; private_person_registry?: WechatPersonMapping[] }
+export interface ProviderStageOutcome extends Versioned {
+  provider: string; stage: 'prepare' | 'material' | 'publish';
+  execution_status: 'complete' | 'partial' | 'unavailable'; reason: string | null; bundle_ids: string[];
+}
+export interface PreparationResult extends Versioned { bundles: ReviewBundle[]; providers: ProviderStageOutcome[] }
 export interface ProviderConfig extends Versioned {
   provider: string; enabled: boolean; roots: string[]; account_id: string;
   options: Record<string, unknown>;
@@ -293,6 +306,7 @@ export interface Store {
 }
 export interface Reviewer {
   prepare(request: PrepareRequest): Promise<ReviewBundle[]>;
+  prepareWithOutcomes?(request: PrepareRequest): Promise<PreparationResult>;
   accept(result: ReviewResult): Promise<ReviewCommit>;
 }
 export interface Publisher {
