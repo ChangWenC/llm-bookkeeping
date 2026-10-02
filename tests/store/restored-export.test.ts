@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createStore, restoreStore, canonical } from '../../src/store/index.ts';
+import { createStore, restoreStore, canonical, digest } from '../../src/store/index.ts';
 import { createPublisher } from '../../src/publish/index.ts';
 import { createMonthlyConsumer } from '../../src/consumers/monthly/index.ts';
 import { config, collection, bundle, result, range } from './fixtures.ts';
@@ -24,7 +24,9 @@ test('ready backup restores to new data directory, regenerates the same export, 
     const facts = canonical(await store.readEffectiveFacts({ range })), accepted = canonical(await store.getReviewResult(review.result_id));
     const goal = canonical(store.analyticsPort().confirmedGoals(c, '2026-09-30T13:00:00Z'));
     const backup = await store.backup(join(c.data_dir, 'backup'));
-    const restoredDir = join(c.data_dir, 'restored'); await restoreStore(backup.path, restoredDir);
+    const restoredDir = join(c.data_dir, 'restored'), restoredCopy = await restoreStore(backup.path, restoredDir);
+    assert.equal(restoredCopy.sha256, digest(await readFile(restoredCopy.path)));
+    assert.notEqual(restoredCopy.sha256, backup.sha256, 'Restore hashes final target bytes after resetting ready outbox paths');
     store.close();
     await rm(join(c.data_dir, 'facts'), { recursive: true }); // Original projection no longer exists.
     const restoredConfig = { ...c, data_dir: restoredDir }, restored = await createStore(restoredConfig);

@@ -1,9 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
-import { readFile } from 'node:fs/promises';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import type { FactArtifact, FileIntent, ReviewCommit, ReviewResult, WorkItem } from '../contracts/types.ts';
 import { canonical, digest } from '../analytics/serialization.ts';
+import { fileSha256, fileSha256Sync } from './file-hash.ts';
 import { utc } from './domain.ts';
 
 export interface MetadataBatchRecoveryPlan {
@@ -100,8 +100,8 @@ function inspect(store: RecoveryStore, before: DatabaseSync, batchId: string, sh
 async function withBefore<T>(store: RecoveryStore, beforePath: string, operation: (before: DatabaseSync, sha: string)=>T): Promise<T> {
  assert(isAbsolute(beforePath) && resolve(beforePath)!==resolve(store.path),'before snapshot must be a separate absolute path');
  assert(!existsSync(beforePath+'-wal') || statSync(beforePath+'-wal').size===0,'before snapshot has an active WAL');
- const bytes=await readFile(beforePath),sha=digest(bytes),before=new DatabaseSync(beforePath,{readOnly:true});
- try { before.exec('BEGIN');const result=operation(before,sha);before.exec('ROLLBACK');assert(digest(await readFile(beforePath))===sha,'before snapshot changed during inspection');return result; }
+ const sha=await fileSha256(beforePath),before=new DatabaseSync(beforePath,{readOnly:true});
+ try { before.exec('BEGIN');const result=operation(before,sha);before.exec('ROLLBACK');assert(await fileSha256(beforePath)===sha,'before snapshot changed during inspection');return result; }
  finally { before.close(); }
 }
 export async function planMetadataBatchRecovery(store: RecoveryStore, batchId: string, beforePath: string): Promise<MetadataBatchRecoveryPlan> {
@@ -119,7 +119,7 @@ export async function applyMetadataBatchRecovery(store: RecoveryStore, plan: Met
    assert(row,'missing saved restoration intent');const replacement=JSON.parse(String(row.json)) as FileIntent;
    assert(replacement.operation_id.startsWith('metadata-recovery:') && replacement.state==='applied' && replacement.path===original.path && replacement.baseline_digest===original.desired_digest && replacement.desired_digest===original.baseline_digest && replacement.desired_bytes_base64===original.backup_bytes_base64 && replacement.backup_bytes_base64===original.desired_bytes_base64 && replacement.fact_refs.length===0,'restoration does not prove exact original backup bytes');
   }
-  assert(digest(readFileSync(beforePath))===sha,'before snapshot changed before cancellation');
+  assert(fileSha256Sync(beforePath)===sha,'before snapshot changed before cancellation');
   const auditId=plan.plan_id+':audit';
   store.putWork({schema_version:1,work_id:auditId,kind:'metadata_recovery_audit',lane:'history',state:'complete',payload:{batch_id:plan.batch_id,before_sha256:sha,plan_id:plan.plan_id,closed_work_ids:plan.work_ids,restored_operations:restored,consumer_scopes:['analytics','monthly','monthly-display'],business_facts_changed:false,review_coverage_changed:false},reason:'Canceled spurious derived scheduling from a proven page-only metadata batch; original accepted artifacts and file intents retained',migration_key:null,updated_at:at});
   for(const id of plan.work_ids) {

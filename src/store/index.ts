@@ -1,9 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, copyFile, stat, chmod } from 'node:fs/promises';
+import { mkdir, copyFile, stat, chmod } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { BookkeepingConfig, Store, CollectionBatch, SourceCheckpoint, Lane, EventQuery, SourceEvent, TimeRange, SourceCoverage, ReviewBundle, ReviewChunk, ReviewResult, ReviewCommit, FactRevision, FactRef, FactQuery, JournalPatch, FileStatus, OutboxEntry, FactArtifact, ConsumerAck, FileIntent, WorkItem, LegacyImportBatch, LegacyImportResult } from '../contracts/types.ts';
 import { planMetadataBatchRecovery, applyMetadataBatchRecovery, type MetadataBatchRecoveryPlan, type RestoredMetadataOperation } from './metadata-recovery.ts';
+import { fileSha256 } from './file-hash.ts';
 import { initializeSchema } from './schema.ts';
 import { foldFacts } from './facts.ts';
 import { validateReviewResult } from '../contracts/validation.ts';
@@ -591,7 +592,7 @@ export class SqliteStore implements Store {
         const path = join(outputDir, 'bookkeeping-' + randomUUID() + '.sqlite');
         this.db.prepare('VACUUM INTO ?').run(path);
         await chmod(path, 0o600);
-        return { path, sha256: digest(await readFile(path)) };
+        return { path, sha256: await fileSha256(path) };
     }
 }
 export async function createStore(config: BookkeepingConfig, options: StoreOptions = {}): Promise<SqliteStore> {
@@ -642,5 +643,5 @@ export async function restoreStore(input: string, dataDir: string): Promise<{
         restored.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE; UPDATE outbox SET status='pending',export_path=NULL; COMMIT;");
     }
     finally { restored.close(); }
-    return { path, sha256: digest(await readFile(path)) };
+    return { path, sha256: await fileSha256(path) };
 }
