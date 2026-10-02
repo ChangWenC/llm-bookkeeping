@@ -4,6 +4,7 @@ import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {parseArgs,runCli,executeCommand} from '../src/cli.ts';
+import {utcComparisonKey} from '../src/contracts/validation.ts';
 import {config,zeroReview} from './fixtures/basic.ts';
 import {createRuntime,UnavailableError} from '../src/runtime.ts';
 const valid=[['collect','--lane','live'],['prepare','--kind','daily','--lane','history','--output','/tmp/bundles'],['publish','--resume'],['consume','--target','all'],['archive','--month','2026-08','--report'],['import','--manifest','/tmp/manifest.json'],['migrate','--manifest','/tmp/manifest.json'],['replay','--source','codex','--from','2026-01-01T00:00:00Z','--to','2026-02-01T00:00:00Z'],['facts','--from','2026-01-01T00:00:00Z','--to','2026-02-01T00:00:00Z'],['analytics-review','--input','/tmp/review.json'],['status'],['backup','--output','/tmp/backup'],['restore','--input','/tmp/backup','--data-dir','/tmp/restored'],['validate','--scope','all']];
@@ -17,5 +18,5 @@ test('collect adapter exception persists unavailable coverage and retry work',as
   const saved:any[]=[];const work:any[]=[];let id=0;
   const services:any={store:{allocateId:(ns:string)=>`${ns}:${++id}`,getCheckpoints:async()=>[],saveCollection:async(batch:any)=>saved.push(batch),enqueueWork:async(item:any)=>work.push(item),listCoverage:async()=>saved.flatMap(batch=>batch.coverage)},adapters:[{provider:'codex',account_id:'synthetic',async *collect(){throw new Error('Synthetic source failed');}}]};
   const result:any=await executeCommand(parseArgs(['collect','--lane','live']),config as any,services,'2026-09-30T12:00:00Z');
-  assert.equal(result.providers[0].execution_status,'partial');assert.equal(saved[0].coverage[0].capture_status,'unavailable');assert.equal(work[0].kind,'collection_retry');assert.deepEqual(work[0].payload.range,saved[0].coverage[0].query_range);
+  assert.equal(result.providers[0].execution_status,'partial');assert.equal(saved[0].coverage[0].capture_status,'unavailable');assert.equal(work[0].kind,'collection_retry');assert.deepEqual(work[0].payload.range,{...saved[0].coverage[0].query_range,from:utcComparisonKey(saved[0].coverage[0].query_range.from),to:utcComparisonKey(saved[0].coverage[0].query_range.to)});
 });

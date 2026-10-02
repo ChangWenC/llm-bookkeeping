@@ -222,3 +222,84 @@ test('real scoped CLI preserves already rewritten normal generations and native 
     assert.deepEqual((await store.getCheckpoints('codex', 'history')).filter(row => row.cursor.manual_capture_scope === undefined), checkpoints);
   } finally { store.close(); }
 });
+
+test('collection retry identities bind the frozen cutoff and known source identity conflicts do not claim a database outage or block peers', async t => {
+  const f = await fixture(t), store = await createStore(f.config);
+  f.config.providers.push({ schema_version: 1, provider: 'wechat', account_id: 'synthetic-wechat', enabled: true, roots: [], options: {} });
+  const healthy = collection([], 'history', 'peer-synthetic-healthy'); healthy.checkpoints = []; healthy.coverage = [{ ...healthy.coverage[0], provider: 'wechat', account_id: 'synthetic-wechat', query_range: range, cutoff }];
+  const adapters: any[] = [{ provider: 'codex', account_id: 'synthetic-account', async *collect() { throw new Error('Synthetic source unavailable'); } }, { provider: 'wechat', account_id: 'synthetic-wechat', async *collect() { yield healthy; } }];
+  const args = ['collect', '--lane', 'history', '--from', range.from, '--to', range.to];
+  try {
+    for (const frozen of [cutoff, '2026-10-03T16:00:00Z', '2026-10-02T16:00:00.000Z']) {
+      const receipt: any = await executeCommand(parseArgs([...args, '--cutoff', frozen]), f.config, { store, adapters } as any, '2026-10-05T00:00:00Z');
+      assert.equal(receipt.providers[0].execution_status, 'partial'); assert.equal(receipt.providers[1].execution_status, 'complete');
+    }
+    const retries = await store.listWork('collection_retry');
+    assert.equal(retries.length, 2); assert.notEqual(retries[0].work_id, retries[1].work_id);
+    assert.deepEqual(retries.map(item => Date.parse(item.payload.cutoff as string)), [Date.parse(cutoff), Date.parse('2026-10-03T16:00:00Z')]);
+    for (const conflict of ['Work identity conflict', 'Collection batch identity conflict']) {
+      const save = store.saveCollection.bind(store); let failed = false;
+      store.saveCollection = async captured => { if (!failed && captured.events.length) { failed = true; throw new Error(conflict); } await save(captured); };
+      const failing = collection([event('synthetic-conflict-' + conflict)], 'history', 'synthetic-conflict-' + conflict);
+      const sources: any[] = [{ provider: 'codex', account_id: 'synthetic-account', async *collect() { yield failing; } }, adapters[1]];
+      const receipt: any = await executeCommand(parseArgs([...args, '--cutoff', cutoff]), f.config, { store, adapters: sources } as any, cutoff);
+      assert.equal(receipt.providers[0].failure_kind, 'collection_identity_conflict'); assert.equal(receipt.providers[0].reason, conflict);
+      assert.equal(receipt.providers[1].execution_status, 'complete'); assert.equal((await store.status()).pending_exports, 0);
+      store.saveCollection = save;
+    }
+    store.saveCollection = async () => { const error = new Error('Synthetic SQLite write failure'); Object.assign(error, { code: 'ERR_SQLITE_ERROR' }); throw error; };
+    await assert.rejects(executeCommand(parseArgs([...args, '--cutoff', cutoff]), f.config, { store, adapters: [{ provider: 'codex', async *collect() { yield healthy; } }] } as any, cutoff), (error: any) => error.code === 'BOOKKEEPING_STORAGE_FAILURE');
+  } finally { store.close(); }
+});
+
+test('six frozen scoped history rounds preserve native IDs and ordinary checkpoints after live capture of an unresolved native event', async t => {
+  const f = await fixture(t);
+  const source = join(f.config.providers[0].roots[0], 'session.jsonl');
+  await writeFile(source, [
+    { timestamp: '2026-09-30T18:00:00Z', type: 'session_meta', payload: { id: 'synthetic-unknown-time', source: 'vscode', originator: 'Codex Desktop' } },
+    { type: 'event_msg', payload: { type: 'user_message', id: 'synthetic-native-unknown-time', message: 'Synthetic original with unknown timestamp.' } },
+  ].map(value => JSON.stringify(value) + '\n').join(''));
+  const live = await f.cli(['collect', '--lane', 'live', '--source', 'codex', '--cutoff', cutoff]); assert.equal(live.code, 0, live.diagnostics);
+  let store = await createStore(f.config); let nativeIds: unknown, ordinary: unknown;
+  try {
+    nativeIds = store.db.prepare('SELECT id FROM events ORDER BY id').all();
+    ordinary = await store.getCheckpoints('codex', 'live');
+    assert.equal((await store.listWork('event_identity_time')).length, 1);
+  } finally { store.close(); }
+  const frozen = f.scoped(range.from, cutoff); let scope: string | null = null;
+  for (let round = 1; round <= 6; round++) {
+    const receipt = await f.cli(frozen); assert.equal(receipt.code, 0, `Round${round}: ${receipt.diagnostics}`);
+    assert.equal(receipt.json.providers[0].execution_status, 'complete', `Round${round}: ${receipt.json.providers[0].reason}`);
+    scope ??= receipt.json.capture_scope; assert.equal(receipt.json.capture_scope, scope);
+  }
+  store = await createStore(f.config);
+  try {
+    assert.deepEqual(store.db.prepare('SELECT id FROM events ORDER BY id').all(), nativeIds);
+    assert.deepEqual(await store.getCheckpoints('codex', 'live'), ordinary);
+    assert.equal((await store.listWork('event_identity_time')).length, 1);
+    assert.ok((await store.getCheckpoints('codex', 'history')).every(item => item.cursor.manual_capture_scope === scope));
+  } finally { store.close(); }
+});
+
+test('six real Claude scoped metadata-only EOF captures persist honest fragment changes without reusing normal progress', async t => {
+  const f = await fixture(t); f.config.providers[0].provider = 'claude'; await writeFile(f.path, JSON.stringify(f.config));
+  await writeFile(join(f.config.providers[0].roots[0], 'session.jsonl'), [
+    { type: 'file-history-snapshot', sessionId: 'synthetic-claude-metadata', timestamp: '2026-09-30T18:00:00Z', snapshot: { trackedFileBackups: {} } },
+    { type: 'progress', sessionId: 'synthetic-claude-metadata', timestamp: '2026-09-30T18:01:00Z', data: { type: 'synthetic-progress' } },
+  ].map(value => JSON.stringify(value) + '\n').join(''));
+  const normal = await f.cli(['collect', '--lane', 'history', '--source', 'claude', '--cutoff', cutoff]); assert.equal(normal.code, 0, normal.diagnostics);
+  let store = await createStore(f.config), ordinary: unknown;
+  try { ordinary = await store.getCheckpoints('claude', 'history'); }
+  finally { store.close(); }
+  const frozen = ['collect', '--lane', 'history', '--source', 'claude', '--from', range.from, '--to', cutoff, '--cutoff', cutoff];
+  for (let round = 1; round <= 6; round++) {
+    const receipt = await f.cli(frozen); assert.equal(receipt.code, 0, `Round${round}: ${receipt.diagnostics}`);
+    assert.equal(receipt.json.providers[0].execution_status, 'complete', `Round${round}: ${receipt.json.providers[0].reason}`);
+  }
+  store = await createStore(f.config);
+  try {
+    assert.deepEqual((await store.getCheckpoints('claude', 'history')).filter(item => item.cursor.manual_capture_scope === undefined), ordinary);
+    assert.equal((await store.status()).events, 0);
+    assert.ok(store.db.prepare('SELECT COUNT(*) AS n FROM collections').get()!.n! >= 2);
+  } finally { store.close(); }
+});

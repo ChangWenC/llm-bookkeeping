@@ -187,10 +187,12 @@ async function recordCollectionFailure(
     events: [], fragments: [], coverage, checkpoints: [],
   });
   for (const account of accountIds) {
-    const identity = createHash('sha256').update(JSON.stringify([adapter.provider, account, lane, query])).digest('hex');
+    const retryRange = { schema_version: 1 as const, from: utcComparisonKey(query.from), to: utcComparisonKey(query.to) };
+    const retryCutoff = utcComparisonKey(cutoff);
+    const identity = createHash('sha256').update(JSON.stringify([adapter.provider, account, lane, retryRange, retryCutoff])).digest('hex');
     await services.store.enqueueWork({
       schema_version: 1, work_id: `collection-retry:${identity}`, kind: 'collection_retry', lane,
-      state: 'pending', payload: { provider: adapter.provider, account_id: account, range: query, cutoff },
+      state: 'pending', payload: { provider: adapter.provider, account_id: account, range: retryRange, cutoff: retryCutoff },
       reason, migration_key: null, updated_at: cutoff,
     });
   }
@@ -252,10 +254,14 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
       providers.push({ provider: adapter.provider, execution_status: 'complete', batches, events });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      if (persisting) throw storageFailure(error);
-      // If durable failure state cannot be saved, command execution fails instead of hiding the outage.
-      await recordCollectionFailure(services, config, adapter, lane, query, cutoff, reason, batches > 0);
-      providers.push({ provider: adapter.provider, execution_status: 'partial', batches, events, reason });
+      const identityConflict = persisting && error instanceof Error && ['Work identity conflict', 'Collection batch identity conflict'].includes(error.message);
+      if (persisting && !identityConflict) throw storageFailure(error);
+      // An immutable identity collision is source-local and rolls back the batch;
+      // a real failure saving its durable diagnostic is still a Store outage.
+      try { await recordCollectionFailure(services, config, adapter, lane, query, cutoff, reason, batches > 0); }
+      catch (failure) { throw storageFailure(failure); }
+      providers.push({ provider: adapter.provider, execution_status: 'partial', batches, events, reason,
+        ...(identityConflict ? { failure_kind: 'collection_identity_conflict' } : {}) });
     }
   }
   return { schema_version: 1, lane, cutoff, ...(source ? { source } : {}), range: query, ...(captureScope ? { capture_scope: captureScope } : {}), providers, coverage: (await services.store.listCoverage(query)).filter(item => !source || item.provider === source) };
