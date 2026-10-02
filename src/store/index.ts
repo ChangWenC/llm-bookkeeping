@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, copyFile, stat, chmod } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { BookkeepingConfig, Store, CollectionBatch, SourceCheckpoint, Lane, EventQuery, SourceEvent, TimeRange, SourceCoverage, ReviewBundle, ReviewChunk, ReviewResult, ReviewCommit, FactRevision, FactRef, FactQuery, JournalPatch, FileStatus, OutboxEntry, FactArtifact, ConsumerAck, FileIntent, WorkItem, LegacyImportBatch, LegacyImportResult } from '../contracts/types.ts';
+import { planMetadataBatchRecovery, applyMetadataBatchRecovery, type MetadataBatchRecoveryPlan, type RestoredMetadataOperation } from './metadata-recovery.ts';
 import { initializeSchema } from './schema.ts';
 import { foldFacts } from './facts.ts';
 import { validateReviewResult } from '../contracts/validation.ts';
@@ -45,6 +46,8 @@ export class SqliteStore implements Store {
         this.analyticsRepositoryInstance = new AnalyticsRepository(this.db);
     }
     close() { this.db.close(); }
+    async planMetadataBatchRecovery(batchId: string, beforePath: string) { return planMetadataBatchRecovery({ db: this.db, path: this.path, transaction: fn => this.transaction(fn), putWork: item => this.putWork(item) }, batchId, beforePath); }
+    async applyMetadataBatchRecovery(plan: MetadataBatchRecoveryPlan, beforePath: string, restored: RestoredMetadataOperation[], at: string) { return applyMetadataBatchRecovery({ db: this.db, path: this.path, transaction: fn => this.transaction(fn), putWork: item => this.putWork(item) }, plan, beforePath, restored, at); }
     private get replayRepository(): SemanticReplayRepository { return new SemanticReplayRepository(this.db, () => this.reviewScope.validate(), (range, source, eventIds) => this.metadataScopeGaps(range, source, eventIds).length > 0); }
     async requestSemanticReplay(request: SemanticReplayRequest): Promise<WorkItem> { return this.transaction(() => this.replayRepository.request(request)); }
     async getSemanticReplay(id: string): Promise<WorkItem | null> { return this.replayRepository.get(id); }
