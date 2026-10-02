@@ -11,7 +11,7 @@ import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, S
 export const COMMANDS = ['collect','prepare','publish','consume','archive','import','migrate','replay','facts','analytics-review','status','backup','restore','validate'] as const;
 export interface ParsedCommand { command: typeof COMMANDS[number]; options: Record<string,string|boolean> }
 const allowed: Record<string, string[]> = {
-  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset', 'replay-id'], publish: ['input', 'resume'],
+  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset', 'replay-id', 'source', 'max-bundles', 'from', 'to'], publish: ['input', 'resume'],
   consume: ['target'], archive: ['month', 'report', 'apply'], import: ['manifest'], migrate: ['manifest'],
   replay: ['source', 'from', 'to', 'replay-key'], facts: ['from', 'to'], 'analytics-review': ['input'],
   status: [], backup: ['output'], restore: ['input', 'data-dir'], validate: ['scope'],
@@ -64,6 +64,17 @@ export function parseArgs(args: string[]): ParsedCommand {
       required(options, 'output');
       if (options['replay-id'] && (kind !== 'daily' || options.period)) throw new InputError('--replay-id requires daily preparation without --period');
       if (options.cutoff) utc(required(options, 'cutoff'), 'cutoff');
+      if (options.source && kind !== 'daily') throw new InputError('--source requires daily preparation');
+      if (options['max-bundles'] !== undefined) {
+        const value = required(options, 'max-bundles');
+        if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InputError('--max-bundles: positive safe integer required');
+      }
+      if (options.from !== undefined || options.to !== undefined) {
+        const from = utc(required(options, 'from'), 'from');
+        const to = utc(required(options, 'to'), 'to');
+        if (utcComparisonKey(from) >= utcComparisonKey(to)) throw new InputError('--from must precede --to');
+        if (kind !== 'daily' || options.period || options['replay-id']) throw new InputError('Explicit range requires daily preparation without --period or --replay-id');
+      }
       for (const key of ['fact-offset', 'archive-context-offset']) if (options[key] !== undefined) {
         const value = required(options, key);
         if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InputError(`--${key}: nonnegative safe integer required`);
@@ -115,11 +126,18 @@ async function readJson(path: string): Promise<unknown> {
 
 function unavailable(capability: string): never { throw new UnavailableError(`Not implemented: ${capability}`); }
 
+function storageFailure(error: unknown): Error {
+  const wrapped = new Error(`Local Store failure: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  Object.assign(wrapped, { code: 'BOOKKEEPING_STORAGE_FAILURE' });
+  return wrapped;
+}
+
 async function adapterCheckpoints(services: RuntimeServices, provider: string) {
-  const [live, history] = await Promise.all([
+  let live, history;
+  try { [live, history] = await Promise.all([
     services.store.getCheckpoints(provider, 'live'),
     services.store.getCheckpoints(provider, 'history'),
-  ]);
+  ]); } catch (error) { throw storageFailure(error); }
   return [...live, ...history];
 }
 
@@ -174,16 +192,20 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
   for (const adapter of services.adapters) {
     let batches = 0;
     let events = 0;
+    const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
+    let persisting = false;
     try {
-      const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
       for await (const batch of adapter.collect({ lane, cutoff, range: query, budget }, context)) {
+        persisting = true;
         await services.store.saveCollection(batch);
+        persisting = false;
         batches++;
         events += batch.events.length;
       }
       providers.push({ provider: adapter.provider, execution_status: 'complete', batches, events });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (persisting) throw storageFailure(error);
       // If durable failure state cannot be saved, command execution fails instead of hiding the outage.
       await recordCollectionFailure(services, config, adapter, lane, query, cutoff, reason, batches > 0);
       providers.push({ provider: adapter.provider, execution_status: 'partial', batches, events, reason });
@@ -238,6 +260,12 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     if (options.cutoff && utcComparisonKey(cutoff) !== utcComparisonKey(replay.payload.cutoff as string)) throw new InputError('Replay requires its original cutoff');
     cutoff = replay.payload.cutoff as string;
   }
+  const source = typeof options.source === 'string' ? options.source : undefined;
+  if (source && !config.providers.some(provider => provider.provider === source)) throw new InputError(`Unknown source ${source}`);
+  const maxBundles = options['max-bundles'] === undefined ? undefined : Number(options['max-bundles']);
+  if (maxBundles !== undefined && maxBundles > config.limits.bundles_per_round) throw new InputError('--max-bundles exceeds configured bundles_per_round');
+  const range = options.from === undefined ? undefined : commandRange(options);
+  if (range && utcComparisonKey(range.to) > utcComparisonKey(cutoff)) throw new InputError('--to cannot follow preparation cutoff');
   const outputDir = resolve(required(options, 'output'));
   await privateDirectory(outputDir, config);
   let pagePaths: string[] | undefined;
@@ -248,27 +276,47 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     const { resolveWikiPath } = await import('./publish/index.ts');
     for (const path of pagePaths) await resolveWikiPath(config.wiki_root, path);
   }
-  const bundles = await services.reviewer.prepare({
+  const request = {
     kind: required(options, 'kind') as ReviewKind, lane: required(options, 'lane') as Lane,
     period: options.period as string | undefined, cutoff, output_dir: outputDir, page_paths: pagePaths,
     fact_offset: options['fact-offset'] === undefined ? undefined : Number(options['fact-offset']),
     fact_snapshot: options['fact-snapshot'] as string | undefined,
     archive_context_offset: options['archive-context-offset'] === undefined ? undefined : Number(options['archive-context-offset']),
     replay_id: options['replay-id'] as string | undefined,
-  });
+    source, max_bundles: maxBundles, range,
+  };
+  const prepared = services.reviewer.prepareWithOutcomes
+    ? await services.reviewer.prepareWithOutcomes(request)
+    : { schema_version: 1 as const, bundles: await services.reviewer.prepare(request), providers: [] };
+  const bundles = prepared.bundles;
+  if (bundles.length > (maxBundles ?? config.limits.bundles_per_round)) throw new Error('Reviewer exceeded configured round bundle count');
   if ((options['fact-offset'] !== undefined || options['fact-snapshot']) && bundles.some(bundle => !bundle.analysis_context?.facts_page && !bundle.monthly_context?.facts_page)) unavailable('Frozen fact pagination is not delivered by Reviewer');
   if (options['archive-context-offset'] !== undefined && bundles.some(bundle => !bundle.monthly_context?.archive_context_page)) unavailable('Archive context material reader is not delivered by Reviewer');
-  const files = [];
+  const files: string[] = [];
+  const materialOutcomes = [];
   for (const bundle of bundles) {
     const name = `bundle-${encodeURIComponent(bundle.bundle_id)}.json`;
-    if (Buffer.byteLength(JSON.stringify(bundle) + '\n') > config.limits.bundle_bytes) {
-      throw new Error(`Prepared bundle exceeds final serialized byte budget: ${bundle.bundle_id}`);
+    const provider = bundle.source ?? source ?? bundle.chunks?.[0]?.events?.[0]?.source.provider ?? 'unknown';
+    try {
+      if (Buffer.byteLength(JSON.stringify(bundle) + '\n') > config.limits.bundle_bytes) throw new Error(`Prepared bundle exceeds final serialized byte budget: ${bundle.bundle_id}`);
+      await privateAtomicJson(outputDir, name, bundle, true);
+      files.push(name);
+      materialOutcomes.push({ schema_version: 1 as const, provider, stage: 'material', execution_status: 'complete', reason: null, bundle_ids: [bundle.bundle_id] });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // Semantic bundles remain durable; retry material output without hiding
+      // failures in the local Store used to record that debt.
+      try { await services.store.enqueueWork({
+        schema_version: 1, work_id: `review-material:${bundle.bundle_id}:${createHash('sha256').update(outputDir).digest('hex')}`, kind: 'review_material_retry', lane: request.lane,
+        state: 'pending', payload: { provider, bundle_id: bundle.bundle_id, output_dir: outputDir },
+        reason, migration_key: null, updated_at: cutoff,
+      }); } catch (storageError) { throw storageFailure(storageError); }
+      materialOutcomes.push({ schema_version: 1 as const, provider, stage: 'material', execution_status: 'partial', reason, bundle_ids: [bundle.bundle_id] });
     }
-    await privateAtomicJson(outputDir, name, bundle, true);
-    files.push(name);
   }
   const manifest = {
     schema_version: 1, kind: required(options, 'kind'), lane: required(options, 'lane'), cutoff, bundles: files,
+    ...(source ? { source } : {}), ...(range ? { range } : {}), providers: [...prepared.providers, ...materialOutcomes],
   };
   await privateAtomicJson(outputDir, 'manifest.json', manifest);
   return { output_dir: outputDir, ...manifest };
@@ -308,11 +356,14 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
     const accountId = adapter.account_id ?? (configured.length === adapters.length ? configured[index].account_id : undefined);
     let saved = 0;
     let completeCapture = true;
+    const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
+    let persisting = false;
     try {
       if (!adapter.replay) throw new Error(`Source adapter does not support recapture: ${source}`);
-      const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
       for await (const batch of adapter.replay(range, context)) {
+        persisting = true;
         await services.store.saveCollection(batch);
+        persisting = false;
         saved++;
         batches++;
         // Finishing the iterator proves execution ended, not that discovery or
@@ -327,6 +378,7 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
         capture_status: saved ? completeCapture ? 'complete' : 'partial' : 'unknown', batches: saved });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (persisting) throw storageFailure(error);
       // A source outage cannot prevent review of already durable events. A
       // failure to persist that outage still fails execution rather than hiding it.
       await recordCollectionFailure(services, config, adapter, 'history', range, cutoff, reason, saved > 0, accountId);
@@ -411,7 +463,9 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     const code = error instanceof InputError ? 2 : 1;
     const message = error instanceof Error ? error.message : String(error);
     stderr(message + '\n');
-    stdout(JSON.stringify({ schema_version: 1, error: { kind: code === 2 ? 'invalid_input' : 'execution_failed', message } }) + '\n');
+    const errorCode = (error as NodeJS.ErrnoException)?.code;
+    const storage = typeof errorCode === 'string' && /^(?:BOOKKEEPING_STORAGE_FAILURE|ERR_SQLITE|SQLITE_)/.test(errorCode);
+    stdout(JSON.stringify({ schema_version: 1, error: { kind: code === 2 ? 'invalid_input' : 'execution_failed', message, ...(storage ? { scope: 'storage' } : {}) } }) + '\n');
     return code;
   } finally {
     if (services) {

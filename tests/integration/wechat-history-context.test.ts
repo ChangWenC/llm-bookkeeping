@@ -24,7 +24,7 @@ test('dense surrounding group context must not make every narrow history window 
   const f = await fixture(t);
   const from = Date.parse('2026-09-30T12:00:00Z') / 1000;
   const config: BookkeepingConfig = { ...f.config, providers: [{ schema_version: 1, provider: 'wechat', account_id: 'owner', enabled: true, roots: [], options: {
-    bundle_id: 'synthetic.group', chats: ['g@chatroom'], self_ids: ['owner'], identity_verified: true,
+    bundle_id: 'synthetic.group', group_allowlist: ['g@chatroom'], chats: ['g@chatroom'], self_ids: ['owner'], identity_verified: true,
     cursor_readonly_verified: true, verified_since_by_chat: { 'g@chatroom': '2026-09-01T00:00:00Z' }, limit: 3,
   } }] };
   const rows = [0, 1, 600, 601, 602].map(second => ({ server_id: `id:${second}`, chat_id: 'g@chatroom', sender_wxid: 'owner', create_time: from + second, message_kind: 'text', message_content: `synthetic ${second}` }));
