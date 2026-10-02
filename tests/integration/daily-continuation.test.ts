@@ -148,3 +148,15 @@ test('an explicitly identified SQLite failure stops the plan and leaves later st
   });
   assert.equal(receipt.storage, 'unavailable'); assert.equal(receipt.remaining_steps, 1); assert.equal(calls, 1);
 });
+
+
+test('publication receipt labels are explicitly manifest claims and cannot impersonate bundle provenance', async t => {
+  const f = await fixture(t), inputs = await seed(f);
+  const receipt = await continueDailyPlan(plan(step('wechat', ['publish', '--input', inputs.codex])), f.path, { now: () => cutoff });
+  assert.equal(receipt.receipts[0].exit_code, 0);
+  assert.equal(receipt.receipts[0].claimed_source, 'wechat');
+  assert.equal('source' in receipt.receipts[0], false);
+  const store = await createStore(f.config);
+  try { assert.equal((await store.getBundle('bundle:codex'))?.source, 'codex'); }
+  finally { store.close(); }
+});

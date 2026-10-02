@@ -40,7 +40,7 @@ export async function continueDailyPlan(value: unknown, configPath: string, depe
   }, 0);
   if (allocation > config.limits.bundles_per_round) throw new InputError('Planned preparation exceeds the total configured round bundle budget');
   dependencies = { ...dependencies, loadConfig: async () => config };
-  const receipts: { source: string; command: string; exit_code: number; result: unknown; diagnostics: string }[] = [];
+  const receipts: { claimed_source: string; command: string; exit_code: number; result: unknown; diagnostics: string }[] = [];
   let storage: 'available' | 'unavailable' = 'available';
   for (const step of plan.steps) {
     let output = '', diagnostics = '';
@@ -48,7 +48,8 @@ export async function continueDailyPlan(value: unknown, configPath: string, depe
       ...dependencies, stdout: text => { output += text; }, stderr: text => { diagnostics += text; },
     });
     const result = JSON.parse(output);
-    receipts.push({ source: step.source, command: step.args[0], exit_code: exitCode, result, diagnostics });
+    // The manifest labels intent; semantic acceptance verifies bundle provenance.
+    receipts.push({ claimed_source: step.source, command: step.args[0], exit_code: exitCode, result, diagnostics });
     if (exitCode === 1 && result?.error?.scope === 'storage') {
       storage = 'unavailable';
       return { schema_version: 1, receipts, storage, remaining_steps: plan.steps.length - receipts.length };
