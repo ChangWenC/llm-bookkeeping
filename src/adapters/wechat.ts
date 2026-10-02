@@ -18,7 +18,7 @@ import {
   chooseHistoryWindow,
   recordLateWindow,
 } from "./wechat-history.ts";
-import { resolveWechatSender, selfMention, verifiedAliases } from "./wechat-identity.ts";
+import { resolveWechatSender, selfMention, stableWechatId, verifiedAliases } from "./wechat-identity.ts";
 import { wechatConversationScope, wechatScopeError } from "./wechat-policy.ts";
 const nonemptyShard = (value: unknown) =>
   Array.isArray(value)
@@ -225,7 +225,7 @@ export function parseWechatHistory(
   const meta = parsed.meta;
   const self = new Set(
     Array.isArray(source.options.self_ids)
-      ? source.options.self_ids.map(String)
+      ? source.options.self_ids.filter(stableWechatId)
       : [],
   );
   const verified = source.options.identity_verified === true;
@@ -303,7 +303,7 @@ export function parseWechatHistory(
         generation: "0",
         context: {
           sender_id: senderId,
-          sender_wxid: r.sender_wxid == null ? (sender.role === "user" && senderId && self.has(senderId) ? senderId : null) : String(r.sender_wxid),
+          sender_wxid: sender.sender_wxid,
           is_group: isGroup,
           is_mentioned: selfMention(r, body, source.options),
           identity_verified: verified,

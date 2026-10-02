@@ -115,3 +115,30 @@ test('migration rejects excluded chat export before opening a missing body file 
   assert.deepEqual(report.entries[0].pending, ['wechat_group_not_allowlisted']);
   assert.deepEqual(await store.getCheckpoints('migration', 'history'), []); assert.equal((await store.status()).events, 0);
 });
+test('numeric sender_wxid and ChatLab platform sender never establish a global stable identity', () => {
+  const c = config(), source = c.providers[0];
+  source.options.self_ids = ['2'];
+  for (const numeric of [2, '2', '9007199254740993', '1e3']) {
+    const input = { ...row('numeric-field'), sender_wxid: numeric };
+    const captured = parseWechatHistory(payload([input]), source, 'private', request, c, undefined, 'private');
+    assert.equal(captured.events[0].role, 'unknown'); assert.equal(captured.events[0].context.sender_wxid, null);
+    assert(captured.gaps.some(gap => gap.reason === 'wechat_sender_unknown'));
+    for (const senderFields of [{ sender: numeric }, { sender_id: numeric }, { sender_wxid: numeric, sender: 'wxid_owner' }]) {
+      const imported = parseChatExport(JSON.stringify({ chatlab: { version: '0.0.2' }, messages: [{ ...senderFields, platformMessageId: 'numeric-import', timestamp: input.create_time, type: 0, content: 'anonymous numeric sender' }] }), 'chatlab-json', {
+        account_id: 'wxid_owner', conversation_id: 'private', conversation_type: 'private', locator: 'numeric-platform-fixture', identity_verified: true, self_ids: ['2'],
+      }, c);
+      assert.equal(imported.events[0].role, 'unknown'); assert.equal(imported.events[0].context.sender_wxid, null);
+      assert(imported.gaps.some(gap => gap.reason === 'import_sender_unknown'));
+    }
+  }
+  source.options.self_ids = ['wxid_owner']; source.options.self_ids_by_chat = { private: ['2', '8'] };
+  const numeric = { ...row('chat-local'), sender_wxid: '2' };
+  const first = parseWechatHistory(payload([numeric]), source, 'private', request, c, undefined, 'private').events[0];
+  const second = parseWechatHistory(payload([{ ...numeric, sender_wxid: '8' }]), source, 'private', request, c, undefined, 'private').events[0];
+  assert.equal(first.role, 'user'); assert.equal(first.context.sender_wxid, 'wxid_owner'); assert.deepEqual(first, second);
+  assert.equal(parseWechatHistory(payload([numeric]), source, 'other-private', request, c, undefined, 'private').events[0].role, 'unknown');
+  const stable = { ...row('stable-wins', 'wxid_other'), real_sender_id: '2', sender_is_self: true };
+  source.options.sender_is_self_verified = true;
+  const result = parseWechatHistory(payload([stable]), source, 'private', request, c, undefined, 'private').events[0];
+  assert.equal(result.role, 'other'); assert.equal(result.context.sender_wxid, 'wxid_other');
+});

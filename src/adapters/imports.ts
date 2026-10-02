@@ -112,6 +112,7 @@ export function parseChatExport(
     const chatlab = format.startsWith("chatlab");
     const resolved = resolveWechatSender(r, aliasOptions, manifest.conversation_id, chatlab);
     const sender = resolved.sender_id;
+    if (resolved.role === "unknown") gaps.push(gap("import_sender_unknown", manifest.locator));
     const server = r.server_id != null && String(r.server_id) !== "0" ? r.server_id : null;
     const native = r.platformMessageId ?? server ?? r.message_id ?? (r.local_id == null ? r.id : `local:${r.local_id}`);
     const body = r.content ?? r.message_content ?? r.display_text ?? r.text;
@@ -155,7 +156,7 @@ export function parseChatExport(
         kind: String(kind),
         context: {
           sender_id: sender,
-          sender_wxid: r.sender_wxid == null ? (chatlab ? sender : resolved.role === "user" && sender && self.has(sender) ? sender : null) : String(r.sender_wxid),
+          sender_wxid: resolved.sender_wxid,
           identity_verified: manifest.identity_verified === true,
           is_mentioned: selfMention(r, body, aliasOptions),
           media_transcribed: false,
