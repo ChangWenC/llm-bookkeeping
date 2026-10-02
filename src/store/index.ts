@@ -17,8 +17,10 @@ import { correctCodexClassification, type ClassificationCorrection } from './cod
 import type { RawFragment } from '../contracts/types.ts';
 import type { SemanticReplayRequest } from '../contracts/types.ts';
 import { SemanticReplayRepository } from './replay.ts';
+import { WechatReviewScope, scopeSql, scopeValueSql, conversationTypeSql, pendingScopeSql, senderSql } from './wechat-scope.ts';
 export interface StoreOptions {
     onTransactionStep?: (step: string) => void;
+    reviewConfig?: BookkeepingConfig;
 }
 export class SqliteStore implements Store {
     readonly db: DatabaseSync;
@@ -26,6 +28,7 @@ export class SqliteStore implements Store {
     analyticsPort(): AnalyticsPort { return this.analyticsRepositoryInstance ??= new AnalyticsRepository(this.db); }
     analyticsHistoryRepository(): AnalyticsRepository { this.analyticsPort(); return this.analyticsRepositoryInstance!; }
     readonly path: string;
+    readonly reviewScope: WechatReviewScope;
     private readonly options: StoreOptions;
     private readonly journalTimezone: string;
     constructor(path: string, options: StoreOptions = {}, journalTimezone = 'Europe/Amsterdam') {
@@ -33,18 +36,21 @@ export class SqliteStore implements Store {
         this.options = options;
         this.journalTimezone = journalTimezone;
         this.db = new DatabaseSync(path);
+        this.reviewScope = new WechatReviewScope(options.reviewConfig);
+        this.db.function('review_scope_allowed', (provider, account, conversation, group) => this.reviewScope.allowed(provider, account, conversation, group) ? 1 : 0);
+        this.db.function('review_scope_pending', (provider, account, conversation, type, role, verified, sender) => this.reviewScope.pendingReason(provider, account, conversation, type, role, verified, sender));
         initializeSchema(this.db);
         if ((this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get() as any).value !== '1')
             throw new Error('Unsupported database schema');
         this.analyticsRepositoryInstance = new AnalyticsRepository(this.db);
     }
     close() { this.db.close(); }
-    private get replayRepository(): SemanticReplayRepository { return new SemanticReplayRepository(this.db); }
+    private get replayRepository(): SemanticReplayRepository { return new SemanticReplayRepository(this.db, () => this.reviewScope.validate(), (range, source, eventIds) => this.metadataScopeGaps(range, source, eventIds).length > 0); }
     async requestSemanticReplay(request: SemanticReplayRequest): Promise<WorkItem> { return this.transaction(() => this.replayRepository.request(request)); }
     async getSemanticReplay(id: string): Promise<WorkItem | null> { return this.replayRepository.get(id); }
-    getReplayEvents(id: string, limit: number): SourceEvent[] { return this.reconcileCodexPage(this.replayRepository.events(id, limit)).filter(event => event.classification === 'main'); }
+    getReplayEvents(id: string, limit: number): SourceEvent[] { return this.reconcileCodexPage(this.replayRepository.events(id, limit)).filter(event => event.classification === 'main').map(event => this.reviewScope.enrich(event)); }
     getReplayFacts(id: string): FactRevision[] {
-        return this.effective().filter(fact => fact.event_refs.some(ref => this.replayRepository.contains(id, ref.event_id)));
+        return this.filterReviewFacts(this.effective(), undefined, id);
     }
     allocateId(namespace: string): string {
         if (!/^[a-z][a-z0-9_-]*$/i.test(namespace))
@@ -87,7 +93,7 @@ export class SqliteStore implements Store {
             && other.generation === event.generation;
         let anchor: SourceEvent | null = null;
         if (event.role === 'assistant') {
-            const row = this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')='codex' AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND json_extract(json,'$.locator')=? AND json_extract(json,'$.generation')=? AND json_extract(json,'$.role')='user' AND ordering<? ORDER BY ordering DESC,id DESC LIMIT 1")
+            const row = this.db.prepare(`SELECT json FROM events WHERE json_extract(json,'$.source.provider')='codex' AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND json_extract(json,'$.locator')=? AND json_extract(json,'$.generation')=? AND json_extract(json,'$.role')='user' AND ordering<? ORDER BY ordering DESC,id DESC LIMIT 1`)
                 .get(event.source.account_id, event.source.conversation_id, event.locator, event.generation, event.physical_order);
             anchor = row ? parse<SourceEvent>(row) : null;
             for (const peer of peers)
@@ -162,7 +168,7 @@ export class SqliteStore implements Store {
                         const previousCorrection = this.resolveCodexEvent(previousEvent, batch.events);
                         const enriched = enrichEvent(previousCorrection.event, event);
                         this.db.prepare('UPDATE events SET json=?,time=?,classification=? WHERE id=?').run(canonical(enriched), enriched.utc_time.value ? normalized(enriched.utc_time.value) : null, enriched.classification, event.event_id);
-                        if (enriched.utc_time.value && enriched.journal_date.value && enriched.classification !== 'unknown') {
+                        if (enriched.utc_time.value && enriched.journal_date.value && enriched.classification !== 'unknown' && !(enriched.source.provider === 'wechat' && enriched.role === 'unknown')) {
                             const work = this.db.prepare('SELECT json FROM work WHERE id=?').get('event-gap:' + digest(event.event_id));
                             if (work) {
                                 const item = parse<WorkItem>(work);
@@ -181,7 +187,7 @@ export class SqliteStore implements Store {
                 const lanes = batch.coverage.filter(c => c.provider === event.source.provider && c.account_id === event.source.account_id && (!c.conversation_id || c.conversation_id === event.source.conversation_id)).map(c => c.lane);
                 for (const lane of new Set(lanes.length ? lanes : batch.checkpoints.map(c => c.lane)))
                     this.db.prepare('INSERT OR IGNORE INTO event_lanes VALUES(?,?)').run(event.event_id, lane);
-                if (!event.utc_time.value || !event.journal_date.value || event.classification === 'unknown')
+                if (!event.utc_time.value || !event.journal_date.value || event.classification === 'unknown' || (event.source.provider === 'wechat' && event.role === 'unknown'))
                     this.putWork({ schema_version: 1, work_id: 'event-gap:' + digest(event.event_id), kind: 'event_identity_time', lane: lanes.includes('live') ? 'live' : 'history', state: 'pending', payload: { event_id: event.event_id }, reason: 'Event identity/time/journal date needs resolution', migration_key: null, updated_at: new Date().toISOString() });
             }
             this.options.onTransactionStep?.('collection_events');
@@ -211,7 +217,8 @@ export class SqliteStore implements Store {
         if (!Number.isSafeInteger(limit) || limit < 1)
             throw new Error('Invalid event limit');
         const params: any[] = [normalized(query.range.from), normalized(query.range.to)];
-        let clause = 'time>=? AND time<?';
+        let clause = 'time>=? AND time<? AND ' + scopeSql();
+        if (query.source) { clause += " AND json_extract(json,'$.source.provider')=?"; params.push(query.source); }
         if (!query.include_context)
             clause += " AND classification='main' AND COALESCE(json_extract(json,'$.context.context_only'),0)!=1";
         if (query.lane) {
@@ -247,8 +254,18 @@ export class SqliteStore implements Store {
             }
         });
     }
-    async getBundle(id: string): Promise<ReviewBundle | null> { const row = this.db.prepare('SELECT json FROM bundles WHERE id=?').get(id); return row ? parse(row) : null; }
-    async listPendingChunks(range: TimeRange, lane: Lane): Promise<ReviewChunk[]> { rangeCheck(range); return this.db.prepare("SELECT json FROM chunks WHERE lane=? AND state!='complete' AND (from_time IS NULL OR (from_time<? AND to_time>=?)) ORDER BY id").all(lane, normalized(range.to), normalized(range.from)).map(parse<ReviewChunk>); }
+    async getBundle(id: string): Promise<ReviewBundle | null> {
+        if (!this.db.prepare('SELECT 1 FROM results WHERE bundle_id=?').get(id))
+            for (const field of ['events', 'context_events']) {
+                const excluded = this.db.prepare(`SELECT 1 FROM bundles b,json_each(b.json,'$.chunks') c,json_each(c.value,?) e WHERE b.id=? AND NOT (${scopeValueSql('e.value')}) LIMIT 1`).get('$.' + field, id);
+                if (excluded) throw new Error('Prepared WeChat source scope changed; prepare a fresh bundle');
+            }
+        const row = this.db.prepare('SELECT json FROM bundles WHERE id=?').get(id); return row ? parse(row) : null;
+    }
+    async listPendingChunks(range: TimeRange, lane: Lane): Promise<ReviewChunk[]> {
+        rangeCheck(range);
+        return this.db.prepare(`SELECT json FROM chunks WHERE lane=? AND state!='complete' AND (from_time IS NULL OR (from_time<? AND to_time>=?)) AND NOT EXISTS(SELECT 1 FROM json_each(chunks.json,'$.events') e WHERE NOT (${scopeValueSql('e.value')})) AND NOT EXISTS(SELECT 1 FROM json_each(chunks.json,'$.context_events') e WHERE NOT (${scopeValueSql('e.value')})) ORDER BY id`).all(lane, normalized(range.to), normalized(range.from)).map(parse<ReviewChunk>);
+    }
     getReviewedUnits(kind: string, lane: Lane): Set<string> { return new Set(this.db.prepare('SELECT event_id FROM reviewed_units WHERE kind=? AND lane=?').all(kind, lane).map((r: any) => r.event_id)); }
     getReviewedSpans(kind: string, lane: Lane, sourceId: string): {
         start_byte: number;
@@ -258,27 +275,55 @@ export class SqliteStore implements Store {
     }
     async getReviewableEvents(query: EventQuery, kind: string): Promise<SourceEvent[]> {
         rangeCheck(query.range);
-        const events = this.db.prepare("SELECT e.json FROM events e WHERE e.time>=? AND e.time<? AND e.classification='main' AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane=?) ORDER BY e.time,e.ordering,e.id LIMIT ?").all(normalized(query.range.from), normalized(query.range.to), query.lane!, kind, query.lane!, query.limit ?? 1000).map(parse<SourceEvent>);
-        return this.reconcileCodexPage(events).filter(event => event.classification === 'main');
+        const limit = query.limit ?? 1000;
+        if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid event limit');
+        const args: any[] = [normalized(query.range.from), normalized(query.range.to), query.lane!, kind, query.lane!];
+        const source = query.source ? " AND json_extract(e.json,'$.source.provider')=?" : '';
+        if (query.source) args.push(query.source);
+        args.push(limit);
+        const events = this.db.prepare(`SELECT e.json FROM events e WHERE e.time>=? AND e.time<? AND e.classification='main' AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane=?) AND ${scopeSql('e')} AND ${senderSql('e')}${source} ORDER BY e.time,e.ordering,e.id LIMIT ?`).all(...args).map(parse<SourceEvent>);
+        return this.reconcileCodexPage(events).filter(event => event.classification === 'main').map(event => this.reviewScope.enrich(event));
+    }
+    reviewProviders(range: TimeRange, lane: Lane): string[] {
+        rangeCheck(range);
+        return this.db.prepare(`SELECT DISTINCT json_extract(e.json,'$.source.provider') AS provider FROM events e WHERE e.time>=? AND e.time<? AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?) ORDER BY provider`).all(normalized(range.from), normalized(range.to), lane).map((row: any) => row.provider);
+    }
+    sourcePendingGaps(range: TimeRange, source?: string): { reason: string; locator: string | null }[] {
+        const args: any[] = [normalized(range.from), normalized(range.to)];
+        const provider = source ? " AND json_extract(e.json,'$.source.provider')=?" : '';
+        if (source) args.push(source);
+        return this.db.prepare(`SELECT json_extract(w.json,'$.reason') AS reason,json_extract(e.json,'$.locator') AS locator FROM work w JOIN events e ON json_extract(w.json,'$.payload.event_id')=e.id WHERE w.state='pending' AND w.kind IN ('event_conflict','event_identity_time') AND e.time>=? AND e.time<?${provider} AND ${scopeSql('e')} ORDER BY w.rowid LIMIT 32`).all(...args) as any;
+    }
+    metadataScopeGaps(range: TimeRange, source: string, eventIds?: string[]): { reason: string; locator: string | null }[] {
+        if (source !== 'wechat') return [];
+        const reason = pendingScopeSql('e');
+        const selected = eventIds === undefined ? '' : ' AND e.id IN (SELECT value FROM json_each(?))';
+        return this.db.prepare(`SELECT ${reason} AS reason,json_extract(e.json,'$.locator') AS locator FROM events e WHERE e.time>=? AND e.time<? AND json_extract(e.json,'$.source.provider')=? AND ${reason} IS NOT NULL${selected} ORDER BY e.time,e.ordering,e.id LIMIT 32`).all(normalized(range.from), normalized(range.to), source, ...(eventIds === undefined ? [] : [canonical(eventIds)])) as any;
+    }
+    filterReviewFacts(facts: FactRevision[], source?: string, replay?: string): FactRevision[] {
+        return facts.filter(fact => fact.event_refs.length === 0 ? !source : fact.event_refs.every(ref => {
+            const row = this.db.prepare(`SELECT json_extract(e.json,'$.source.provider') AS provider FROM events e WHERE e.id=? AND ${scopeSql('e')}`).get(ref.event_id) as any;
+            return row && (!source || row.provider === source) && (!replay || this.replayRepository.contains(replay, ref.event_id));
+        }));
     }
     getContextEvents(event: SourceEvent): SourceEvent[] {
-        if (!event.utc_time.value)
+        if (!event.utc_time.value || !this.reviewScope.eventAllowed(event))
             return [];
         const originalId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
         const group = event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true;
         if (group) {
             const anchor = Date.parse(event.utc_time.value);
-            const events = this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main' ORDER BY ABS(julianday(time)-julianday(?)),time,ordering,id LIMIT 12")
+            const events = this.db.prepare(`SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main' AND ${scopeSql()} AND ${senderSql()} ORDER BY ABS(julianday(time)-julianday(?)),time,ordering,id LIMIT 12`)
                 .all(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(new Date(anchor - 20 * 60000).toISOString()), normalized(new Date(anchor + 20 * 60000).toISOString()), originalId, normalized(event.utc_time.value))
                 .map(parse<SourceEvent>).sort((a, b) => normalized(a.utc_time.value!).localeCompare(normalized(b.utc_time.value!)) || a.physical_order.localeCompare(b.physical_order));
-            return this.reconcileCodexPage(events).filter(event => event.classification === 'main');
+            return this.reconcileCodexPage(events).filter(event => event.classification === 'main').map(event => this.reviewScope.enrich(event));
         }
-        const events = this.db.prepare("SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND (time,ordering,id)<(?,?,?) AND id!=? AND classification='main' ORDER BY time DESC,ordering DESC,id DESC LIMIT 3")
+        const events = this.db.prepare(`SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND (time,ordering,id)<(?,?,?) AND id!=? AND classification='main' AND ${scopeSql()} AND ${senderSql()} ORDER BY time DESC,ordering DESC,id DESC LIMIT 3`)
             .all(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(event.utc_time.value), event.physical_order, originalId, originalId).map(parse<SourceEvent>).reverse();
-        return this.reconcileCodexPage(events).filter(event => event.classification === 'main');
+        return this.reconcileCodexPage(events).filter(event => event.classification === 'main').map(event => this.reviewScope.enrich(event));
     }
     isContextTruncated(event: SourceEvent): boolean {
-        if (!event.utc_time.value || !(event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true))
+        if (!this.reviewScope.eventAllowed(event) || !event.utc_time.value || !(event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true))
             return false;
         const anchor = Date.parse(event.utc_time.value), originalId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
         const row = this.db.prepare("SELECT COUNT(*) AS count FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main'").get(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(new Date(anchor - 20 * 60000).toISOString()), normalized(new Date(anchor + 20 * 60000).toISOString()), originalId) as any;
@@ -305,7 +350,7 @@ export class SqliteStore implements Store {
             this.db.prepare('INSERT OR IGNORE INTO reviewed_sources VALUES(?,?,?)').run(kind, lane, sourceId);
     }
     private coverageReview(coverage: SourceCoverage, kind: string, explicitEmpty: boolean): SourceCoverage {
-        const events = this.db.prepare("SELECT e.id FROM events e WHERE json_extract(e.json,'$.source.provider')=? AND json_extract(e.json,'$.source.account_id')=? AND (? IS NULL OR json_extract(e.json,'$.source.conversation_id')=?) AND e.classification IN ('main','unknown') AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND (e.time IS NULL OR (e.time>=? AND e.time<?)) AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?)").all(coverage.provider, coverage.account_id, coverage.conversation_id, coverage.conversation_id, normalized(coverage.query_range.from), normalized(coverage.query_range.to), coverage.lane) as any[];
+        const events = this.db.prepare(`SELECT e.id FROM events e WHERE json_extract(e.json,'$.source.provider')=? AND json_extract(e.json,'$.source.account_id')=? AND (? IS NULL OR json_extract(e.json,'$.source.conversation_id')=?) AND (${scopeSql('e')} OR ${pendingScopeSql('e')} IS NOT NULL) AND e.classification IN ('main','unknown') AND COALESCE(json_extract(e.json,'$.context.context_only'),0)!=1 AND (e.time IS NULL OR (e.time>=? AND e.time<?)) AND EXISTS(SELECT 1 FROM event_lanes l WHERE l.event_id=e.id AND l.lane=?)`).all(coverage.provider, coverage.account_id, coverage.conversation_id, coverage.conversation_id, normalized(coverage.query_range.from), normalized(coverage.query_range.to), coverage.lane) as any[];
         const done = events.filter(e => this.db.prepare('SELECT 1 FROM reviewed_sources WHERE kind=? AND lane=? AND source_id=?').get(kind, coverage.lane, e.id)).length;
         const any = events.some(e => this.db.prepare('SELECT 1 FROM reviewed_spans WHERE kind=? AND lane=? AND source_id=? LIMIT 1').get(kind, coverage.lane, e.id));
         const status = events.length ? done === events.length ? 'complete' : (done || any) ? 'partial' : 'pending' : explicitEmpty && coverage.capture_status === 'complete' && !coverage.gaps.length ? 'complete' : 'pending';
@@ -345,7 +390,7 @@ export class SqliteStore implements Store {
         if (bundle && !this.db.prepare('SELECT 1 FROM results WHERE bundle_id=?').get(bundle.bundle_id))
             for (const event of bundle.chunks.flatMap(chunk => [...chunk.events, ...chunk.context_events]))
                 this.reconcilePreparedSource(event);
-        return commitSemanticReview({ db: this.db, options: this.options, journalTimezone: this.journalTimezone, transaction: fn => this.transaction(fn), effective: () => this.effective(), allocateId: namespace => this.allocateId(namespace), putWork: item => this.putWork(item), markUnit: (event, kind, lane) => this.markUnit(event, kind, lane), coverageReview: (coverage, kind, empty) => this.coverageReview(coverage, kind, empty), analyticsHistoryRepository: () => this.analyticsHistoryRepository(), markFactMaterialRead: (id, refs) => this.markFactMaterialRead(id, refs), replayRepository: () => this.replayRepository, markReplayUnit: (event, id) => {
+        return commitSemanticReview({ db: this.db, options: this.options, journalTimezone: this.journalTimezone, transaction: fn => this.transaction(fn), effective: () => this.effective(), allocateId: namespace => this.allocateId(namespace), putWork: item => this.putWork(item), markUnit: (event, kind, lane) => this.markUnit(event, kind, lane), coverageReview: (coverage, kind, empty) => this.coverageReview(coverage, kind, empty), analyticsHistoryRepository: () => this.analyticsHistoryRepository(), markFactMaterialRead: (id, refs) => this.markFactMaterialRead(id, refs), replayRepository: () => this.replayRepository, sourceAllowed: event => this.reviewScope.eventAllowed(event), markReplayUnit: (event, id) => {
             this.markUnit(event, 'replay:' + id, 'history', false);
             const sourceId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
             if (!this.db.prepare("SELECT 1 FROM reviewed_sources WHERE kind='daily' AND source_id=? LIMIT 1").get(sourceId))
@@ -536,7 +581,7 @@ export async function createStore(config: BookkeepingConfig, options: StoreOptio
     if (!isAbsolute(config.data_dir) || !isAbsolute(config.wiki_root))
         throw new Error('data_dir/wiki_root must be absolute');
     await mkdir(config.data_dir, { recursive: true, mode: 0o700 });
-    const store = new SqliteStore(join(config.data_dir, 'bookkeeping.sqlite'), options, config.journal_timezone);
+    const store = new SqliteStore(join(config.data_dir, 'bookkeeping.sqlite'), { ...options, reviewConfig: config }, config.journal_timezone);
     await chmod(store.path, 0o600);
     return store;
 }

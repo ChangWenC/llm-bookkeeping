@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { BookkeepingConfig, Reviewer, Store, ReviewBundle, ReviewChunk, SourceEvent, PrepareRequest, ReviewResult, TimeRange, CoverageGap, PageBaseline } from '../contracts/types.ts';
+import type { BookkeepingConfig, Reviewer, Store, ReviewBundle, ReviewChunk, SourceEvent, PrepareRequest, ReviewResult, TimeRange, CoverageGap, PageBaseline, PreparationResult } from '../contracts/types.ts';
 import { SqliteStore, canonical, digest } from '../store/index.ts';
 import { validateReviewResult, utc, date } from '../contracts/validation.ts';
 import { prepareWeeklyBundle, prepareMonthlyBundle } from './analysis.ts';
@@ -26,6 +26,12 @@ function requestRange(request: PrepareRequest, config: BookkeepingConfig): TimeR
     utc(request.cutoff, 'cutoff');
     if (!['daily', 'weekly', 'monthly'].includes(request.kind) || !['live', 'history'].includes(request.lane))
         throw new Error('Invalid review kind/lane');
+    if (request.range) {
+        if (request.period || request.replay_id) throw new Error('Explicit range cannot combine period or replay');
+        utc(request.range.from, 'range.from'); utc(request.range.to, 'range.to');
+        if (Date.parse(request.range.from) >= Date.parse(request.range.to) || Date.parse(request.range.to) > Date.parse(request.cutoff)) throw new Error('Invalid explicit review range');
+        return request.range;
+    }
     let from: string;
     let to = request.cutoff;
     if (request.period) {
@@ -115,9 +121,11 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
     for (const [key, value] of Object.entries(config.limits))
         if (!Number.isSafeInteger(value) || value < 1)
             throw new Error('Invalid review limit ' + key);
-    return {
-        async prepare(request: PrepareRequest): Promise<ReviewBundle[]> {
+    const prepareDaily = async (request: PrepareRequest, persist = true): Promise<ReviewBundle[]> => {
             const replayWork = request.replay_id ? await store.getSemanticReplay(request.replay_id) : null;
+            if (replayWork && request.source && request.source !== replayWork.payload.source) throw new Error('Replay source differs from frozen work');
+            if (replayWork) request = { ...request, source: replayWork.payload.source as string };
+            if (request.source === 'wechat') store.reviewScope.validate();
             if (request.replay_id && (!replayWork || request.kind !== 'daily' || request.period))
                 throw new Error('Semantic replay requires its explicit daily work scope without --period');
             if (replayWork?.state === 'complete') return [];
@@ -127,24 +135,28 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             if (request.kind === 'monthly')
                 return prepareMonthlyBundle(store, config, request);
             const range = replayWork ? replayWork.payload.range as TimeRange : requestRange(request, config);
-            const limits = config.limits;
+            const limits = { ...config.limits, bundles_per_round: Math.min(config.limits.bundles_per_round, request.max_bundles ?? config.limits.bundles_per_round) };
             const progressKind = replayWork ? 'replay:' + replayWork.work_id : request.kind;
             const progressLane = replayWork ? 'history' : request.lane;
             const reviewed = store.getReviewedUnits(progressKind, progressLane);
             // Each page fetch is bounded; fully reviewed sources are excluded in SQL so a historical prefix cannot starve new work.
             const events = replayWork ? store.getReplayEvents(replayWork.work_id, limits.chunk_events * limits.bundles_per_round * 4)
-                : request.kind === 'daily' ? await store.getReviewableEvents({ range, lane: request.lane, limit: limits.chunk_events * limits.bundles_per_round * 4 }, request.kind) : [];
+                : request.kind === 'daily' ? await store.getReviewableEvents({ range, source: request.source, lane: request.lane, limit: limits.chunk_events * limits.bundles_per_round * 4 }, request.kind) : [];
             const effectiveFacts = replayWork ? store.getReplayFacts(replayWork.work_id) : await store.readEffectiveFacts({ range });
-            const facts = request.kind === 'daily' ? effectiveFacts : effectiveFacts.flatMap(f => {
+            const scopedFacts = store.filterReviewFacts(effectiveFacts, request.source);
+            const facts = request.kind === 'daily' ? scopedFacts : effectiveFacts.flatMap(f => {
                 const projection = f.analytics_projection?.value;
                 if (!projection)
                     return [];
                 return [{ ...f, content: projection.summary, scope: projection.scope, subject: projection.subject, event_refs: projection.event_refs, attribution: projection.attribution }];
             });
-            const coverage = (await store.listCoverage(range)).filter(c => c.lane === request.lane);
+            const coverage = (await store.listCoverage(range)).filter(c => c.lane === request.lane && (!request.source || c.provider === request.source) && (c.conversation_id === null || store.reviewScope.allowed(c.provider, c.account_id, c.conversation_id, undefined)));
             const unfinished = coverage.flatMap(c => c.gaps);
+            if (request.source === 'wechat') unfinished.push(...store.reviewScope.registryGaps().map(reason => gap(reason, range)));
             if (replayWork) unfinished.push(gap('Explicit semantic replay; only this work’s actual event slices are completed, capture coverage remains independent', range));
-            unfinished.push(...store.getClassificationGaps(range).map(item => gap(item.reason, null, item.locator)));
+            if (!request.source || request.source === 'codex') unfinished.push(...store.getClassificationGaps(range).map(item => gap(item.reason, null, item.locator)));
+            unfinished.push(...store.sourcePendingGaps(range, request.source).map(item => gap(item.reason, null, item.locator)));
+            if (request.source) unfinished.push(...store.metadataScopeGaps(range, request.source).map(item => gap(item.reason, null, item.locator)));
             const requestedBaselines: PageBaseline[] = [];
             if (request.page_paths && (!Array.isArray(request.page_paths) || request.page_paths.some(path => typeof path !== 'string')))
                 throw new Error('page_paths must be an array of explicit Wiki paths');
@@ -167,7 +179,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                 unfinished.push(gap('Facts without an explicit professional projection excluded from analytics material', range));
             if (!coverage.length)
                 unfinished.push(gap('No capture coverage for requested range', range));
-            for (const provider of config.providers.filter(p => p.enabled))
+            for (const provider of config.providers.filter(p => p.enabled && (!request.source || p.provider === request.source)))
                 if (!coverage.some(c => c.provider === provider.provider && c.account_id === provider.account_id))
                     unfinished.push(gap('Provider has no capture coverage: ' + provider.provider, range));
             const chunks: ReviewChunk[] = [];
@@ -191,7 +203,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                     else
                         unfinished.push(gap('Conversation context omitted by chunk byte budget', null, context.locator));
                 }
-                const chunk: ReviewChunk = { schema_version: 1, chunk_id: 'chunk:' + digest(canonical([request.kind, request.lane, ...(replayWork ? [replayWork.work_id] : []), pending.map(e => e.event_id), contextEvents.map(e => e.event_id)])), events: pending, context_events: contextEvents, body_bytes: bodyBytes };
+                const chunk: ReviewChunk = { schema_version: 1, chunk_id: 'chunk:' + digest(canonical([request.kind, request.lane, ...(replayWork ? [replayWork.work_id] : []), 'review-material-v2', pending, contextEvents])), events: pending, context_events: contextEvents, body_bytes: bodyBytes };
                 chunks.push(chunk);
                 pending = [];
                 bodyBytes = 0;
@@ -223,10 +235,10 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             }
             flush();
             if (!chunks.length) {
-                if (!replayWork && request.kind === 'daily' && !request.page_paths?.length && !events.length && (await store.listEvents({ range, lane: request.lane, limit: 1 })).length)
+                if (!replayWork && request.kind === 'daily' && !request.page_paths?.length && !events.length && (await store.listEvents({ range, source: request.source, lane: request.lane, limit: 1 })).length)
                     return [];
                 // Empty material is an explicit review decision; missing capture remains pending even if zero-facts is accepted.
-                const id = (request.page_paths?.length ? 'pages:' : 'empty:') + digest(canonical([request.kind, request.lane, ...(replayWork ? [replayWork.work_id] : []), range, coverage.map(c => ({ ...c, review_status: null })), facts, requestedBaselines]));
+                const id = (request.page_paths?.length ? 'pages:' : 'empty:') + digest(canonical([request.kind, request.lane, request.source, ...(replayWork ? [replayWork.work_id] : []), range, coverage.map(c => ({ ...c, review_status: null })), facts, requestedBaselines]));
                 if (reviewed.has(id))
                     return [];
                 chunks.push({ schema_version: 1, chunk_id: id, events: [], context_events: [], body_bytes: 0 });
@@ -234,7 +246,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             const bundles: ReviewBundle[] = [];
             let current: ReviewBundle | null = null;
             const omittedMarker = 'Bounded preparation metadata omitted';
-            const initial = (): ReviewBundle => ({ schema_version: 1, bundle_id: '', kind: request.kind, lane: request.lane, period: request.period ?? null, cutoff: request.cutoff, chunks: [], existing_facts: [], baselines: [], coverage: [], unfinished: [gap(omittedMarker, range)],
+            const initial = (): ReviewBundle => ({ schema_version: 1, bundle_id: '', source: request.source, kind: request.kind, lane: request.lane, period: request.period ?? null, cutoff: request.cutoff, chunks: [], existing_facts: [], baselines: [], coverage: [], unfinished: [gap(omittedMarker, range)],
                 ...(replayWork ? { replay: { schema_version: 1 as const, work_id: replayWork.work_id, source: replayWork.payload.source as string, range } } : {}) });
             const finish = async () => {
                 if (!current)
@@ -246,7 +258,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
                 current.bundle_id = 'bundle:' + digest(canonical({ ...current, bundle_id: null }));
                 if (Buffer.byteLength(canonical(current)) > limits.bundle_bytes)
                     throw new Error('Preparation metadata cannot fit bounded bundle');
-                await store.saveBundle(current);
+                if (persist) await store.saveBundle(current);
                 bundles.push(current);
                 current = null;
             };
@@ -315,7 +327,58 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             }
             await finish();
             return bundles;
-        },
+        };
+    const prepareWithOutcomes = async (request: PrepareRequest): Promise<PreparationResult> => {
+        if (request.max_bundles !== undefined && (!Number.isSafeInteger(request.max_bundles) || request.max_bundles < 1 || request.max_bundles > config.limits.bundles_per_round)) throw new Error('Invalid per-round max_bundles');
+        if (request.source !== undefined && (!request.source.trim() || request.kind !== 'daily')) throw new Error('Source filter requires daily review');
+        if (request.kind !== 'daily') return { schema_version: 1, bundles: await prepareDaily(request), providers: [] };
+        let sources: string[];
+        if (request.replay_id) {
+            const replay = await store.getSemanticReplay(request.replay_id);
+            if (!replay) throw new Error('Unknown semantic replay');
+            if (request.source && request.source !== replay.payload.source) throw new Error('Replay source differs from frozen work');
+            sources = [replay.payload.source as string];
+        } else if (request.source) sources = [request.source];
+        else {
+            const range = requestRange(request, config);
+            sources = [...new Set([...store.reviewProviders(range, request.lane), ...(await store.listCoverage(range)).filter(c => c.lane === request.lane).map(c => c.provider)])];
+            if (!sources.length) sources = [...new Set(config.providers.filter(p => p.enabled).map(p => p.provider))];
+            if (!sources.length) sources = ['unknown'];
+        }
+        const maximum = request.max_bundles ?? config.limits.bundles_per_round;
+        const queues = new Map<string, ReviewBundle[]>(), providers: PreparationResult['providers'] = [];
+        for (const source of sources) {
+            try {
+                const bundles = await prepareDaily({ ...request, source, max_bundles: maximum }, false);
+                queues.set(source, bundles);
+                const pendingRange = request.replay_id ? (await store.getSemanticReplay(request.replay_id))!.payload.range as TimeRange : requestRange(request, config);
+                const localPending = store.metadataScopeGaps(pendingRange, source).length || store.sourcePendingGaps(pendingRange, source).length;
+                providers.push({ schema_version: 1, provider: source, stage: 'prepare', execution_status: localPending || bundles.some(b => b.unfinished.length) ? 'partial' : 'complete', reason: localPending ? 'Local source identity or scope work remains pending' : null, bundle_ids: [] });
+            } catch (error: any) {
+                if (error?.code?.startsWith('ERR_SQLITE') || error?.code?.startsWith('SQLITE_') || ['ENOSPC', 'EIO', 'EROFS'].includes(error?.code)) throw error;
+                providers.push({ schema_version: 1, provider: source, stage: 'prepare', execution_status: 'unavailable', reason: String(error), bundle_ids: [] });
+            }
+        }
+        const bundles: ReviewBundle[] = [];
+        const earliest = (bundle: ReviewBundle) => bundle.chunks.flatMap(c => c.events).map(e => e.utc_time.value ?? '9999').sort()[0] ?? '9999';
+        // Every pending provider gets a head before the remaining budget follows time.
+        const heads = [...queues.entries()].filter(([, q]) => q.length).sort((a, b) => earliest(a[1][0]).localeCompare(earliest(b[1][0])));
+        for (const [, queue] of heads) if (bundles.length < maximum) bundles.push(queue.shift()!);
+        while (bundles.length < maximum) {
+            const pending = [...queues.values()].filter(q => q.length).sort((a, b) => earliest(a[0]).localeCompare(earliest(b[0])));
+            if (!pending.length) break;
+            bundles.push(pending[0].shift()!);
+        }
+        for (const bundle of bundles) await store.saveBundle(bundle);
+        for (const provider of providers) {
+            provider.bundle_ids = bundles.filter(b => b.source === provider.provider).map(b => b.bundle_id);
+            if (queues.get(provider.provider)?.length) { provider.execution_status = 'partial'; provider.reason = 'Additional provider material deferred by total round budget'; }
+        }
+        return { schema_version: 1, bundles, providers };
+    };
+    return {
+        prepareWithOutcomes,
+        async prepare(request: PrepareRequest) { return (await prepareWithOutcomes(request)).bundles; },
         async accept(result: ReviewResult) {
             const bundle = await store.getBundle(result.bundle_id);
             if (!bundle)

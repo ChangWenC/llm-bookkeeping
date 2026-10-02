@@ -163,7 +163,7 @@ test('replay current targets include moved-date facts, rejects another source an
     const contextBundle = { ...p, bundle_id: 'context-replay-source', chunks: [{ ...p.chunks[0], chunk_id: 'context-replay-chunk', context_events: [other] }] };
     await store.saveBundle(contextBundle); const contextResult = result(contextBundle, 'context-is-not-evidence'); contextResult.pages = [];
     contextResult.candidates[0].event_refs = [{ schema_version: 1, event_id: other.event_id }];
-    await assert.rejects(reviewer.accept(contextResult), /unreviewed\/context event/);
+    await assert.rejects(reviewer.accept(contextResult), /one provider/);
     assert.equal((await store.getSemanticReplay(work.work_id))!.state, 'pending');
     assert.throws(() => parseArgs(['prepare', '--kind', 'weekly', '--lane', 'history', '--replay-id', work.work_id, '--output', c.data_dir]), /daily/);
     store.close();

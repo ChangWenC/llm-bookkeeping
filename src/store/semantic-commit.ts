@@ -23,6 +23,7 @@ interface SemanticStore {
     markFactMaterialRead(id: string, refs: FactRef[]): void;
     replayRepository(): SemanticReplayRepository;
     markReplayUnit(event: SourceEvent, workId: string): void;
+    sourceAllowed(event: SourceEvent): boolean;
 }
 const parse = <T>(row: any): T => JSON.parse(row.json);
 export async function commitSemanticReview(store: SemanticStore, result: ReviewResult): Promise<ReviewCommit> {
@@ -40,6 +41,10 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         if (!row)
             throw new Error('Unknown review bundle');
         const bundle = parse<ReviewBundle>(row);
+        if (result.source !== undefined && result.source !== bundle.source) throw new Error('Review result source differs from its prepared bundle');
+        const providers = new Set(bundle.chunks.flatMap(chunk => [...chunk.events, ...chunk.context_events]).map(event => event.source.provider));
+
+        if (bundle.source === 'wechat' || providers.has('wechat')) store.replayRepository().validateSource();
         if (bundle.replay) {
             if (bundle.kind !== 'daily') throw new Error('Semantic replay requires daily original event material');
             store.replayRepository().validate(bundle.replay, bundle.cutoff);
@@ -49,9 +54,14 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                     throw new Error('Replay event outside frozen source scope');
             }
         }
+        if (bundle.kind === 'daily' && (providers.size > 1 || (bundle.source && [...providers].some(provider => provider !== bundle.source))))
+            throw new Error('Daily bundle must contain one provider; prepare a fresh bundle');
         for (const event of bundle.chunks.flatMap(chunk => [...chunk.events, ...chunk.context_events])) {
             const id = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
-            const current = store.db.prepare('SELECT classification FROM events WHERE id=?').get(id) as any;
+            if (!store.sourceAllowed(event)) throw new Error('Prepared WeChat source scope changed; prepare a fresh bundle');
+            const current = store.db.prepare('SELECT classification,json FROM events WHERE id=?').get(id) as any;
+            if (current && !store.sourceAllowed(JSON.parse(current.json))) throw new Error('Prepared WeChat source scope changed; prepare a fresh bundle');
+            if (event.source.provider === 'wechat' && (event.role === 'unknown' || (current && JSON.parse(current.json).role === 'unknown'))) throw new Error('Unknown WeChat sender remains pending');
             if (current && current.classification !== 'main')
                 throw new Error('Prepared source classification changed; prepare a fresh bundle');
         }

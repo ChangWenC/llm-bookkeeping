@@ -68,9 +68,18 @@ export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): Sourc
     }
     const nativeCompatible = previous.source.message_id !== null && canonical(previous.source) === canonical(incoming.source) && previous.body === incoming.body && (!previous.utc_time.value || !incoming.utc_time.value || normalized(previous.utc_time.value) === normalized(incoming.utc_time.value)) && (previous.role === incoming.role || previous.role === 'unknown' || incoming.role === 'unknown');
     if (nativeCompatible) {
+        const verifiedWechatSender = previous.source.provider === 'wechat' && previous.role === 'unknown'
+            && typeof previous.body === 'string' && previous.utc_time.value !== null && incoming.utc_time.value !== null
+            && normalized(previous.utc_time.value) === normalized(incoming.utc_time.value)
+            && !previous.context.sender_wxid && incoming.role !== 'unknown' && incoming.context.identity_verified === true
+            && typeof incoming.context.sender_wxid === 'string' && incoming.context.sender_wxid.startsWith('wxid_')
+            && incoming.context.sender_id === incoming.context.sender_wxid;
         for (const key of ['sender_id', 'real_sender_id'])
-            if (previous.context[key] !== undefined && incoming.context[key] !== undefined && String(previous.context[key]) !== String(incoming.context[key]))
-                throw new Error('Conflicting known sender');
+            if (previous.context[key] !== undefined && incoming.context[key] !== undefined && String(previous.context[key]) !== String(incoming.context[key])) {
+                const provisionalNumeric = verifiedWechatSender && /^[0-9]+$/.test(String(previous.context[key]))
+                    && String(incoming.context[key]) === incoming.context.sender_wxid;
+                if (!provisionalNumeric) throw new Error('Conflicting known sender');
+            }
         const retainedContext = { ...previous.context, ...incoming.context };
         for (const key of ['identity_verified', 'media_transcribed'])
             if (previous.context[key] === true)
