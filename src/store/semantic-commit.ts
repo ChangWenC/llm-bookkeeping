@@ -241,8 +241,10 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         }
         store.options.onTransactionStep?.('review_patches');
         const batchId = store.allocateId('batch');
-        const explicitEmpty = result.chunks.some(c => c.status === 'complete' && c.zero_facts && !c.chunk_id.startsWith('pages:') && chunks.get(c.chunk_id)!.events.length === 0);
-        const reviewedCoverage = bundle.kind === 'daily' ? bundle.coverage.map(c => store.coverageReview(c, bundle.kind, explicitEmpty)) : structuredClone(bundle.analysis_context?.coverage ?? bundle.monthly_context?.coverage ?? bundle.coverage);
+        const sourceChunks = bundle.chunks.filter(chunk => !chunk.chunk_id.startsWith('pages:'));
+        const explicitEmpty = sourceChunks.length > 0 && sourceChunks.every(chunk => chunk.events.length === 0 && reviews.get(chunk.chunk_id)?.status === 'complete' && reviews.get(chunk.chunk_id)?.zero_facts === true);
+        const boundedEmpty = explicitEmpty && bundle.review_range !== undefined && Date.parse(bundle.review_range.to) - Date.parse(bundle.review_range.from) <= 32 * 86400000 && normalized(bundle.review_range.to) <= normalized(bundle.cutoff);
+        const reviewedCoverage = bundle.kind === 'daily' ? bundle.coverage.map(c => store.coverageReview(c, bundle.kind, boundedEmpty && normalized(c.query_range.from) >= normalized(bundle.review_range!.from) && normalized(c.query_range.to) <= normalized(bundle.review_range!.to))) : structuredClone(bundle.analysis_context?.coverage ?? bundle.monthly_context?.coverage ?? bundle.coverage);
         if (bundle.kind === 'daily')
             for (const coverage of reviewedCoverage)
                 store.db.prepare('UPDATE coverage SET json=? WHERE id=?').run(canonical(coverage), coverage.coverage_id);
