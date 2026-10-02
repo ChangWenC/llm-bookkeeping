@@ -158,6 +158,8 @@ export interface ReviewBundle extends Versioned {
   coverage: SourceCoverage[]; unfinished: CoverageGap[];
   source?: string;
   replay?: SemanticReplayScope;
+  /** Explicit daily empty-review intent (at most 32 days); observational coverage is not this range. */
+  review_range?: TimeRange;
   analysis_context?: WeeklyAnalysisInput; monthly_context?: MonthlyReviewInput;
 }
 export interface ExplicitVerification extends Versioned { name: string; value: string; subject: string; verified_at: string; event_refs: EventRef[]; basis: 'user_explicit_verification' }
