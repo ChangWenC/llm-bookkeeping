@@ -196,8 +196,14 @@ export class SqliteStore implements Store {
                 const lanes = batch.coverage.filter(c => c.provider === event.source.provider && c.account_id === event.source.account_id && (!c.conversation_id || c.conversation_id === event.source.conversation_id)).map(c => c.lane);
                 for (const lane of new Set(lanes.length ? lanes : batch.checkpoints.map(c => c.lane)))
                     this.db.prepare('INSERT OR IGNORE INTO event_lanes VALUES(?,?)').run(event.event_id, lane);
-                if (!event.utc_time.value || !event.journal_date.value || event.classification === 'unknown' || (event.source.provider === 'wechat' && event.role === 'unknown'))
-                    this.putWork({ schema_version: 1, work_id: 'event-gap:' + digest(event.event_id), kind: 'event_identity_time', lane: lanes.includes('live') ? 'live' : 'history', state: 'pending', payload: { event_id: event.event_id }, reason: 'Event identity/time/journal date needs resolution', migration_key: null, updated_at: new Date().toISOString() });
+                if (!event.utc_time.value || !event.journal_date.value || event.classification === 'unknown' || (event.source.provider === 'wechat' && event.role === 'unknown')) {
+                    const workId = 'event-gap:' + digest(event.event_id);
+                    const retained = this.db.prepare('SELECT json FROM work WHERE id=?').get(workId);
+                    // This work belongs to the stable source event, not a capture lane.
+                    // Keep its original lane; putWork still checks kind and exact payload.
+                    const lane = retained ? parse<WorkItem>(retained).lane : lanes.includes('live') ? 'live' : 'history';
+                    this.putWork({ schema_version: 1, work_id: workId, kind: 'event_identity_time', lane, state: 'pending', payload: { event_id: event.event_id }, reason: 'Event identity/time/journal date needs resolution', migration_key: null, updated_at: new Date().toISOString() });
+                }
             }
             this.options.onTransactionStep?.('collection_events');
             for (const coverage of batch.coverage) {
