@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { createStore, digest, canonical } from '../../src/store/index.ts';
-import { config, bundle, collection, event, result } from './fixtures.ts';
-import type { FileIntent, WorkItem } from '../../src/contracts/types.ts';
+import { config, bundle, collection, event, result, value } from './fixtures.ts';
+import type { FileIntent, WorkItem, FactRevision } from '../../src/contracts/types.ts';
 
 const at='2026-10-02T14:00:00Z';
-async function fixture() {
+async function fixture(priorFacts: FactRevision[] = []) {
  const c=await config(),s=await createStore(c),b=bundle();await s.saveBundle(b);
+ for(const fact of priorFacts)s.db.prepare('INSERT INTO facts VALUES(?,?,?,?)').run(fact.fact_id,fact.revision,canonical(fact),fact.recorded_at);
  const before=(await s.backup(join(c.wiki_root,'backups'))).path;
  const r={...result(b,'metadata-only',false),chunks:[],pages:[{schema_version:1 as const,suggestion_id:'meta',date:'2026-09-30',path:b.baselines[0].path,baseline_digest:'absent',mode:'append' as const,old_text:null,new_text:'Synthetic metadata',candidate_ids:[]}]};
  const accepted=await s.commitReview(r),batch=accepted.batch_id;
@@ -64,4 +65,25 @@ test('applied monthly noop intents retain existing blocks and require no restora
  const noOp={...f.original,operation_id:'monthly-supplement:1991-01:noop',path:'wiki/personal/journals/reviews/回顾_1991_01.md',baseline_digest:f.original.desired_digest,desired_digest:f.original.desired_digest,backup_bytes_base64:f.original.desired_bytes_base64};await f.s.saveFileIntent(noOp);
  const plan=await f.s.planMetadataBatchRecovery(f.batch,f.before);assert.equal(plan.original_intents.length,1);assert.deepEqual(plan.noop_intents,[noOp]);await f.s.applyMetadataBatchRecovery(plan,f.before,await restore(f),at);assert.deepEqual(await f.s.getFileIntent(noOp.operation_id),noOp);
  }finally{f.s.close();}
+});
+
+const priorFacts: FactRevision[]=['existing:one','existing:two'].map(fact_id=>({schema_version:1,fact_id,revision:1,event_refs:[],content:'Synthetic existing immutable fact',subject:'Roy',occurred_at:value('1991-01-01T12:00:00Z'),journal_date:value('1991-01-01'),kind:'fact',analytics_projection:{schema_version:1,value:null,reason:'Not projected'},action:'assert',target_refs:[],scope:[],attribution:{},recorded_at:'2026-01-01T00:00:00Z'}));
+const priorRefs=priorFacts.map(fact=>({schema_version:1 as const,fact_id:fact.fact_id,revision:fact.revision}));
+function referencedNoop(f:Awaited<ReturnType<typeof fixture>>,refs=priorRefs): FileIntent {return {...f.original,operation_id:'monthly-supplement:1991-01:referenced-noop',path:'wiki/personal/journals/reviews/回顾_1991_01.md',baseline_digest:f.original.desired_digest,desired_digest:f.original.desired_digest,backup_bytes_base64:f.original.desired_bytes_base64,fact_refs:refs};}
+test('unchanged applied monthly noop may retain two exact preexisting immutable fact references without restoring bytes or changing facts',async()=>{
+ const f=await fixture(priorFacts);try {
+ const noop=referencedNoop(f);await f.s.saveFileIntent(noop);const factsBefore=f.s.db.prepare('SELECT * FROM facts ORDER BY id,revision').all();
+ const plan=await f.s.planMetadataBatchRecovery(f.batch,f.before);assert.deepEqual(plan.noop_intents,[noop]);assert.equal(plan.original_intents.length,1);await f.s.applyMetadataBatchRecovery(plan,f.before,await restore(f),at);
+ assert.deepEqual(await f.s.getFileIntent(noop.operation_id),noop);assert.deepEqual(f.s.db.prepare('SELECT * FROM facts ORDER BY id,revision').all(),factsBefore);
+ }finally{f.s.close();}
+});
+test('monthly noop rejects unknown/new fact references and changed appends still reject all fact references',async()=>{
+ for(const kind of ['unknown','revision','new','append']) {
+  const f=await fixture(priorFacts);try {
+   if(kind==='new'){const added={...priorFacts[0],fact_id:'new:after-backup'};f.s.db.prepare('INSERT INTO facts VALUES(?,?,?,?)').run(added.fact_id,added.revision,canonical(added),added.recorded_at);await f.s.saveFileIntent(referencedNoop(f,[{schema_version:1,fact_id:added.fact_id,revision:1}]));}
+   else if(kind==='append'){const row={...f.original,fact_refs:priorRefs};f.s.db.prepare('UPDATE intents SET json=? WHERE id=?').run(canonical(row),row.operation_id);}
+   else await f.s.saveFileIntent(referencedNoop(f,kind==='unknown'?[{schema_version:1,fact_id:'unknown',revision:1}]:[{schema_version:1,fact_id:priorFacts[0].fact_id,revision:2}]));
+   const work=await f.s.listWork();await assert.rejects(f.s.planMetadataBatchRecovery(f.batch,f.before),/fact reference|facts changed/);assert.deepEqual(await f.s.listWork(),work);assert.equal((await f.s.listReadyBatches('monthly-display')).length,1);
+  }finally{f.s.close();}
+ }
 });

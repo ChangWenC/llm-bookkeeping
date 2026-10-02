@@ -69,13 +69,24 @@ function inspect(store: RecoveryStore, before: DatabaseSync, batchId: string, sh
  const originals=intents.filter(intent=>!oldIntents.has(intent.operation_id) && intent.operation_id.startsWith('monthly-supplement:') && months.some(month=>intent.operation_id.startsWith('monthly-supplement:'+month+':')));
  for(const intent of originals) {
   const month=intent.operation_id.split(':')[1];
-  assert(intent.state==='applied' && intent.fact_refs.length===0 && intent.backup_bytes_base64!==null && intent.desired_bytes_base64!==null,'monthly intent is not an applied zero-fact modification');
+  assert(intent.state==='applied' && intent.backup_bytes_base64!==null && intent.desired_bytes_base64!==null,'monthly intent is not an applied modification with saved bytes');
+  const noop=intent.baseline_digest===intent.desired_digest && intent.backup_bytes_base64===intent.desired_bytes_base64;
+  if(noop) {
+   for(const ref of intent.fact_refs) {
+    assert(ref.schema_version===1 && typeof ref.fact_id==='string' && ref.fact_id.length>0 && Number.isSafeInteger(ref.revision) && ref.revision>0,'invalid noop fact reference');
+    const prior=before.prepare('SELECT * FROM facts WHERE id=? AND revision=?').get(ref.fact_id,ref.revision);
+    const current=store.db.prepare('SELECT * FROM facts WHERE id=? AND revision=?').get(ref.fact_id,ref.revision);
+    assert(prior && current && same(prior,current),'noop fact reference not present unchanged in before snapshot');
+    const fact=JSON.parse(String(prior.json));
+    assert(fact.schema_version===1 && fact.fact_id===ref.fact_id && fact.revision===ref.revision,'noop fact reference identity differs from saved revision');
+   }
+  } else assert(intent.fact_refs.length===0,'changed monthly append contains fact references');
   assert(intent.created_at>=artifact.created_at,'monthly intent predates batch');
   const baselineBytes=Buffer.from(intent.backup_bytes_base64!,'base64'),baseline=baselineBytes.toString('utf8');
   const body='## 补记与更正\n\n当前没有待展示的有效补记。\n\n';
   const block=`<!-- bookkeeping:monthly-supplement:start month=${month} digest=${digest(body)} -->\n${body}<!-- bookkeeping:monthly-supplement:end -->`;
   const expected=Buffer.from(`${baseline}${baseline.endsWith('\n') ? '\n' : '\n\n'}${block}\n`);
-  assert(baselineBytes.equals(Buffer.from(baseline)) && (expected.equals(Buffer.from(intent.desired_bytes_base64!,'base64')) || (intent.baseline_digest===intent.desired_digest && intent.backup_bytes_base64===intent.desired_bytes_base64)),'monthly intent is not exactly an empty derived append or unchanged noop');
+  assert(baselineBytes.equals(Buffer.from(baseline)) && (expected.equals(Buffer.from(intent.desired_bytes_base64!,'base64')) || noop),'monthly intent is not exactly an empty derived append or unchanged noop');
   assert(intent.path===`wiki/personal/journals/reviews/回顾_${month.replace('-','_')}.md`,'unexpected monthly target path');
   assert(selected.some(item=>item.kind==='monthly_display' && item.payload.month===month),'monthly intent has no exact batch display work');
   assert(intents.filter(other=>!oldIntents.has(other.operation_id) && other.path===intent.path && !other.operation_id.startsWith('metadata-recovery:')).length===1,'competing new intent for monthly path');
