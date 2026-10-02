@@ -375,12 +375,34 @@ export class FileAdapter implements SourceAdapter {
               identity.id !== null,
           );
         let old = existing?.cursor as unknown as FileCursor | undefined;
-        const base = old ?? (live?.cursor as unknown as FileCursor | undefined);
-        let generation = existing?.generation ?? live?.generation ?? "0";
+        // Normal checkpoints supplied as witnesses never enter discovery or read
+        // progress. Only scoped checkpoints may supply offsets, history boundaries,
+        // pending lines, parse state or already-seen event IDs.
+        const progressBase = old ?? (live?.cursor as unknown as FileCursor | undefined);
+        const witness = !progressBase ? context.generation_checkpoints
+          ?.filter(c => matches(c) && c.locator !== "@discovery" &&
+            (c.locator === p || (identity.id !== null && c.cursor.identity === identity.id)))
+          .sort((a, b) => Number(b.locator === p) - Number(a.locator === p) ||
+            b.updated_at.localeCompare(a.updated_at) ||
+            Number(b.lane === "live") - Number(a.lane === "live"))[0] : undefined;
+        const base = progressBase ?? (witness?.cursor as unknown as FileCursor | undefined);
+        let generation = existing?.generation ?? live?.generation ?? witness?.generation ?? "0";
         let anchorUncertainty = base?.anchor_uncertainty;
         let rewritten = false;
         let verifiedAnchor: string | null = null;
         const gaps: CoverageGap[] = [];
+        if (witness && base && (!Number.isSafeInteger(base.offset) || base.offset < 0 ||
+            typeof witness.generation !== "string" || !witness.generation ||
+            typeof base.header_hash !== "string" || !/^[a-f0-9]{64}$/.test(base.header_hash) ||
+            (base.anchor != null && base.anchor !== "" && (typeof base.anchor !== "string" || !/^[a-f0-9]{64}$/.test(base.anchor))))) {
+          // Malformed metadata cannot identify a generation or certify an empty
+          // scope. Leave this source for a later valid witness rather than reset.
+          const uncertain = gap("generation_witness_metadata_invalid", p);
+          fileGaps.push(uncertain);
+          d.files.push(p);
+          yield make([], [uncertain], [], [], identity.id, "partial");
+          continue;
+        }
         if (base && (eof < base.offset || base.header_hash !== headerHash)) {
           rewritten = true;
           generation = hash(
@@ -395,6 +417,7 @@ export class FileAdapter implements SourceAdapter {
           );
           if (anchor.length !== expectedLength) {
             gaps.push(gap("anchor_verification_budget_pending", p));
+            if (witness) anchorUncertainty ??= { from: base.offset - expectedLength, to: base.offset, generation, reason: "generation_witness_anchor_budget_pending" };
           } else if (base.anchor === hash(Buffer.alloc(0))) {
             // Older code saved hash(empty) when its read budget was exhausted.
             // This is missing evidence, never evidence of a rewritten source.
@@ -414,6 +437,10 @@ export class FileAdapter implements SourceAdapter {
             ).slice(0, 20);
             old = undefined;
           }
+        }
+        if (witness && base?.offset && !rewritten && !base.anchor) {
+          gaps.push(gap("generation_witness_anchor_unproven", p));
+          anchorUncertainty ??= { from: Math.max(0, base.offset - 128), to: base.offset, generation, reason: "generation_witness_anchor_unproven" };
         }
         const excluded =
           identity.classification === "subagent" ||
@@ -448,10 +475,10 @@ export class FileAdapter implements SourceAdapter {
         let start = 0,
           end = eof,
           historyEnd =
-            old?.history_end ?? (rewritten ? 0 : (base?.history_end ?? 0));
+            old?.history_end ?? (rewritten ? 0 : (progressBase?.history_end ?? 0));
         if (request.lane === "history") {
           end =
-            old?.history_end ?? (rewritten ? eof : (base?.history_end ?? eof));
+            old?.history_end ?? (rewritten ? eof : (progressBase?.history_end ?? eof));
           start = old?.offset ?? 0;
           historyEnd = end;
         } else if (old) {
