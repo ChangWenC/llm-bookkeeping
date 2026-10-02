@@ -13,6 +13,8 @@ Use Node 25.8.0, `npm ci --ignore-scripts`, then `npm test`. Use an isolated tem
 3. `node src/cli.ts publish --input /absolute/ReviewResult.json --config /absolute/config.json` persists the semantic transaction once and independently exports/applies/queues. If interrupted, use `publish --resume`. File conflicts remain drafts and do not revoke committed facts.
 4. `node src/cli.ts consume --target all --config /absolute/config.json` delivers ready exported batches. Monthly queues preparation work. `status` reports durable remaining work. Partial history does not block live.
 
+For coordinator inspection of saved daily material and the exact human-authored result fields, see [review-result-authoring.md](review-result-authoring.md). `tools/inspect-review-material.ts` pages whole records without text truncation and never creates review progress.
+
 ## Other commands
 
 All commands accept `--config /absolute/config.json`.
