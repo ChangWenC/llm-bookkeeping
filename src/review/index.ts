@@ -251,13 +251,23 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             const finish = async () => {
                 if (!current)
                     return;
-                const omitted = current.coverage.length < coverage.length || current.existing_facts.length < facts.length || unfinished.some(g => !current!.unfinished.some(existing => canonical(existing) === canonical(g)));
-                current.unfinished = current.unfinished.filter(g => g.reason !== omittedMarker);
-                if (omitted)
-                    current.unfinished.unshift(gap(`${omittedMarker}: coverage ${current.coverage.length}/${coverage.length}, facts ${current.existing_facts.length}/${facts.length}; remaining metadata stays pending`, range));
-                current.bundle_id = 'bundle:' + digest(canonical({ ...current, bundle_id: null }));
-                if (Buffer.byteLength(canonical(current)) > limits.bundle_bytes)
-                    throw new Error('Preparation metadata cannot fit bounded bundle');
+                const material = { ...current, unfinished: current.unfinished.filter(g => g.reason !== omittedMarker) };
+                // The final omission description and fixed-length identity are part of
+                // the hard byte budget. Trim optional context only, never primary events.
+                while (true) {
+                    const retained = new Set(material.unfinished.map(g => canonical(g)));
+                    const omitted = material.coverage.length < coverage.length || material.existing_facts.length < facts.length || unfinished.some(g => !retained.has(canonical(g)));
+                    const finished = { ...material, unfinished: omitted ? [gap(`${omittedMarker}: coverage ${material.coverage.length}/${coverage.length}, facts ${material.existing_facts.length}/${facts.length}; remaining metadata stays pending`, range), ...material.unfinished] : [...material.unfinished] };
+                    finished.bundle_id = 'bundle:' + digest(canonical({ ...finished, bundle_id: null }));
+                    if (Buffer.byteLength(canonical(finished)) <= limits.bundle_bytes) {
+                        current = finished;
+                        break;
+                    }
+                    if (material.unfinished.length) material.unfinished.pop();
+                    else if (material.coverage.length) material.coverage.pop();
+                    else if (material.existing_facts.length) material.existing_facts.pop();
+                    else throw new Error('Primary review material cannot fit bounded bundle');
+                }
                 if (persist) await store.saveBundle(current);
                 bundles.push(current);
                 current = null;
