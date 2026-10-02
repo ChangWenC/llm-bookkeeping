@@ -77,8 +77,8 @@ function routeArgs(source: ProviderConfig): string[] {
   }
   return ["--account", source.account_id, "--bundle-id", bundle];
 }
-function historyWindow(chat: string, request: CollectRequest) {
-  const group = chat.endsWith("@chatroom") && request.lane !== "history";
+function historyWindow(chat: string, request: CollectRequest, isGroup = chat.endsWith("@chatroom")) {
+  const group = isGroup && request.lane !== "history";
   return {
     from: Math.floor(
       (Date.parse(request.range.from) - (group ? 20 * 60000 : 0)) / 1000,
@@ -95,8 +95,9 @@ export function historyArgs(
   source: ProviderConfig,
   chat: string,
   request: CollectRequest,
+  conversationType?: string | boolean,
 ): string[] {
-  const window = historyWindow(chat, request);
+  const window = historyWindow(chat, request, wechatConversationScope(source.options, chat, conversationType).is_group);
   return [
     ...routeArgs(source),
     "history",
@@ -213,8 +214,9 @@ export function parseWechatHistory(
   request: CollectRequest,
   config: BookkeepingConfig,
   contextAnchors?: number[],
+  conversationType?: string | boolean,
 ): { events: SourceEvent[]; gaps: CoverageGap[] } {
-  const admission = wechatConversationScope(source.options, chat);
+  const admission = wechatConversationScope(source.options, chat, conversationType);
   if (!admission.admitted) return { events: [], gaps: [gap(admission.reason!, chat)] };
   const parsed = parseLossless(text);
   if (!parsed || !parsed.meta || !Array.isArray(parsed.rows))
@@ -241,7 +243,7 @@ export function parseWechatHistory(
     gaps.push(gap(`wechat_status:${meta.status ?? "unknown"}`, chat));
   if (meta.account_id && String(meta.account_id) !== source.account_id)
     gaps.push(gap("wechat_account_mismatch", chat));
-  const expectedWindow = historyWindow(chat, request);
+  const expectedWindow = historyWindow(chat, request, admission.is_group);
   if (
     Number(meta.since_resolved) !== expectedWindow.from ||
     Number(meta.until_resolved) !== expectedWindow.to
@@ -567,7 +569,12 @@ export class WechatAdapter implements SourceAdapter {
       }
     }
     chats = [...new Set([...chats, ...(Array.isArray(this.source.options.pinned_chats) ? this.source.options.pinned_chats.map(String) : [])])];
-    chats = chats.filter(chat => wechatConversationScope(this.source.options, chat, chatTypes[chat]).admitted);
+    chats = chats.filter(chat => {
+      const admission = wechatConversationScope(this.source.options, chat, chatTypes[chat]);
+      if (!admission.admitted && admission.reason === 'wechat_conversation_type_unknown')
+        discoveryGaps.push(gap(admission.reason, chat));
+      return admission.admitted;
+    });
     if (!chats.length) {
       yield make(
         [],
@@ -668,7 +675,7 @@ export class WechatAdapter implements SourceAdapter {
             historyQueries++;
             chatQueries++;
           }
-          const args = historyArgs(routedSource, chat, query);
+          const args = historyArgs(routedSource, chat, query, chatTypes[chat]);
           const raw = await this.runner(
             String(this.source.options.binary ?? "wechat-use"),
             args,
@@ -685,6 +692,7 @@ export class WechatAdapter implements SourceAdapter {
             query,
             this.config,
             window?.purpose === "context" ? window.anchor_times : undefined,
+            chatTypes[chat],
           );
           if (history && window) {
             const rows = parseLossless(raw).rows;
@@ -703,7 +711,7 @@ export class WechatAdapter implements SourceAdapter {
               const capped = rows.length >= Math.min(10000, Number(this.source.options.limit ?? 2000));
               if (late) recordLateWindow(history, window, capped, rows.length, request, this.source.options, false, selected?.deferred);
               else recordHistoryWindow(history, window, capped);
-              if (!capped && window.purpose !== "context" && chat.endsWith("@chatroom")) {
+              if (!capped && window.purpose !== "context" && wechatConversationScope(this.source.options, chat, chatTypes[chat]).is_group) {
                 const anchors = parsed.events.filter(event => !event.context.context_only && (event.role === "user" || event.context.is_mentioned === true))
                   .flatMap(event => event.utc_time.value ? [Date.parse(event.utc_time.value)] : []);
                 queueGroupContext(late ? history.late_sweep! : history, anchors, request.cutoff);

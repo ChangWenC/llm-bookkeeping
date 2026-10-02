@@ -26,7 +26,7 @@ function row(id = 'native-message', sender: string | null = 'wxid_owner', minute
 }
 test('exact allowlist rejects discovered and pinned groups before body calls despite changed or missing group names', async () => {
   const c = config(), options = c.providers[0].options;
-  options.chats = ['excluded@chatroom']; options.pinned_chats = ['pinned@chatroom']; options.discover_sessions = true;
+  options.chats = ['excluded@chatroom', 'unclassified-stable-id']; options.pinned_chats = ['pinned@chatroom']; options.discover_sessions = true;
   const asked: string[] = [], batches: CollectionBatch[] = [];
   const runner = async (_binary: string, args: string[]) => {
     if (args.includes('sessions')) return JSON.stringify({ meta: { status: 'ok' }, rows: [
@@ -36,7 +36,7 @@ test('exact allowlist rejects discovered and pinned groups before body calls des
       { username: 'gh_service', chat_type: 'private' },
     ] });
     const chat = args[args.indexOf('--chat') + 1]; asked.push(chat);
-    assert(!['excluded@chatroom', 'pinned@chatroom', 'unnamed@chatroom', 'gh_service'].includes(chat));
+    assert(!['excluded@chatroom', 'pinned@chatroom', 'unnamed@chatroom', 'gh_service', 'unclassified-stable-id'].includes(chat));
     return payload(chat.endsWith('@chatroom') ? [row('anchor'), row('near', 'wxid_other', 19), row('far', 'wxid_other', 21)] : [row()], args);
   };
   for await (const batch of new WechatAdapter(c.providers[0], c, runner).collect(request, { config: c, checkpoints: [] })) batches.push(batch);
@@ -59,6 +59,10 @@ test('empty group list excludes all groups; malformed scope fails only the adapt
   assert.equal(batches[0].coverage[0].gaps[0].reason, 'wechat_group_allowlist_invalid');
   assert.equal(wechatConversationScope({ group_allowlist: [] }, 'private', 'unknown').admitted, false);
   assert.equal(wechatConversationScope({}, 'old@chatroom').admitted, true);
+  assert.equal(wechatConversationScope({ group_allowlist: [] }, 'unclassified').reason, 'wechat_conversation_type_unknown');
+  assert.equal(wechatConversationScope({ group_allowlist: [] }, 'private', 'private').admitted, true);
+  assert.equal(wechatConversationScope({ group_allowlist: [], chat_types: { private: 'private' } }, 'private').admitted, true);
+  assert.equal(wechatConversationScope({ group_allowlist: [], chat_types: { private: 'private' } }, 'private', 'group').admitted, false);
 });
 test('excluded export bodies and excluded history are not parsed or decoded', () => {
   const c = config(), bytes = Buffer.from('malformed anonymous body');
@@ -68,6 +72,7 @@ test('excluded export bodies and excluded history are not parsed or decoded', ()
     assert.deepEqual(parsed.events, []); assert.deepEqual(parsed.members, []); assert.deepEqual(parsed.metadata, {});
     assert.equal(parsed.gaps[0].reason, 'wechat_group_not_allowlisted');
   }
+  assert.equal(parseChatExport(bytes, 'legacy-json', { account_id: 'unknown-account', conversation_id: 'selected@chatroom', locator: 'anonymous-export' }, c).gaps[0].reason, 'wechat_import_account_scope_missing_or_ambiguous');
   assert.equal(parseWechatHistory('malformed body', c.providers[0], 'excluded@chatroom', request, c).events.length, 0);
   assert.equal(parseChatExport(bytes, 'legacy-json', { account_id: 'wxid_owner', conversation_id: 'gh_service', locator: 'anonymous-export' }, c).gaps[0].reason, 'wechat_service_chat_excluded');
 });
@@ -75,22 +80,22 @@ test('native wxid wins conflicting alias and sender flag; numeric representation
   const c = config(), source = c.providers[0];
   Object.assign(source.options, { self_aliases: ['owner alias'], aliases_verified: true, sender_is_self_verified: true });
   const conflicting = { ...row('conflict', 'wxid_other'), sender_name: 'owner alias', sender_is_self: true, real_sender_id: '2' };
-  assert.equal(parseWechatHistory(payload([conflicting]), source, 'private', request, c).events[0].role, 'other');
+  assert.equal(parseWechatHistory(payload([conflicting]), source, 'private', request, c, undefined, 'private').events[0].role, 'other');
   const numeric = { ...row('numeric', null), real_sender_id: '2', sender_name: 'owner alias' };
-  assert.equal(parseWechatHistory(payload([numeric]), source, 'private', request, c).events[0].role, 'unknown');
+  assert.equal(parseWechatHistory(payload([numeric]), source, 'private', request, c, undefined, 'private').events[0].role, 'unknown');
   source.options.self_ids_by_chat = { private: ['2', '8'] };
-  const first = parseWechatHistory(payload([numeric]), source, 'private', request, c).events[0];
-  const second = parseWechatHistory(payload([{ ...numeric, real_sender_id: '8' }]), source, 'private', request, c).events[0];
+  const first = parseWechatHistory(payload([numeric]), source, 'private', request, c, undefined, 'private').events[0];
+  const second = parseWechatHistory(payload([{ ...numeric, real_sender_id: '8' }]), source, 'private', request, c, undefined, 'private').events[0];
   assert.equal(first.role, 'user'); assert.equal(first.context.sender_wxid, 'wxid_owner'); assert.deepEqual(first, second);
-  assert.equal(parseWechatHistory(payload([numeric]), source, 'other-private', request, c).events[0].role, 'unknown');
+  assert.equal(parseWechatHistory(payload([numeric]), source, 'other-private', request, c, undefined, 'private').events[0].role, 'unknown');
   const flag = { ...row('flag', null), sender_is_self: true };
   source.options.sender_is_self_verified = false;
-  assert.equal(parseWechatHistory(payload([flag]), source, 'private', request, c).events[0].role, 'unknown');
+  assert.equal(parseWechatHistory(payload([flag]), source, 'private', request, c, undefined, 'private').events[0].role, 'unknown');
   source.options.sender_is_self_verified = true;
-  assert.equal(parseWechatHistory(payload([flag]), source, 'private', request, c).events[0].role, 'user');
+  assert.equal(parseWechatHistory(payload([flag]), source, 'private', request, c, undefined, 'private').events[0].role, 'user');
 });
 test('import native identity overrides display alias and unknown numeric identity stays unknown', () => {
-  const c = config(), manifest = { account_id: 'wxid_owner', conversation_id: 'private', locator: 'synthetic-export', identity_verified: true,
+  const c = config(), manifest = { account_id: 'wxid_owner', conversation_id: 'private', conversation_type: 'private' as const, locator: 'synthetic-export', identity_verified: true,
     self_ids: ['wxid_owner'], aliases_verified: true, self_aliases: ['owner alias'] };
   const parsed = parseChatExport(JSON.stringify({ ...row('conflict', 'wxid_other'), sender: 'owner alias' }), 'legacy-jsonl', manifest, c);
   assert.equal(parsed.events[0].role, 'other'); assert.equal(parsed.events[0].context.sender_wxid, 'wxid_other');

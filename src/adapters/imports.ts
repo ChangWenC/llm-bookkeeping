@@ -4,7 +4,7 @@ import type {
   CoverageGap,
 } from "../contracts/types.ts";
 import { event, gap, hash, parseLossless } from "./common.ts";
-import { wechatConversationScope } from "./wechat-policy.ts";
+import { wechatImportScope } from "./wechat-policy.ts";
 import { resolveWechatSender, selfMention, verifiedAliases } from "./wechat-identity.ts";
 export interface ImportMetadata {
   account_id: string;
@@ -40,8 +40,7 @@ export function parseChatExport(
   if (!manifest.account_id || !manifest.conversation_id || !manifest.locator)
     throw new Error("import_requires_account_conversation_locator");
   const provider = manifest.provider ?? "wechat";
-  const source = config.providers.find(source => source.provider === provider && source.account_id === manifest.account_id);
-  const admission = provider === "wechat" ? wechatConversationScope(source?.options ?? {}, manifest.conversation_id, manifest.conversation_type) : null;
+  const admission = provider === "wechat" ? wechatImportScope(config.providers, manifest.account_id, manifest.conversation_id, manifest.conversation_type) : null;
   if (admission && !admission.admitted)
     return { events: [], gaps: [gap(admission.reason!, manifest.locator)], members: [], metadata: {} };
   const text = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : bytes;
