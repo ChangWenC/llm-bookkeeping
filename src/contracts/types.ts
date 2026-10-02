@@ -227,7 +227,7 @@ export interface LegacyImportResult extends Versioned { migration_key: string; r
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
 export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean; source?: string }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
-export interface SemanticReplayRequest extends Versioned { replay_key: string; source: string; range: TimeRange; cutoff: string }
+export interface SemanticReplayRequest extends Versioned { replay_key: string; source: string; range: TimeRange; cutoff: string; event_ids?: string[] }
 export interface SemanticReplayScope extends Versioned { work_id: string; source: string; range: TimeRange }
 export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number; replay_id?: string; source?: string; max_bundles?: number; range?: TimeRange }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }

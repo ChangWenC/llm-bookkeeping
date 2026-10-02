@@ -3191,6 +3191,12 @@
         },
         "cutoff": {
           "type": "string"
+        },
+        "event_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
