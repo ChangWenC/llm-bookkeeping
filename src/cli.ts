@@ -6,14 +6,14 @@ import { pathToFileURL } from 'node:url';
 import { loadConfig, absolutePath, DEFAULT_COLLECTION_BUDGETS, canonicalLocation, validateDataLocation } from './config.ts';
 import { InputError, utc, utcComparisonKey, date, parseJsonPreservingIntegers, validateManifest, validateReviewResult, version, array, string } from './contracts/validation.ts';
 import { createRuntime, restoreRuntime, UnavailableError } from './runtime.ts';
-import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, SourceAdapter, SourceCoverage } from './contracts/types.ts';
+import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, SourceAdapter, SourceCoverage, CollectionBatch } from './contracts/types.ts';
 
 export const COMMANDS = ['collect','prepare','publish','consume','archive','import','migrate','replay','facts','analytics-review','status','backup','restore','validate'] as const;
 export interface ParsedCommand { command: typeof COMMANDS[number]; options: Record<string,string|boolean> }
 const allowed: Record<string, string[]> = {
-  collect: ['lane'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset', 'replay-id', 'source', 'max-bundles', 'from', 'to'], publish: ['input', 'resume'],
+  collect: ['lane', 'source', 'from', 'to', 'cutoff'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset', 'replay-id', 'source', 'max-bundles', 'from', 'to'], publish: ['input', 'resume'],
   consume: ['target'], archive: ['month', 'report', 'apply'], import: ['manifest'], migrate: ['manifest'],
-  replay: ['source', 'from', 'to', 'replay-key'], facts: ['from', 'to'], 'analytics-review': ['input'],
+  replay: ['source', 'from', 'to', 'replay-key', 'events'], facts: ['from', 'to'], 'analytics-review': ['input'],
   status: [], backup: ['output'], restore: ['input', 'data-dir'], validate: ['scope'],
 };
 const booleans = new Set(['resume', 'report', 'apply']);
@@ -57,7 +57,19 @@ export function parseArgs(args: string[]): ParsedCommand {
   }
   if (options.config) absolutePath(options.config, 'config');
   switch (command) {
-    case 'collect': oneOf(options, 'lane', ['live', 'history']); break;
+    case 'collect': {
+      const lane = oneOf(options, 'lane', ['live', 'history']);
+      if (options.cutoff) utc(required(options, 'cutoff'), 'cutoff');
+      if (options.from !== undefined || options.to !== undefined) {
+        const from = utc(required(options, 'from'), 'from');
+        const to = utc(required(options, 'to'), 'to');
+        if (utcComparisonKey(from) >= utcComparisonKey(to)) throw new InputError('--from must precede --to');
+        if (lane !== 'history') throw new InputError('Explicit capture range requires history lane');
+        utc(required(options, 'cutoff'), 'cutoff');
+        if (utcComparisonKey(to) > utcComparisonKey(required(options, 'cutoff'))) throw new InputError('--to cannot follow collection cutoff');
+      }
+      break;
+    }
     case 'prepare': {
       const kind = oneOf(options, 'kind', ['daily', 'weekly', 'monthly']);
       oneOf(options, 'lane', ['live', 'history']);
@@ -104,6 +116,7 @@ export function parseArgs(args: string[]): ParsedCommand {
       if (utcComparisonKey(from) >= utcComparisonKey(to)) throw new InputError('--from must precede --to');
       if (command === 'replay') {
         required(options, 'source');
+        if (options.events) absolutePath(required(options, 'events'), 'events');
         if (options['replay-key'] && (!required(options, 'replay-key').trim() || required(options, 'replay-key').length > 512))
           throw new InputError('--replay-key: nonempty key of at most 512 characters required');
       }
@@ -132,13 +145,20 @@ function storageFailure(error: unknown): Error {
   return wrapped;
 }
 
-async function adapterCheckpoints(services: RuntimeServices, provider: string) {
+async function adapterCheckpoints(services: RuntimeServices, provider: string, captureScope?: string) {
   let live, history;
   try { [live, history] = await Promise.all([
     services.store.getCheckpoints(provider, 'live'),
     services.store.getCheckpoints(provider, 'history'),
   ]); } catch (error) { throw storageFailure(error); }
-  return [...live, ...history];
+  return [...live, ...history].filter(checkpoint => captureScope
+    ? checkpoint.cursor.manual_capture_scope === captureScope
+    : checkpoint.cursor.manual_capture_scope === undefined).map(checkpoint => {
+      if (!captureScope) return checkpoint;
+      const { manual_capture_scope: _scope, manual_original_checkpoint_id: original, ...cursor } = checkpoint.cursor;
+      if (typeof original !== 'string') throw storageFailure(new Error('Scoped capture checkpoint missing original identity'));
+      return { ...checkpoint, checkpoint_id: original, cursor };
+    });
 }
 
 function commandRange(options: ParsedCommand['options']): TimeRange {
@@ -176,9 +196,31 @@ async function recordCollectionFailure(
   }
 }
 
+/** Range-local progress never advances regular live/history checkpoints. */
+function scopedCaptureBatch(batch: CollectionBatch, scope: string, range: TimeRange): CollectionBatch {
+  const id = (original: string) => 'capture:' + createHash('sha256').update(JSON.stringify([scope, original])).digest('hex');
+  const unknown = batch.events.filter(event => event.utc_time.value === null);
+  return {
+    ...batch, batch_id: id(batch.batch_id),
+    // Complete raw fragments remain available for source parsing/audit. Unknown
+    // timestamps remain durable local evidence and explicitly partial coverage.
+    events: batch.events.filter(event => event.utc_time.value === null || (event.source.provider === 'wechat' && event.context.context_only === true) || (utcComparisonKey(event.utc_time.value) >= utcComparisonKey(range.from) && utcComparisonKey(event.utc_time.value) < utcComparisonKey(range.to))),
+    checkpoints: batch.checkpoints.map(checkpoint => ({ ...checkpoint, checkpoint_id: id(checkpoint.checkpoint_id), cursor: { ...checkpoint.cursor, manual_capture_scope: scope, manual_original_checkpoint_id: checkpoint.checkpoint_id } })),
+    coverage: batch.coverage.map(coverage => ({ ...coverage, coverage_id: id(coverage.coverage_id),
+      capture_status: unknown.length && coverage.capture_status === 'complete' ? 'partial' : coverage.capture_status,
+      gaps: [...coverage.gaps, ...unknown.map(event => ({ schema_version: 1 as const, range: null, reason: 'manual_capture_event_time_unknown', locator: event.locator, resumable: true }))],
+    })),
+  };
+}
+
 async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string) {
-  const lane = required(parsed.options, 'lane') as Lane;
-  const query: TimeRange = {
+  const options = parsed.options;
+  const lane = required(options, 'lane') as Lane;
+  cutoff = typeof options.cutoff === 'string' ? options.cutoff : cutoff;
+  const source = typeof options.source === 'string' ? options.source : undefined;
+  if (source && !config.providers.some(provider => provider.provider === source && provider.enabled)) throw new InputError(`Unknown or disabled source ${source}`);
+  const explicitRange = options.from === undefined ? undefined : commandRange(options);
+  const query: TimeRange = explicitRange ?? {
     schema_version: 1,
     from: lane === 'live'
       ? new Date(Math.max(Date.parse(config.live_start), Date.parse(cutoff) - 48 * 3_600_000)).toISOString()
@@ -186,16 +228,21 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     to: cutoff,
   };
   if (utcComparisonKey(query.from) >= utcComparisonKey(query.to)) throw new InputError('Collection cutoff must follow configured live/history start');
-  if (!services.adapters.length) unavailable('enabled source adapters');
+  const adapters = services.adapters.filter(adapter => !source || adapter.provider === source);
+  if (!adapters.length) unavailable('enabled source adapters');
+  const captureScope = explicitRange ? createHash('sha256').update(JSON.stringify([source ?? '*', utcComparisonKey(query.from), utcComparisonKey(query.to), utcComparisonKey(cutoff)])).digest('hex') : undefined;
   const budget = config.collection_budgets?.[lane] ?? DEFAULT_COLLECTION_BUDGETS[lane];
   const providers = [];
-  for (const adapter of services.adapters) {
+  for (const adapter of adapters) {
     let batches = 0;
     let events = 0;
-    const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
+    const context = { checkpoints: await adapterCheckpoints(services, adapter.provider, captureScope), config,
+      ...(captureScope ? { generation_checkpoints: await adapterCheckpoints(services, adapter.provider) } : {}),
+    };
     let persisting = false;
     try {
-      for await (const batch of adapter.collect({ lane, cutoff, range: query, budget }, context)) {
+      for await (const captured of adapter.collect({ lane, cutoff, range: query, budget }, context)) {
+        const batch = captureScope ? scopedCaptureBatch(captured, captureScope, query) : captured;
         persisting = true;
         await services.store.saveCollection(batch);
         persisting = false;
@@ -211,7 +258,7 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
       providers.push({ provider: adapter.provider, execution_status: 'partial', batches, events, reason });
     }
   }
-  return { schema_version: 1, lane, cutoff, providers, coverage: await services.store.listCoverage(query) };
+  return { schema_version: 1, lane, cutoff, ...(source ? { source } : {}), range: query, ...(captureScope ? { capture_scope: captureScope } : {}), providers, coverage: (await services.store.listCoverage(query)).filter(item => !source || item.provider === source) };
 }
 
 async function privateDirectory(path: string, config: BookkeepingConfig): Promise<void> {
@@ -347,6 +394,12 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
   const adapters = services.adapters.filter(item => item.provider === source);
   if (!adapters.length) throw new InputError(`Unknown source ${source}`);
   const range = commandRange(parsed.options);
+  let eventIds: string[] | undefined;
+  if (parsed.options.events) {
+    const manifest = version(await readJson(required(parsed.options, 'events')), 'replay event manifest');
+    eventIds = array(manifest.event_ids, 'event_ids').map(value => string(value, 'event_id'));
+    if (!eventIds.length || eventIds.length > 64 || new Set(eventIds).size !== eventIds.length) throw new InputError('Replay event selection requires 1–64 unique event IDs');
+  }
   const configured = config.providers.filter(item => item.enabled && item.provider === source);
   let batches = 0;
   const recapture = [];
@@ -356,7 +409,8 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
     const accountId = adapter.account_id ?? (configured.length === adapters.length ? configured[index].account_id : undefined);
     let saved = 0;
     let completeCapture = true;
-    const context = { checkpoints: await adapterCheckpoints(services, adapter.provider), config };
+    const checkpoints = await adapterCheckpoints(services, adapter.provider);
+    const context = { checkpoints, generation_checkpoints: checkpoints, config };
     let persisting = false;
     try {
       if (!adapter.replay) throw new Error(`Source adapter does not support recapture: ${source}`);
@@ -388,7 +442,7 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
   }
   const replayKey = typeof parsed.options['replay-key'] === 'string' ? parsed.options['replay-key']
     : 'range:' + createHash('sha256').update(JSON.stringify([source, utcComparisonKey(range.from), utcComparisonKey(range.to)])).digest('hex');
-  const work = await services.store.requestSemanticReplay({ schema_version: 1, replay_key: replayKey, source, range, cutoff });
+  const work = await services.store.requestSemanticReplay({ schema_version: 1, replay_key: replayKey, source, range, cutoff, ...(eventIds ? { event_ids: eventIds } : {}) });
   return { schema_version: 1, source, batches, range, recapture, replay_id: work.work_id, cutoff: work.payload.cutoff, review_state: work.state,
     next_prepare: `prepare --kind daily --lane history --replay-id ${work.work_id} --output DIR` };
 }
