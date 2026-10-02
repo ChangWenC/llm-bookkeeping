@@ -9,16 +9,16 @@ test('same native WeChat body and precise instant can upgrade only unknown numer
     const fragment = { schema_version: 1 as const, fragment_id: 'original-fragment', locator: '/synthetic/wechat', bytes_base64: raw.toString('base64'), sha256: digest(raw), created_at: '2026-09-30T09:00:00Z' };
     const old = event('native-wechat'); old.source.provider = 'wechat'; old.role = 'unknown'; old.classification = 'unknown'; old.context = { identity_verified: true, sender_id: '2' }; old.fragment_ref = fragment.fragment_id;
     await store.saveCollection({ ...collection([old]), fragments: [fragment] });
-    const fresh = { ...old, role: 'other' as const, classification: 'main' as const, context: { identity_verified: true, sender_id: 'wxid_verified', sender_wxid: 'wxid_verified' }, fragment_ref: null };
+    const fresh = { ...old, role: 'other' as const, classification: 'main' as const, context: { identity_verified: true, sender_id: 'custom-native-contact', sender_wxid: 'custom-native-contact' }, fragment_ref: null };
     await store.saveCollection(collection([fresh], 'live', 'fresh-stable'));
     const stored = JSON.parse(store.db.prepare('SELECT json FROM events WHERE id=?').get(old.event_id)!.json as string);
-    assert.equal(stored.event_id, old.event_id); assert.equal(stored.role, 'other'); assert.equal(stored.context.sender_id, 'wxid_verified');
+    assert.equal(stored.event_id, old.event_id); assert.equal(stored.role, 'other'); assert.equal(stored.context.sender_id, 'custom-native-contact');
     assert.equal(stored.fragment_ref, fragment.fragment_id); assert.equal(canonical(JSON.parse(store.db.prepare('SELECT json FROM fragments WHERE id=?').get(fragment.fragment_id)!.json as string)), canonical(fragment));
     assert.equal((await store.listWork('event_conflict')).length, 0);
     await store.saveCollection(collection([old], 'live', 'stable-to-numeric'));
     await store.saveCollection(collection([{ ...fresh, context: { identity_verified: true, sender_id: 'wxid_different', sender_wxid: 'wxid_different' } }], 'live', 'stable-to-different'));
     assert.equal((await store.listWork('event_conflict', 'pending')).length, 2);
-    assert.equal(JSON.parse(store.db.prepare('SELECT json FROM events WHERE id=?').get(old.event_id)!.json as string).context.sender_id, 'wxid_verified');
+    assert.equal(JSON.parse(store.db.prepare('SELECT json FROM events WHERE id=?').get(old.event_id)!.json as string).context.sender_id, 'custom-native-contact');
     store.close();
 });
 

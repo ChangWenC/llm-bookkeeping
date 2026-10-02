@@ -1,6 +1,7 @@
 import { openSync, readSync, closeSync, realpathSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { wechatScopeError, wechatConversationScope } from '../adapters/wechat-policy.ts';
+import { isNativeWechatContactId } from './wechat-identity.ts';
 import type { BookkeepingConfig, SourceEvent, WechatPersonMapping } from '../contracts/types.ts';
 
 /** A metadata-only gate. SQL invokes this before selecting any body or LIMIT. */
@@ -32,6 +33,17 @@ export class WechatReviewScope {
         if (scope.admitted && (role === 'unknown' || verified !== 1 || sender == null)) return 'WeChat sender identity unknown; local review remains pending';
         return null;
     }
+    excludesFactGroup(provider: unknown, account: unknown, conversation: unknown, type: unknown): boolean {
+        if (provider !== 'wechat' || typeof conversation !== 'string') return false;
+        const configured = this.config?.providers.find(p => p.provider === 'wechat' && p.account_id === account);
+        if (!configured) return false;
+        const chatTypes = configured.options.chat_types;
+        const resolved = type ?? (chatTypes && typeof chatTypes === 'object' && !Array.isArray(chatTypes) ? (chatTypes as Record<string, unknown>)[conversation] : undefined);
+        const knownGroup = conversation.endsWith('@chatroom') || resolved === true || resolved === 'group'
+            || (Array.isArray(configured.options.group_allowlist) && configured.options.group_allowlist.includes(conversation));
+        if (!knownGroup) return false;
+        return !configured.enabled || !wechatConversationScope(configured.options, conversation, typeof resolved === 'string' || typeof resolved === 'boolean' ? resolved : undefined).admitted;
+    }
     eventAllowed(event: SourceEvent): boolean {
         return this.allowed(event.source.provider, event.source.account_id, event.source.conversation_id, typeof event.context.is_group === 'boolean' ? event.context.is_group : event.context.conversation_type ?? event.context.chat_type);
     }
@@ -62,22 +74,43 @@ export class WechatReviewScope {
         finally { if (fd !== undefined) closeSync(fd); }
     }
     enrich(event: SourceEvent): SourceEvent {
-        if (event.source.provider !== 'wechat' || event.role === 'unknown' || event.context.identity_verified !== true) return event;
+        if (event.source.provider !== 'wechat' || event.context.identity_verified !== true) return event;
         const configured = this.config?.providers.find(p => p.provider === 'wechat' && p.account_id === event.source.account_id);
         const entries = configured?.options.private_person_registry;
-        if (!Array.isArray(entries)) return event;
-        // Numeric chat-local IDs and display aliases never establish a contact.
-        const sender = event.context.sender_wxid ?? event.context.sender_id;
-        if (typeof sender !== 'string' || !sender.startsWith('wxid_') || sender.endsWith('@chatroom')) return event;
-        const matches = entries.filter(entry => entry?.wxid === sender);
-        if (matches.length !== 1 || !validMapping(matches[0]) || !this.personalPage(matches[0].wiki_path)) return event;
-        const mapping = matches[0];
-        return { ...event, context: { ...event.context, person_context: { schema_version: 1, wxid: mapping.wxid, display_name: mapping.display_name, wiki_path: mapping.wiki_path, relationship: mapping.relationship, verified: true } } };
+        if (!configured?.enabled || !Array.isArray(entries)) return event;
+        const mappingFor = (native: unknown): WechatPersonMapping | null => {
+            if (!isNativeWechatContactId(native) || (Array.isArray(configured.options.group_allowlist) && configured.options.group_allowlist.includes(native))) return null;
+            const chatTypes = configured.options.chat_types;
+            if (chatTypes && typeof chatTypes === 'object' && !Array.isArray(chatTypes) && ['group', true].includes((chatTypes as Record<string, unknown>)[native] as string | boolean)) return null;
+            const matches = entries.filter(entry => entry?.wxid === native);
+            return matches.length === 1 && validMapping(matches[0]) && this.personalPage(matches[0].wiki_path) ? matches[0] : null;
+        };
+        const person = (mapping: WechatPersonMapping) => ({ schema_version: 1, wxid: mapping.wxid, display_name: mapping.display_name, wiki_path: mapping.wiki_path, relationship: mapping.relationship, verified: true });
+        const conversation = event.source.conversation_id;
+        const configuredTypes = configured.options.chat_types;
+        const type = typeof event.context.is_group === 'boolean' ? event.context.is_group : event.context.conversation_type ?? event.context.chat_type
+            ?? (configuredTypes && typeof configuredTypes === 'object' && !Array.isArray(configuredTypes) && conversation ? (configuredTypes as Record<string, unknown>)[conversation] : undefined);
+        const scope = wechatConversationScope(configured.options, conversation ?? '', typeof type === 'string' || typeof type === 'boolean' ? type : undefined);
+        const privateConversation = scope.admitted && !scope.is_group && (type === false || type === 'private') && conversation !== 'filehelper';
+        const context = { ...event.context };
+        // The counterpart identifies the private conversation, never its author.
+        const counterpart = privateConversation ? mappingFor(conversation) : null;
+        if (counterpart) context.conversation_person_context = person(counterpart);
+        // A native sender field can contain a custom username. Legacy sender_id
+        // needs a native wxid or exact verified private counterpart evidence.
+        if (event.role !== 'unknown') {
+            const nativeSender = event.context.sender_wxid;
+            const legacySender = event.context.sender_id;
+            const sender = nativeSender !== undefined ? nativeSender
+                : typeof legacySender === 'string' && (legacySender.startsWith('wxid_') || (event.role === 'other' && privateConversation && legacySender === conversation)) ? legacySender : null;
+            const mapping = mappingFor(sender);
+            if (mapping) context.person_context = person(mapping);
+        }
+        return { ...event, context };
     }
 }
 function validMapping(entry: any): entry is WechatPersonMapping {
-    return entry?.schema_version === 1 && entry.verified === true && typeof entry.wxid === 'string' && entry.wxid.startsWith('wxid_')
-        && !entry.wxid.endsWith('@chatroom') && typeof entry.display_name === 'string' && entry.display_name.trim().length > 0
+    return entry?.schema_version === 1 && entry.verified === true && isNativeWechatContactId(entry.wxid) && typeof entry.display_name === 'string' && entry.display_name.trim().length > 0
         && typeof entry.relationship === 'string' && entry.relationship.trim().length > 0 && typeof entry.wiki_path === 'string'
         && /^wiki\/personal\/people\/[^/]+\.md$/.test(entry.wiki_path) && !entry.wiki_path.includes('..');
 }

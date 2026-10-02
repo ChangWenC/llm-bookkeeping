@@ -1,4 +1,5 @@
 import type { SourceEvent, FactRef, TimeRange, FactRevision } from '../contracts/types.ts';
+import { isNativeWechatContactId } from './wechat-identity.ts';
 import { canonical } from '../analytics/serialization.ts';
 export const refKey = (ref: FactRef) => `${ref.fact_id}:${ref.revision}`;
 export const utc = (value: string) => {
@@ -72,7 +73,7 @@ export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): Sourc
             && typeof previous.body === 'string' && previous.utc_time.value !== null && incoming.utc_time.value !== null
             && normalized(previous.utc_time.value) === normalized(incoming.utc_time.value)
             && !previous.context.sender_wxid && incoming.role !== 'unknown' && incoming.context.identity_verified === true
-            && typeof incoming.context.sender_wxid === 'string' && incoming.context.sender_wxid.startsWith('wxid_')
+            && isNativeWechatContactId(incoming.context.sender_wxid)
             && incoming.context.sender_id === incoming.context.sender_wxid;
         for (const key of ['sender_id', 'real_sender_id'])
             if (previous.context[key] !== undefined && incoming.context[key] !== undefined && String(previous.context[key]) !== String(incoming.context[key])) {

@@ -50,7 +50,13 @@ export class SqliteStore implements Store {
     async getSemanticReplay(id: string): Promise<WorkItem | null> { return this.replayRepository.get(id); }
     getReplayEvents(id: string, limit: number): SourceEvent[] { return this.reconcileCodexPage(this.replayRepository.events(id, limit)).filter(event => event.classification === 'main').map(event => this.reviewScope.enrich(event)); }
     getReplayFacts(id: string): FactRevision[] {
-        return this.filterReviewFacts(this.effective(), undefined, id);
+        const item = this.replayRepository.get(id);
+        if (!item) throw new Error('Unknown semantic replay');
+        const range = item.payload.range as TimeRange;
+        return this.filterReviewFacts(this.effective().filter(fact => {
+            const time = fact.occurred_at.value ?? (fact.journal_date.value ? fact.journal_date.value + 'T12:00:00Z' : null);
+            return (time !== null && normalized(time) >= normalized(range.from) && normalized(time) < normalized(range.to)) || fact.event_refs.some(ref => this.replayRepository.contains(id, ref.event_id));
+        }));
     }
     allocateId(namespace: string): string {
         if (!/^[a-z][a-z0-9_-]*$/i.test(namespace))
@@ -300,10 +306,12 @@ export class SqliteStore implements Store {
         const selected = eventIds === undefined ? '' : ' AND e.id IN (SELECT value FROM json_each(?))';
         return this.db.prepare(`SELECT ${reason} AS reason,json_extract(e.json,'$.locator') AS locator FROM events e WHERE e.time>=? AND e.time<? AND json_extract(e.json,'$.source.provider')=? AND ${reason} IS NOT NULL${selected} ORDER BY e.time,e.ordering,e.id LIMIT 32`).all(normalized(range.from), normalized(range.to), source, ...(eventIds === undefined ? [] : [canonical(eventIds)])) as any;
     }
-    filterReviewFacts(facts: FactRevision[], source?: string, replay?: string): FactRevision[] {
-        return facts.filter(fact => fact.event_refs.length === 0 ? !source : fact.event_refs.every(ref => {
-            const row = this.db.prepare(`SELECT json_extract(e.json,'$.source.provider') AS provider FROM events e WHERE e.id=? AND ${scopeSql('e')}`).get(ref.event_id) as any;
-            return row && (!source || row.provider === source) && (!replay || this.replayRepository.contains(replay, ref.event_id));
+    filterReviewFacts(facts: FactRevision[]): FactRevision[] {
+        // Primary events are isolated by provider. Accepted facts remain shared
+        // dedup context, including legacy/archive facts with no available raw ref.
+        return facts.filter(fact => fact.event_refs.every(ref => {
+            const row = this.db.prepare(`SELECT json_extract(e.json,'$.source.provider') AS provider,json_extract(e.json,'$.source.account_id') AS account,json_extract(e.json,'$.source.conversation_id') AS conversation,${conversationTypeSql('e.json')} AS type FROM events e WHERE e.id=?`).get(ref.event_id) as any;
+            return !row || !this.reviewScope.excludesFactGroup(row.provider, row.account, row.conversation, row.type);
         }));
     }
     getContextEvents(event: SourceEvent): SourceEvent[] {

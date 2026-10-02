@@ -143,7 +143,7 @@ export function createReviewer(store: Store, config: BookkeepingConfig): Reviewe
             const events = replayWork ? store.getReplayEvents(replayWork.work_id, limits.chunk_events * limits.bundles_per_round * 4)
                 : request.kind === 'daily' ? await store.getReviewableEvents({ range, source: request.source, lane: request.lane, limit: limits.chunk_events * limits.bundles_per_round * 4 }, request.kind) : [];
             const effectiveFacts = replayWork ? store.getReplayFacts(replayWork.work_id) : await store.readEffectiveFacts({ range });
-            const scopedFacts = store.filterReviewFacts(effectiveFacts, request.source);
+            const scopedFacts = store.filterReviewFacts(effectiveFacts);
             const facts = request.kind === 'daily' ? scopedFacts : effectiveFacts.flatMap(f => {
                 const projection = f.analytics_projection?.value;
                 if (!projection)
