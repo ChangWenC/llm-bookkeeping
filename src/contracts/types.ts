@@ -232,7 +232,7 @@ export interface SemanticReplayScope extends Versioned { work_id: string; source
 export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number; replay_id?: string; source?: string; max_bundles?: number; range?: TimeRange }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }
 export interface CollectionBudget { max_duration_ms: number; max_bytes: number; max_directory_entries: number }
-export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig }
+export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig; generation_checkpoints?: readonly SourceCheckpoint[] }
 export interface SourceAdapter {
   readonly provider: string;
   readonly account_id?: string;
