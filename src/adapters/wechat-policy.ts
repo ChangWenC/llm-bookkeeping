@@ -4,13 +4,16 @@ export function wechatScopeError(options: Record<string, unknown>): string | nul
   const list = options.group_allowlist;
   if (list !== undefined && (!Array.isArray(list) || list.some(id => typeof id !== 'string' || !id.trim() || id !== id.trim())))
     return 'wechat_group_allowlist_invalid';
+  const types = options.chat_types;
+  if (types !== undefined && (types === null || typeof types !== 'object' || Array.isArray(types)))
+    return 'wechat_chat_types_invalid';
   return null;
 }
 export function wechatConversationScope(
   options: Record<string, unknown>, conversationId: string, conversationType?: string | boolean,
 ): { admitted: boolean; is_group: boolean; reason: string | null } {
   const configuredTypes = options.chat_types as Record<string, unknown> | undefined;
-  if (conversationType === undefined && configuredTypes && typeof configuredTypes[conversationId] === 'string')
+  if (conversationType === undefined && configuredTypes && typeof configuredTypes === 'object' && !Array.isArray(configuredTypes) && typeof configuredTypes[conversationId] === 'string')
     conversationType = configuredTypes[conversationId] as string;
   const is_group = (Array.isArray(options.group_allowlist) && options.group_allowlist.includes(conversationId)) || conversationId.endsWith('@chatroom') || conversationType === true || conversationType === 'group' || conversationType === 'unknown';
   const error = wechatScopeError(options);

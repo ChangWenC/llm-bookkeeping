@@ -142,3 +142,39 @@ test('numeric sender_wxid and ChatLab platform sender never establish a global s
   const result = parseWechatHistory(payload([stable]), source, 'private', request, c, undefined, 'private').events[0];
   assert.equal(result.role, 'other'); assert.equal(result.context.sender_wxid, 'wxid_other');
 });
+test('imported exact allowlisted group follows shared group classification despite a private or missing manifest type', () => {
+  const c = config(), group = 'synthetic-stable-group';
+  c.providers[0].options.group_allowlist = [group]; c.providers[0].options.chat_types = { [group]: 'group' };
+  const manifest = { account_id: 'wxid_owner', conversation_id: group, locator: 'synthetic-group-export', identity_verified: true, self_ids: ['wxid_owner'], known_range: request.range };
+  for (const conversation_type of ['private' as const, undefined]) {
+    const noAnchor = parseChatExport(JSON.stringify(row('unanchored-peer', 'wxid_other')), 'legacy-jsonl', { ...manifest, conversation_type }, c);
+    assert.equal(noAnchor.events[0].context.is_group, true);
+    assert.equal(noAnchor.events[0].context.context_only, true);
+    assert.equal(noAnchor.events[0].context.participation_window_status, 'unknown');
+    const parsed = parseChatExport([row('anchor'), row('within', 'wxid_other', 19), row('outside', 'wxid_other', 21)].map(row => JSON.stringify(row)).join('\n'), 'legacy-jsonl', { ...manifest, conversation_type }, c);
+    assert(parsed.events.every(event => event.context.is_group === true));
+    assert.equal(parsed.events[0].context.context_only, false);
+    assert.equal(parsed.events[1].context.context_only, true);
+    assert.equal(parsed.events[1].context.participation_window_status, 'within_anchor_window');
+    assert.equal(parsed.events[2].context.context_only, true);
+    assert.equal(parsed.events[2].context.participation_window_status, 'unknown');
+  }
+});
+test('malformed chat-type containers cannot supply private evidence or trigger live/import body reads', async () => {
+  const c = config(), options = c.providers[0].options, bytes = Buffer.from('body must remain unread');
+  bytes.toString = () => { throw new Error('malformed metadata body decoded'); };
+  options.chats = ['0']; options.group_allowlist = [];
+  for (const chat_types of [[], ['private'], 'private', 0, null]) {
+    options.chat_types = chat_types;
+    const scope = wechatConversationScope(options, '0');
+    assert.equal(scope.admitted, false); assert.equal(scope.reason, 'wechat_chat_types_invalid');
+    // A malformed provider scope is unavailable even if a caller claims a known private type.
+    assert.equal(wechatConversationScope(options, '0', 'private').admitted, false);
+    let calls = 0; const batches: CollectionBatch[] = [];
+    for await (const batch of new WechatAdapter(c.providers[0], c, async () => { calls++; throw new Error('body query forbidden'); }).collect(request, { config: c, checkpoints: [] })) batches.push(batch);
+    assert.equal(calls, 0); assert.equal(batches[0].coverage[0].capture_status, 'unavailable');
+    assert.equal(batches[0].coverage[0].gaps[0].reason, 'wechat_chat_types_invalid');
+    const parsed = parseChatExport(bytes, 'legacy-json', { account_id: 'wxid_owner', conversation_id: '0', conversation_type: 'private', locator: 'synthetic-malformed-metadata-export' }, c);
+    assert.deepEqual(parsed.events, []); assert.equal(parsed.gaps[0].reason, 'wechat_chat_types_invalid');
+  }
+});

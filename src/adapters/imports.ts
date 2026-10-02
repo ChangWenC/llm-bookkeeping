@@ -43,6 +43,7 @@ export function parseChatExport(
   const admission = provider === "wechat" ? wechatImportScope(config.providers, manifest.account_id, manifest.conversation_id, manifest.conversation_type) : null;
   if (admission && !admission.admitted)
     return { events: [], gaps: [gap(admission.reason!, manifest.locator)], members: [], metadata: {} };
+  const isGroup = admission?.is_group ?? (manifest.conversation_type === "group" || manifest.conversation_type === "unknown" || manifest.conversation_id.endsWith("@chatroom"));
   const text = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : bytes;
   const gaps: CoverageGap[] = [];
   const members: any[] = [];
@@ -181,7 +182,6 @@ export function parseChatExport(
       gaps.push(
         gap(e.utc_time.reason ?? "import_time_unknown", manifest.locator),
       );
-    const isGroup = manifest.conversation_type === "group" || manifest.conversation_type === "unknown" || manifest.conversation_id.endsWith("@chatroom");
     e.context.is_group = isGroup;
     const anchor = manifest.identity_verified === true && (e.role === "user" || e.context.is_mentioned === true);
     const inRange = e.utc_time.value !== null && !!manifest.known_range && Date.parse(e.utc_time.value) >= Date.parse(manifest.known_range.from) && Date.parse(e.utc_time.value) < Date.parse(manifest.known_range.to);
@@ -193,7 +193,7 @@ export function parseChatExport(
     events.push(e);
   }
   const anchors = events.filter(e => e.context.context_only === false && e.utc_time.value !== null).map(e => Date.parse(e.utc_time.value!));
-  if (manifest.conversation_type === "group" || manifest.conversation_type === "unknown" || manifest.conversation_id.endsWith("@chatroom")) for (const e of events) {
+  if (isGroup) for (const e of events) {
     if (e.context.context_only !== false && e.utc_time.value !== null && anchors.some(t => Math.abs(Date.parse(e.utc_time.value!) - t) <= 20 * 60000)) e.context.participation_window_status = "within_anchor_window";
   }
   return { events, gaps, members, metadata: meta };
