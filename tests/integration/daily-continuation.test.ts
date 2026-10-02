@@ -14,7 +14,7 @@ const cutoff = '2026-10-01T12:00:00Z';
 async function fixture(t: test.TestContext) {
   const config = await makeConfig(), root = dirname(config.wiki_root);
   config.journal_timezone_timeline = [{ schema_version: 1, effective_from: '1970-01-01T00:00:00Z', timezone: 'Europe/Amsterdam', basis: 'synthetic' }];
-  config.providers = ['wechat', 'codex'].map(provider => ({ schema_version: 1, provider, account_id: 'self-synthetic', enabled: true, roots: [], options: provider === 'wechat' ? { group_allowlist: [], identity_verified: true, self_ids: ['self-synthetic'] } : {} }));
+  config.providers = ['wechat', 'codex'].map(provider => ({ schema_version: 1, provider, account_id: 'self-synthetic', enabled: true, roots: [], options: provider === 'wechat' ? { group_allowlist: [], chat_types: { 'person-synthetic': 'private' }, identity_verified: true, self_ids: ['self-synthetic'] } : {} }));
   const path = join(root, 'config.json');
   await writeFile(path, JSON.stringify(config));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -26,7 +26,7 @@ const plan = (...steps: ReturnType<typeof step>[]) => ({ schema_version: 1, step
 function providerBundle(provider: string): ReviewBundle {
   const row = event(`event:${provider}`);
   row.source = { ...row.source, provider, account_id: 'self-synthetic', conversation_id: 'person-synthetic' };
-  row.context = { chat_type: 'private', sender_wxid: 'self-synthetic', is_self: true };
+  row.context = { chat_type: 'private', is_group: false, sender_wxid: 'self-synthetic', is_self: true };
   const material = bundle([row], `bundle:${provider}`);
   material.source = provider;
   material.baselines[0].path = `wiki/projects/项目_${provider}.md`;
