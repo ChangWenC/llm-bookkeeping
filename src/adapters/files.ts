@@ -216,30 +216,29 @@ export class FileAdapter implements SourceAdapter {
       fragments: CollectionBatch["fragments"] = [],
       conversation: string | null = null,
       status?: any,
-    ): CollectionBatch => ({
-      schema_version: 1,
-      batch_id: hash(
-        JSON.stringify([
-          this.provider,
-          request.cutoff,
-          events.map((e) => e.event_id),
-          checkpoints,
-        ]),
-      ),
-      events: uniqueEvents(events),
-      fragments,
-      coverage: [
-        coverage(
-          this.provider,
-          this.source.account_id,
-          request,
-          gaps,
-          conversation,
-          status,
-        ),
-      ],
-      checkpoints,
-    });
+    ): CollectionBatch => {
+      const batch: CollectionBatch = {
+        schema_version: 1,
+        batch_id: "",
+        events: uniqueEvents(events),
+        fragments,
+        coverage: [
+          coverage(
+            this.provider,
+            this.source.account_id,
+            request,
+            gaps,
+            conversation,
+            status,
+          ),
+        ],
+        checkpoints,
+      };
+      // Collection identity includes every immutable field. At EOF, unchanged
+      // event/checkpoint IDs can accompany different fragments or coverage gaps.
+      batch.batch_id = hash(JSON.stringify({ ...batch, batch_id: null }));
+      return batch;
+    };
     if (!this.source.enabled) {
       yield make([], [], [], [], null, "disabled");
       return;
