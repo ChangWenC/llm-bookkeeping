@@ -4,7 +4,7 @@ import { validateReviewResult } from '../contracts/validation.ts';
 import { accumulateMonthly, accumulateWeekly, type SemanticPage } from '../analytics/pages.ts';
 import { validateAnalysisAgainstInput } from '../analytics/validation.ts';
 import { canonical, digest } from '../analytics/serialization.ts';
-import { utc, normalized, version, unique, refKey, factWeek, weekFor } from './domain.ts';
+import { utc, normalized, rangeCheck, version, unique, refKey, factWeek, weekFor } from './domain.ts';
 import type { AnalyticsRepository } from './analytics.ts';
 import type { SemanticReplayRepository } from './replay.ts';
 interface SemanticStore {
@@ -290,24 +290,41 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             }
         const weeks = new Set(affectedFacts.flatMap(f => factWeek(f) ? [factWeek(f)!] : []));
         const dates = new Set(artifact.affected_dates);
-        for (const c of bundle.kind === 'daily' ? reviewedCoverage : []) {
-            let day = new Intl.DateTimeFormat('en-CA', { timeZone: store.journalTimezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(c.query_range.from));
-            const last = new Intl.DateTimeFormat('en-CA', { timeZone: store.journalTimezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Date.parse(c.query_range.to) - 1));
-            while (day <= last) {
-                dates.add(day);
-                const next = new Date(day + 'T12:00:00Z');
-                next.setUTCDate(next.getUTCDate() + 1);
-                day = next.toISOString().slice(0, 10);
-            }
-        }
-        for (const c of bundle.kind === 'daily' ? reviewedCoverage : []) {
-            let day = weekFor(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(c.query_range.from)));
-            const last = weekFor(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Date.parse(c.query_range.to) - 1)));
-            while (day <= last) {
-                weeks.add(day);
-                const next = new Date(day + 'T12:00:00Z');
-                next.setUTCDate(next.getUTCDate() + 7);
-                day = next.toISOString().slice(0, 10);
+        if (bundle.kind === 'daily') {
+            // Capture coverage describes what may exist, not what this result read.
+            for (const review of result.chunks)
+                for (const id of review.reviewed_event_ids.filter(id => !heldEvents.has(id))) {
+                    const event = chunks.get(review.chunk_id)!.events.find(event => event.event_id === id)!;
+                    if (event.journal_date.value) dates.add(event.journal_date.value);
+                    if (event.utc_time.value) weeks.add(weekFor(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(event.utc_time.value))));
+                }
+            if (explicitEmpty && bundle.review_range) {
+                version(bundle.review_range);
+                rangeCheck(bundle.review_range);
+                const span = Date.parse(bundle.review_range.to) - Date.parse(bundle.review_range.from);
+                if (span <= 32 * 86400000 && normalized(bundle.review_range.to) <= normalized(bundle.cutoff)) {
+                    const zone = bundle.review_timezone ?? store.journalTimezone;
+                    const local = (time: number, timezone: string) => new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time));
+                    // Use exclusive UTC upper bound; preserve the prepared historical journal zone.
+                    let day = local(Date.parse(bundle.review_range.from), zone);
+                    const last = local(Date.parse(bundle.review_range.to) - 1, zone);
+                    while (day <= last) {
+                        dates.add(day);
+                        const next = new Date(day + 'T12:00:00Z');
+                        next.setUTCDate(next.getUTCDate() + 1);
+                        day = next.toISOString().slice(0, 10);
+                    }
+                    let week = weekFor(local(Date.parse(bundle.review_range.from), 'Europe/Amsterdam'));
+                    const lastWeek = weekFor(local(Date.parse(bundle.review_range.to) - 1, 'Europe/Amsterdam'));
+                    while (week <= lastWeek) {
+                        weeks.add(week);
+                        const next = new Date(week + 'T12:00:00Z');
+                        next.setUTCDate(next.getUTCDate() + 7);
+                        week = next.toISOString().slice(0, 10);
+                    }
+                } else {
+                    store.putWork({ schema_version: 1, work_id: 'empty-review-period:' + batchId, kind: 'review_period', lane: bundle.lane, state: 'pending', payload: { batch_id: batchId, bundle_id: bundle.bundle_id, range: bundle.review_range }, reason: 'Explicit empty review period exceeds bounded 32-day scope or cutoff; no derived periods scheduled', migration_key: null, updated_at: result.created_at });
+                }
             }
         }
         artifact.affected_dates = [...dates].sort();
