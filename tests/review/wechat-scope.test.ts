@@ -268,3 +268,33 @@ test('accepted Claude facts and eventless legacy records remain Codex dedup cont
     assert.equal((await store.readEffectiveFacts({ range })).filter(f => f.fact_id === fact.fact_id).length, 1);
     store.close();
 });
+
+test('exact nonsuffix group metadata uses bounded twenty-minute context and truncation consistently with admission', async () => {
+    for (const metadata of ['event-type', 'configured-type'] as const) {
+        const c = await setup(), group = 'synthetic-native-group';
+        const provider = c.providers.find(p => p.provider === 'wechat')!;
+        provider.options.group_allowlist = [group]; provider.options.chat_types = { [group]: 'group' };
+        const store = await createStore(c), reviewer = createReviewer(store, c);
+        const anchor = source('nonsuffix-anchor:' + metadata, 'wechat', group);
+        const old = source('nonsuffix-old:' + metadata, 'wechat', group, '2026-09-01T09:00:00Z'); old.context.context_only = true;
+        const nearby = Array.from({ length: 13 }, (_, i) => {
+            const e = source('nonsuffix-near:' + metadata + ':' + i, 'wechat', group, `2026-09-30T09:05:${String(i).padStart(2, '0')}Z`);
+            e.role = 'other'; e.context.context_only = true; return e;
+        });
+        for (const e of [anchor, old, ...nearby]) {
+            delete e.context.is_group;
+            if (metadata === 'event-type') e.context.conversation_type = 'group';
+        }
+        await capture(store, [old, anchor, ...nearby]);
+        const raw = store.db.prepare('SELECT id,json FROM events ORDER BY id').all();
+        const context = store.getContextEvents(anchor);
+        assert.equal(context.length, 12);
+        assert(context.every(e => e.event_id !== old.event_id && Math.abs(Date.parse(e.utc_time.value!) - Date.parse(anchor.utc_time.value!)) <= 20 * 60000));
+        assert.equal(store.isContextTruncated(anchor), true);
+        const prepared = await reviewer.prepare({ kind: 'daily', source: 'wechat', lane: 'history', cutoff });
+        assert(prepared.some(b => b.unfinished.some(g => g.reason.includes('Group participation context truncated'))));
+        assert(prepared.flatMap(b => b.chunks.flatMap(c => c.context_events)).every(e => e.event_id !== old.event_id));
+        assert.deepEqual(store.db.prepare('SELECT id,json FROM events ORDER BY id').all(), raw);
+        store.close();
+    }
+});

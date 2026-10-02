@@ -318,7 +318,7 @@ export class SqliteStore implements Store {
         if (!event.utc_time.value || !this.reviewScope.eventAllowed(event))
             return [];
         const originalId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
-        const group = event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true;
+        const group = this.reviewScope.isGroupEvent(event);
         if (group) {
             const anchor = Date.parse(event.utc_time.value);
             const events = this.db.prepare(`SELECT json FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main' AND ${scopeSql()} AND ${senderSql()} ORDER BY ABS(julianday(time)-julianday(?)),time,ordering,id LIMIT 12`)
@@ -331,10 +331,10 @@ export class SqliteStore implements Store {
         return this.reconcileCodexPage(events).filter(event => event.classification === 'main').map(event => this.reviewScope.enrich(event));
     }
     isContextTruncated(event: SourceEvent): boolean {
-        if (!this.reviewScope.eventAllowed(event) || !event.utc_time.value || !(event.source.conversation_id?.endsWith('@chatroom') || event.context.is_group === true))
+        if (!this.reviewScope.eventAllowed(event) || !event.utc_time.value || !this.reviewScope.isGroupEvent(event))
             return false;
         const anchor = Date.parse(event.utc_time.value), originalId = (event.context.review_slice as any)?.source_event_id ?? event.event_id;
-        const row = this.db.prepare("SELECT COUNT(*) AS count FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main'").get(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(new Date(anchor - 20 * 60000).toISOString()), normalized(new Date(anchor + 20 * 60000).toISOString()), originalId) as any;
+        const row = this.db.prepare(`SELECT COUNT(*) AS count FROM events WHERE json_extract(json,'$.source.provider')=? AND json_extract(json,'$.source.account_id')=? AND json_extract(json,'$.source.conversation_id')=? AND time>=? AND time<=? AND id!=? AND classification='main' AND ${scopeSql()} AND ${senderSql()}`).get(event.source.provider, event.source.account_id, event.source.conversation_id, normalized(new Date(anchor - 20 * 60000).toISOString()), normalized(new Date(anchor + 20 * 60000).toISOString()), originalId) as any;
         return row.count > 12;
     }
     private markUnit(event: SourceEvent, kind: string, lane: Lane, mirror = true) {

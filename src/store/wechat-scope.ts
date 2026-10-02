@@ -44,6 +44,11 @@ export class WechatReviewScope {
         if (!knownGroup) return false;
         return !configured.enabled || !wechatConversationScope(configured.options, conversation, typeof resolved === 'string' || typeof resolved === 'boolean' ? resolved : undefined).admitted;
     }
+    isGroupEvent(event: SourceEvent): boolean {
+        const configured = this.config?.providers.find(p => p.provider === event.source.provider && p.account_id === event.source.account_id);
+        const type = typeof event.context.is_group === 'boolean' ? event.context.is_group : event.context.conversation_type ?? event.context.chat_type;
+        return wechatConversationScope(configured?.options ?? {}, event.source.conversation_id ?? '', typeof type === 'string' || typeof type === 'boolean' ? type : undefined).is_group;
+    }
     eventAllowed(event: SourceEvent): boolean {
         return this.allowed(event.source.provider, event.source.account_id, event.source.conversation_id, typeof event.context.is_group === 'boolean' ? event.context.is_group : event.context.conversation_type ?? event.context.chat_type);
     }
