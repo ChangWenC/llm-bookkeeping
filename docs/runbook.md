@@ -13,7 +13,9 @@ Use Node 25.8.0, `npm ci --ignore-scripts`, then `npm test`. Use an isolated tem
 3. `node src/cli.ts publish --input /absolute/ReviewResult.json --config /absolute/config.json` persists the semantic transaction once and independently exports/applies/queues. If interrupted, use `publish --resume`. File conflicts remain drafts and do not revoke committed facts.
 4. `node src/cli.ts consume --target all --config /absolute/config.json` delivers ready exported batches. Monthly queues preparation work. `status` reports durable remaining work. Partial history does not block live.
 
-For coordinator inspection of saved daily material and the exact human-authored result fields, see [review-result-authoring.md](review-result-authoring.md). `tools/inspect-review-material.ts` pages whole records without text truncation and never creates review progress.
+For coordinator inspection of saved daily material and the exact human-authored result fields, see [review-result-authoring.md](review-result-authoring.md). `tools/inspect-review-material.ts` pages exact UTF-8 JSON item fragments within16KiB actual stdout and never creates review progress.
+
+The approved October7 personal daily automation uses [daily-round-and-journal.md](daily-round-and-journal.md) and [daily-automation-prompt-2026-10-07.md](daily-automation-prompt-2026-10-07.md). It runs one persisted round with initial/final journal settlement, externally authored active inputs, exact failure deferrals and shared96-start/105min/120min limits. Each command returns full-receipt refs; keep that private run directory for recovery. Old manual collect/prepare/publish commands remain available within explicit scope.
 
 ## Other commands
 
@@ -58,6 +60,65 @@ Production cutover belongs to the coordinator: isolated Wiki acceptance; pause m
 `npm run check` performs strict TypeScript checking with pinned TypeScript 5.9.3 / @types/node 25.8.0, then recursively discovers only `.test.ts` tests. Fixtures are not counted as test cases. `tests/integration/end-to-end.test.ts` uses actual adapters, SQLite Store, Reviewer, Publisher and CLI orchestration against isolated synthetic roots; only clock/stdout/stderr are injected.
 
 Its seven scenarios cover native mirror versus true repeated text, stable recapture/replay, source disappearance and consistent backup/new-directory restore, bounded 2GB sparse tail plus malformed peer source with partial coverage, partial semantic progress and crash before FileIntent, Wiki lock/conflict with independent ready facts, old-month monthly page outside daily retention, and actual compact bundle bytes/0700 directory/0600 files. Initially failing relocated fragment/monthly retention counterexamples were fixed by A/C and rerun successfully.
+
+## Coordinator-only private profile draft
+
+Run from the approved new repository using explicit absolute OLD_CONFIG and a new private DRAFT_CONFIG. This reads only the supplied config, keeps private identities/allowlist/person mappings and all nonquota fields, and writes a separate0600 draft; it does not install or modify the original. The coordinator reviews it and atomically installs after validation/backup. No development agent executes this on production.
+
+```sh
+umask 077
+node --input-type=module - /ABS/OLD_CONFIG.json /ABS/PRIVATE/draft/config.json <<'NODE'
+import {readFile,open,mkdir,stat} from 'node:fs/promises';
+import {dirname,isAbsolute} from 'node:path';
+import {loadConfig,PERSONAL_COLLECTION_BUDGETS,PERSONAL_DAILY_ROUND_LIMITS,PERSONAL_DISCOVERY_MANIFEST_BUDGET} from './src/config.ts';
+import {parseJsonPreservingIntegers} from './src/contracts/validation.ts';
+const [oldPath,draftPath]=process.argv.slice(2);
+if(!isAbsolute(oldPath)||!isAbsolute(draftPath)||oldPath===draftPath)throw new Error('Use distinct explicit absolute paths');
+await loadConfig(oldPath);
+const value=parseJsonPreservingIntegers(await readFile(oldPath,'utf8'));
+value.limits={...value.limits,bundles_per_round:24};
+value.collection_budgets=structuredClone(PERSONAL_COLLECTION_BUDGETS);
+value.daily_round_limits={...PERSONAL_DAILY_ROUND_LIMITS};
+value.providers=value.providers.map(provider=>['codex','claude'].includes(provider.provider)?{...provider,options:{...provider.options,max_directory_entries:8000,discovery_manifest_budget:{...provider.options.discovery_manifest_budget,...PERSONAL_DISCOVERY_MANIFEST_BUDGET}}}:provider);
+await mkdir(dirname(draftPath),{recursive:true,mode:0o700});
+if((await stat(dirname(draftPath))).mode&0o077)throw new Error('Draft parent must already be private0700');
+const handle=await open(draftPath,'wx',0o600);
+try{await handle.writeFile(JSON.stringify(value,null,2)+'\n');await handle.sync();}finally{await handle.close();}
+await loadConfig(draftPath);
+console.log(JSON.stringify({draft:draftPath,validated:true}));
+NODE
+```
+
+Only Codex/Claude provider options change. Global collection_budgets also reach WeChat, but its own90/30sec,64/32MiB and history8/max16-query clamps remain effective; do not raise its source options/range/page limits. Chunk80/32KiB and bundle128KiB remain unchanged. Preserve existing automation model/effort/project and23:30 schedule via the formal automation tool; update the existing task prompt only after deployment.
+
+## Coordinator-only old receipt selection (jq, no acceptance-time inference)
+
+The two supported old receipt shapes are `{result:PublishResult}` and `{receipts:[{exit_code,result:PublishResult}]}`. Select only recursively found `fact_commit=committed` PublishResult.result_id, retaining each explicit input filename as provenance. A filename/mtime is never acceptance-time evidence; the coordinator separately verifies actual run/thread scope. This includes historical business dates accepted inside the audited window.
+
+```sh
+umask 077
+jq -n '[inputs as $doc | input_filename as $path | ($doc | .. | objects | select(.fact_commit? == "committed" and (.result_id? | type) == "string")) | {result_id:.result_id,receipt_path:$path}] | {schema_version:1,evidence:unique_by(.result_id,.receipt_path)}' /ABS/receipt-1.json /ABS/receipt-2.json > /ABS/PRIVATE/evidence.json
+jq '{schema_version:1,result_ids:([.evidence[].result_id]|unique)}' /ABS/PRIVATE/evidence.json > /ABS/PRIVATE/selection-all.json
+jq -c '.result_ids as $ids | range(0;($ids|length);100) as $offset | {schema_version:1,result_ids:$ids[$offset:$offset+100]}' /ABS/PRIVATE/selection-all.json > /ABS/PRIVATE/recovery-batches.jsonl
+```
+
+Save each line as a separate0600 JSON selection, invoke `journal-recover --input ABSOLUTE_BATCH --config CONFIG`, and retain each receipt. First page `journal-inventory` with the actual audited UTC from/to and unknown acceptance included, follow cursors, then explicitly recover coordinator-proven missing historical IDs. Inventory can disclose unknown times; it does not silently filter them by model timestamp or business date. Reconcile exact revisions/targets and settle journal work on current baselines before reporting publication completion.
+
+If journal-resolve exits1 after acceptance/apply, retain its stage receipt and inspect actual persisted resolution, exact work and file-operation state. Earlier completed work may already be durable. A downstream resume failure never proves the semantic or journal transaction rolled back. Compatibility work predating explicit monthly_display.fact_refs is reused unchanged and resolves its refs from the exact ready batch; do not rewrite old work payloads or relax Store identity checks.
+
+## Coordinator-only Wiki rule/VERSION/log deployment
+
+`tools/apply-wiki-files.ts` writes explicitly reviewed complete file bytes through the existing SafeWikiWriter under one shared Wiki lock. It creates only durable FileIntents (complete original backup) and ordinary index work, without a metadata-only ReviewResult, facts, review marks or outbox. Each file entry is version1 with exact `path,baseline_digest,operation_id` plus exactly one `desired_file` (absolute regular private full draft) or `desired_bytes_base64` (canonical complete base64); deletion is unsupported. Full drafts are read as bytes before locking, preserving the entire original remainder of long VERSION/log files. Freeze these private drafts after review. Missing target baseline is `absent`; otherwise use the complete original SHA256. Writer rechecks baseline under lock before persisting intent/writing.
+
+```sh
+umask 077
+jq -n --arg id 'deployment:bookkeeping:2026-10-06:daily-rule' --arg path 'schemas/daily_bookkeeping.md' --arg digest 'EXACT_ORIGINAL_SHA256' --arg draft '/ABS/PRIVATE/drafts/daily_bookkeeping.md' '{schema_version:1,files:[{schema_version:1,operation_id:$id,path:$path,baseline_digest:$digest,desired_file:$draft}]}' > /ABS/PRIVATE/rule-file.json
+node tools/apply-wiki-files.ts --config /ABS/CONFIG.json --input /ABS/PRIVATE/rule-file.json
+```
+
+Create entries for VERSION/log similarly with separate stable IDs and exact original digests, then combine private manifests with `jq -s '{schema_version:1,files:[.[].files[]]}' INPUT1 INPUT2 INPUT3 > PRIVATE_COMBINED`. Alternatively canonical full UTF8 bytes can be embedded with `jq -n --rawfile body /ABS/PRIVATE/draft.md --arg id STABLE_ID --arg path RELATIVE_TARGET --arg digest EXACT_DIGEST '{schema_version:1,files:[{schema_version:1,operation_id:$id,path:$path,baseline_digest:$digest,desired_bytes_base64:($body|@base64)}]}'`; use desired_file when byte preservation is required. No source/page reader script or semantic acceptance is needed.
+
+The receipt has independent per-file applied/noop/pending/conflict. Same exact operation retry is noop after its original completion (including preserving later manual edits); a new operation against a changed baseline conflicts. A busy shared lock yields pending without intents. Local single-file failure reports pending and continues siblings; explicit SQLite/ENOSPC/EDQUOT stops with prior outcomes retained in the error receipt. Keep full private manifest, drafts and receipts; `consume --target index` runs the normal independent index afterward. Only the coordinator performs production invocation.
 
 Capture exceptions persist unavailable/partial coverage and collection_retry work. Material/backup/state paths cannot overlap Wiki, raw source roots or iCloud, including canonical existing ancestors. prepare writes compact immutable bundles and an atomic manifest; final file bytes cannot exceed configured bundle_bytes. Explicit finite review and collection budgets can exceed defaults.
 
@@ -146,3 +207,116 @@ For the Store owner's separate work/consumer recovery, `node tools/recover-metad
 After the file-restoration receipt exists, run the same config/batch/before arguments with `--apply --plan ABSOLUTE_SAVED_PLAN_JSON --file-receipt ABSOLUTE_FILE_APPLY_RECEIPT_JSON`. The wrapper validates the matching batch and versioned inputs, then calls Store's exact recovery API with the actual current UTC audit time. Store re-proves unchanged business facts/review marks, accepted artifacts, work and complete saved reverse-write intent evidence. Applied no-op originals need no restoration receipt and remain untouched. Only proven spurious scheduling/index work and the bad batch's analytics/monthly/monthly-display acknowledgements are closed under an audit; other consumer scope and original metadata patches remain intact. Apply before further publication/consumption. Console output reports closed-work and restored/no-op counts plus the audit ID, without raw proof text or one combined publication-success flag.
 
 Frozen collection retry work binds provider/account/lane/range **and cutoff**; a different cutoff cannot collide with an earlier retry payload. Existing debt is retained. A known immutable collection/work identity collision rolls back that batch and is reported as source-local `partial` with `failure_kind:collection_identity_conflict`, preserving a durable diagnostic and continuing independent providers. Actual SQLite/storage failure or inability to save the diagnostic remains an explicit Store execution failure. Neither source identity failure nor successful status reads certify complete capture.
+
+## Exact stored-source read restrictions
+
+Only the coordinator installs private `review_read_exclusions` entries; real IDs/reasons never enter tracked fixtures. Supply exact stored event IDs with short metadata reasons, not source/conversation patterns. Validate config before resuming. The setting automatically protects Store daily/history/live preparation and context reads; `status.review.read_excluded_unreviewed_events` remains explicit pending debt even when all accessible peers finish. Do not use `skip_units`, zero-fact acceptance or source suppression to claim those events reviewed. Accepted facts/results/outbox remain immutable.
+
+After adding restrictions, keep previously saved source material unopened; reprepare accessible peers through the configured Store. The explicit file inspection helper does not consult configuration. A resumed unaccepted daily active bundle containing a protected primary/context/slice is rejected before an external result is read; use explicit `--defer-active REASON` to continue peers while retaining the source debt. The original round start, cutoff and deadlines remain authoritative. This setting restricts stored semantic reads; it does not alter adapter collection or raw recapture scope.
+
+A stale accepted active material can be refused by a material read guard. Preserve the exact accepted result ID/content: ordinary `publish --input SAME_ACCEPTED_RESULT` and `publish --resume` recover committed publication without rereading the source bundle; never re-review it. Accepted inventory/recovery that explicitly needs original source material checks identities before rehydration and can report unavailable/pending. Independent journal resolution over already committed facts remains available when it does not require original source material.
+
+## Current-file deployment inventory
+
+The coordinator takes the actual dirty/untracked file baseline; Git HEAD is metadata only. `node tools/deployment-manifest.ts --baseline ABS_BASE_JSON --candidate ABS_ISOLATED_CODE --output ABS_PRIVATE_MANIFEST --verify-root ABS_FORMAL_CODE` reports original/candidate SHA256 per changed code file, rejects runtime/private entries and symlinks, and writes no formal code. Re-run immediately before installation; any changed original/candidate fails. An exact binary patch from the isolated current-file BASE to integrated HEAD can be checked/applied by the coordinator. This per-file precondition is not a cross-process CAS promise; installation still requires the coordinator's single-writer scope. Never reset/stash existing dirty work.
+
+## October 7 event-time repair and monthly continuation
+
+For the coordinator's separately verified October3 live-only stored evidence, use event-time selection across capture lanes with its original frozen cutoff and unchanged exact read exclusions. In Europe/Amsterdam the day is `[2026-10-02T22:00:00Z,2026-10-03T22:00:00Z)`. This prepares accessible stored material; it recaptures nothing and does not certify that every metadata-counted event is eligible. Inspect provider outcomes, exact IDs and partial/blocked debt before claiming the observed29 are all reviewed.
+
+```sh
+node src/cli.ts prepare --kind daily --lane history --from 2026-10-02T22:00:00Z --to 2026-10-03T22:00:00Z --cutoff ORIGINAL_FROZEN_UTC --selection-basis event_time --output /ABS/PRIVATE/new-material --config /ABS/PRIVATE/config.json
+```
+
+For source-bound bounded continuation, add `--source PROVIDER --max-bundles 1`, save that provider's returned preparation.continuation as an unchanged private JSON and use `--continuation ABS_JSON` with the identical scope and cutoff. Every output directory is new/private. Partial chunks persist only their final exact spans; full supplied-unit/source completion requires its entire span union; restricted IDs and skipped originals remain debt.
+
+Start the normal monthly run with a fresh manifest, optionally its already frozen evidence cutoff:
+
+```sh
+node src/cli.ts monthly-round --manifest /ABS/PRIVATE/month-run/manifest.json --output /ABS/PRIVATE/month-run --cutoff ORIGINAL_FROZEN_UTC --config /ABS/PRIVATE/config.json
+node src/cli.ts monthly-round --manifest /ABS/PRIVATE/month-run/manifest.json --output /ABS/PRIVATE/month-run --input /ABS/PRIVATE/month-run/review.json --config /ABS/PRIVATE/config.json
+```
+
+Month eligibility uses actual start/config timezone; each selected old month retains the exact prior snapshot/cutoff/first unread offset when metadata supplies it. Typed monthly results explicitly list every returned semantic chunk, including empty-event chunks. Only fully read chunks are complete; omitted/partial chunks never advance the round. `factMaterialProgress(snapshot_id)` proves exact persisted read marks without choosing a newer snapshot. Missing proof remains unavailable. A locally accepted partial note keeps its original immutable result/artifact/outbox; finish or explicitly defer that run, then a fresh run can review the same unread frozen page completely using its new stable prepared bundle attempt and a new result. Do not relabel the original accepted partial result complete. Unaccepted repeated preparation remains stable; an accepted complete result with only publication failure is recovered under its original identity. That is forward completion, not rewriting prior acceptance or reopening the old run clock. Late/unread work remains pending, and visible summary text alone does not complete semantic debt. See the complete replacement monthly prompt for explicit original-page/archive context reading and the independent retained-month archive stage.
+
+Monthly publication compares fresh exact database acceptance ordinals, including when model `created_at` values are equal. Retrying an older accepted partial batch preserves the later accepted summary and represented references. Missing or ambiguous ordinal proof is local pending; neither a model timestamp nor a batch filename supplies ordering evidence. The persistent ordinal survives restart, backup/restore and SQLite VACUUM within the same database history.
+
+When frozen facts are fully read but frozen preparation work remains, continue the same snapshot at `fact_offset=total` with a work-only packet. The round retains its original clock and cutoff, returns only remaining original work IDs (at most32 per packet), and leaves later work pending. Read those IDs and explicitly complete only the supplied ones; Store retains the prior exact summary and refs, without rereading facts or accumulating a duplicate conclusion. Publication failure keeps the accepted active identity for identical retry. A work-only acceptance that closes no IDs stays deferred; finish or explicitly defer rather than consuming another start. Old stopped manifests remain stopped; a new run can resume the exact frozen debt.
+
+Direct preparation uses `prepare --kind monthly --lane history --period YYYY-MM --fact-snapshot SNAPSHOT --fact-offset TOTAL --cutoff ORIGINAL_FROZEN_UTC --work-only --output ABS_PRIVATE_NEW --config ABS_CONFIG`. No `--pages`, archive-context pagination or replay may be combined; unavailable frozen/prior-complete proof refuses work-only preparation.
+
+
+## October 11 material and confirmation flow
+
+`tools/inspect-review-material.ts` defaults to v2 compact pages, at most16384 actual UTF-8 stdout bytes including the newline/envelope/escaping. Begin with summary for the section directory, then each events/facts/baselines/coverage/unfinished/archive_contexts or journal section. Encode the complete returned next_cursor object as UTF-8 JSON and base64url for `--cursor BASE64URL_JSON`, keeping identical input/section. Never pass the literal null or only the opaque material hash. Concatenate json_fragment bytes for each item_id in exact byte_start/end order, verify total_bytes and item_sha256, then JSON.parse the reconstructed item. IDs and exact slice spans remain intact. Re-reading the same cursor is deterministic; a changed saved material rejects it. `--offset` may explicitly select a saved item but does not prove preceding items read. `--limit` is an auxiliary1–80 item bound (default80); small complete items pack together, then a remaining oversized item can use an exact fragment. Actual16KiB serialization remains the primary limit.
+
+The following uses one private saved inspector response. It does not print the material or cursor, and runs another page only when the cursor is non-null. Replace the absolute paths and keep the same section. A null cursor stops this section; begin the other required sections separately.
+
+```sh
+umask 077
+inspection_material='/ABS/PRIVATE/material.json'
+inspection_page='/ABS/PRIVATE/events-page.json'
+inspection_section='events'
+node tools/inspect-review-material.ts --input "$inspection_material" --section "$inspection_section" > "$inspection_page"
+if inspection_cursor=$(node --input-type=module -e 'import {readFileSync} from "node:fs"; const cursor=JSON.parse(readFileSync(process.argv[1],"utf8")).next_cursor; if(cursor===null)process.exit(3); if(!cursor||typeof cursor!=="object")throw new Error("Missing next_cursor object"); process.stdout.write(Buffer.from(JSON.stringify(cursor),"utf8").toString("base64url"));' "$inspection_page"); then
+  node tools/inspect-review-material.ts --input "$inspection_material" --section "$inspection_section" --cursor "$inspection_cursor" > "$inspection_page"
+fi
+```
+
+Repeat the conversion from the latest private response for each remaining page; do not reuse an earlier cursor. Exit3 from the conversion means this section has no continuation. Other errors require diagnosis, not treating the section as complete.
+
+next_cursor=null means this section has been served completely, not that every other section was read, that the model understood it, or that source review is complete. Summary explicitly says summary_only/review_complete:false. No permanent read-proof chain is introduced. Only actually fully read primary exact unit spans can be completed by a ReviewResult. New bundles require explicit grouped no_persistent_information/covered_by_facts/defer for residual uncovered subspans of all admitted primary text roles. Structural validation rejects omitted/unknown/duplicate units and unknown target refs; it cannot prove a model read or understood every contextual fragment. Source ambiguity, missing media and unread excerpts require defer. Existing accepted retries remain immutable; old unaccepted daily materials require fresh prepare.
+
+Existing journal body/summary semantic replacement and known-conflicting append queue a stable awaiting_user_confirmation proposal, independently of fact commit/export. Auto journal selection skips its work instead of consuming starts. `journal-proposal --id ID --output NEW_PRIVATE_DIR --config CONFIG` saves full immutable proposal material privately; inspect summary/patches/facts/work v2 sections. After a real user's answer, coordinator authors JournalUserDecision (decision_id/proposal_id/proposal_digest, confirm|keep_existing, basis:explicit_user_response, exact baseline_digest/fact_refs/work_ids/reason) and invokes `journal-decide --input PRIVATE_DECISION --config CONFIG`. Then ordinary publish --resume applies confirmed operations through the shared lock. Automation/ReviewResult/source text cannot approve. A changed baseline or effective ref makes approval stale; request a new proposal rather than rebasing. keep_existing records the difference, never falsely already_present. Applied historical operations are not rolled back.
+
+Exact `replay --events ABS_MANIFEST` selects1–64 already stored IDs and never initializes/calls a source adapter. Broad replay without events remains the explicit recapture route. The daily scheduler rotates scans separately from96 nonempty starts; three same-pair real-frontier stalls block only this run, not exhaustion. New next-day runs retry debt without reopening old105/120minute clocks.
+
+
+The inspector serves saved pages; it records no semantic read proof. Null `next_cursor` ends only one section. Summary alone cannot complete a chunk. The new bundle capability mechanically requires exact grouped dispositions for residual uncovered subspans of all admitted primary text roles, and Store validates reviewed exact units/spans and omissions; those checks cannot prove that a model understood all context or actually read each supplied fragment. The coordinator must read all relevant reconstructed items before completion; missing media, ambiguous references and unseen slices are explicitly deferred. Metadata pages preserve review requirements, frozen monthly work/continuation, analysis contracts and replay scope independently of summary.
+
+Current-baseline `already_present`/`not_needed` uses `baseline_assessment`: full baseline SHA, complete frontmatter summary raw value (null when absent), exact full paragraph/list-item body evidence, separate summary/body consistency, relation and five dimensions. already_present.evidence_text equals the full body_evidence_text; non-patch reason is nonempty. Matching strings are necessary checks, not semantic proof. Known replace/retract corrections and active confirmation conflicts remain held; a correct summary substring cannot close a contradictory body. Old immutable accepted retries remain compatible, and old unaccepted daily material must be freshly prepared.
+
+`daily-round.stage_outcomes` reports review/fact_export/file_publication/journal/index/consumers separately as unknown/not_run/partial/complete. The terminal round state only stops scheduling. Quota/deadline stops, blocked pairs, deferred units, awaiting-user work, missing expected consumer receipts or unavailable final metadata retain overall_status:partial. Monthly delivery acknowledges scheduling only and never proves monthly semantic work complete. Private full receipts retain diagnostic details; old manifest summaries lacking new proof remain unknown.
+
+The sole mechanical empty-derived maintenance exception to journal semantic confirmation requires an exact metadata_batch_file_recovery audit work, bad metadata-only batch, consistent-before SHA and original applied intent; schema/primary keys/lane/state/plan hash, canonical month/path, stable reverse operation and every original/restore byte/digest must match. Only the known empty digest-managed supplement suffix is removed; all prior manual body/summary bytes are retained. This is not a general recovery or prefix/boolean bypass.
+
+Coordinator installation after no writers and a consistent backup:
+
+```sh
+node tools/deployment-manifest.ts --baseline /private/tmp/bookkeeping-oct11-coordination/current-file-baseline.json --candidate ABS_FROZEN_INTEGRATION_CODE --output NEW_PRIVATE_MANIFEST --verify-root ABS_FORMAL_CODE
+node tools/install-code-manifest.ts --manifest ABS_PRIVATE_MANIFEST --root ABS_FORMAL_CODE
+node tools/install-code-manifest.ts --manifest ABS_PRIVATE_MANIFEST --root ABS_FORMAL_CODE --apply --single-writer-confirmed
+```
+
+The installer checks all changed original/candidate SHA values before any installation, stages complete bytes, repeats preflight and uses per-file atomic replacements. The full multi-file set is not one filesystem transaction or cross-writer CAS. Caught failures restore only paths still equal to that candidate; interruption requires coordinator inspection against the same manifest before resuming. Unrelated dirty/untracked files are preserved; it never resets Git or modifies runtime/Wiki/config/automation.
+
+For real performance rehearsal only the coordinator operates a restored private consistent database copy. Clone configuration by changing data_dir alone; keep exact source policies/read exclusions and Wiki roots unchanged. Do not collect/publish/consume. Freeze FROM/TO/CUTOFF once, then:
+
+```sh
+node src/cli.ts prepare --kind daily --lane history --source PROVIDER --from UTC_FROM --to UTC_FREEZE --cutoff UTC_FREEZE --selection-basis event_time --max-bundles 1 --output NEW_PRIVATE_PAGE --config ABS_COPY_CONFIG
+node src/cli.ts prepare --kind daily --lane history --source PROVIDER --from UTC_FROM --to UTC_FREEZE --cutoff UTC_FREEZE --selection-basis event_time --max-bundles 1 --continuation ABS_PRIVATE_CONTINUATION_JSON --output NEXT_PRIVATE_PAGE --config ABS_COPY_CONFIG
+```
+
+Save the provider preparation.continuation object unchanged as a0600 private schema1 JSON file; --continuation accepts that absolute file path (not a token argument). Keep the same frozen scope/config and separate output pages. Examine provider `preparation.progress` stage/frontier/advanced and scanned elapsed/rows rather than random token changes. Candidate budget is cooperative after synchronous phases, not an interruptible SQL wall-clock guarantee. These commands may create only copy-local snapshots/bundles/cursors; saved material bodies stay private, stdout is receipt metadata. Compare production immutable metadata separately with the existing protected reader; no development agent opens production data.
+
+
+## October 13 exact primary spans and journal assessment
+
+New daily material carries `review_requirements.completion_policy:"primary_spans_v1"`. Every admitted primary text role participates, including counterpart `other` messages; context helps interpretation and cannot enter candidate source evidence. Candidate EventRef uses immutable original event_id and paired half-open start_byte/end_byte in original body UTF-8 bytes. Slice-relative, UTF-16 and JSON offsets are invalid. Candidate spans consume only those bytes. Every remaining claimed unit subspan explicitly uses no_persistent_information, covered_by_facts with current exact revisions, or defer; whitespace and punctuation also belong to the union. Partial parser evidence may commit while a clarification subspan remains deferred. `ChunkReview.reviewed_spans`, when supplied, records final spans, never deferred spans. Existing reviewed_spans storage and replay namespace are reused without a new permanent proof chain. Old accepted retries retain original validation/identity; old unaccepted daily bundles must be prepared again.
+
+`JournalBaselineAssessment` declares relation new|clarification|correction|unknown and assesses full frontmatter summary separately from body. Separate summary_consistency/body_consistency are consistent|conflicting|unknown. summary_dimensions and each body_evidence unit explicitly compare subject/action/time/result/negation as consistent|conflicting|unknown|not_applicable. Body evidence is an exact full Markdown paragraph or list item, measured in full baseline UTF-8 bytes outside frontmatter, with section:body, kind, start_byte/end_byte and exact text. An arbitrary substring or character is insufficient. Declared correction, conflict, unknown or insufficient evidence keeps journal debt; valid facts/export still commit independently. These declarations identify evidence; code cannot prove semantic equivalence.
+
+Journal decisions are cooperative chat confirmation, with minimal response_source and response_content recording the explicit answer. They provide no human authentication guarantee. Automation, source records and ReviewResult cannot journal-decide autonomously. Existing body/summary changes and privacy field additions/removals/value changes need confirmation; status metadata maintenance remains mechanical. Writers reread the complete file after awaited guards immediately before mutation. The shared lock and reread protect cooperating writers; they do not provide cross-process filesystem CAS.
+
+`journal-reassess --input ABS_PRIVATE_JSON` calls only Store's bounded exact debt port. Input has schema_version:1, work_ids (1–100 exact unique IDs), mode:preview|apply, and expected_plan_digest only for apply. The CLI supplies actual created_at. Preview reports per-ID eligibility and a plan digest; apply must repeat exactly that digest and selection. Reassessment can reopen weak journal assessment debt, never rewrite accepted source/facts/results/outbox or count a metadata audit as semantic review. Coordinator alone operates production; developer tests are synthetic.
+
+Public lint is the sole complete v2 archive authority. Supported JSON adds report_contract_version:1 and capabilities containing daily-journal-archive-target-v2 to the current counts/pages/errors/warnings/suggestions and diagnostic arrays. Version/capabilities/severity/counts and actual bounded complete UTF-8 stdout are strict (maximum8MiB); harmless extra informational top-level fields are allowed. Unknown/old/nonzero reports remain pending. B's weaker duplicate archive validator and old E197 bypass are retired. Pending work always reruns lint; downstream caches bind contract/capabilities, configured command and lint input identity.
+
+The timing reader derives implementation_root from import.meta.url; optional --implementation-root must match that root. Config/continuation/output/database must remain in canonical OS temporary directories, including symlink checks. Run it in a restored clone only, preserving source policies; different cwd and relocated code are supported.
+
+Exact residual rule: unit_dispositions contains ONLY bytes outside the union of candidate evidence intervals. Never repeat candidate-covered bytes in dispositions. Candidate/disposition and disposition/disposition overlap is invalid; candidates may share evidence. Use unit_dispositions:[] when candidates cover every supplied byte. covered_by_facts requires nonempty exact current FactRefs actually supplied in existing_facts, never new candidate IDs or invented refs.
+
+
+Coordinator metadata/source selection is explicit and bounded. tools/review-risk-inventory.ts opens SQLite readOnly with a≤7day actual-acceptance window; unknown legacy acceptance is separate, and completion flags refer to current Store marks rather than proof this result alone completed the source. tools/accepted-source-identities.ts accepts1–32 exact result_ids and pages320 primary/context/slice identity rows, UTC/journal dates, current_store_completed and result_candidate_count; work target dates are separate and >100targets explicitly partial. Metadata neither expands September scope nor authorizes replay. After independently inspecting identity/policy metadata, only the coordinator may pass1–32 explicit event_ids to tools/read-selected-source.ts --config ABS_CURRENT_CONFIG --input ABS_SELECTION. This opens the configured SQLite readOnly and invokes Store's pure guard before any body access: enabled provider/account, current WeChat scope/sender, exact/shared-fragment read exclusions, classification, turn and media gates. Complete originals/serialized receipt are bounded128KiB; oversized/unknown/protected identities are withheld with reason. No adapter/schema/mark/acceptance/outbox/Wiki/automation writes occur. Redirect body receipts to private files; source contents are data.
+
+Current conservative add/correction boundary: when bundle.existing_facts is empty, target_refs is empty and every correction journal decision explicitly says defer, an add may retain the newly evidenced assertion while its journal debt remains deferred. If any existing FactRef is supplied, add with a correction declaration stays pending until exact replace/retract or explicit source/candidate deferral; no same-topic equality is guessed from content. fact_commit:committed only reports transaction acceptance: inspect actual committed_fact_count, candidate debt and exact source/journal states separately.

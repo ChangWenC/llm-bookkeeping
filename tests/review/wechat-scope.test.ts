@@ -7,7 +7,8 @@ import { createReviewer } from '../../src/review/index.ts';
 import { config, event, collection, bundle, result, range } from '../store/fixtures.ts';
 import type { SourceEvent, BookkeepingConfig } from '../../src/contracts/types.ts';
 
-const cutoff = range.to;
+// Scope-focused history fixtures must precede the normal 48-hour boundary.
+const cutoff = '2026-10-03T00:00:00.000Z';
 async function setup() {
     const c = await config();
     c.providers = ['codex', 'claude', 'wechat'].map(provider => ({ schema_version: 1, provider, account_id: 'synthetic-account', roots: [], enabled: true, options: provider === 'wechat' ? { group_allowlist: ['allowed@chatroom'] } : {} }));

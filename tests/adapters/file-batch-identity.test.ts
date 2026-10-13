@@ -42,7 +42,13 @@ for (const provider of ['codex', 'claude']) {
     const eof = metadataBatches.find(batch => batch.fragments.length === 0)!;
     assert.ok(read && eof, 'exercise both captured metadata bytes and later EOF');
     assert.deepEqual(read.events, []); assert.deepEqual(eof.events, []);
-    assert.equal(JSON.stringify(read.checkpoints), JSON.stringify(eof.checkpoints), 'same persisted EOF progress does not imply same captured bytes');
+    const physicalProgress = (batch: CollectionBatch) => {
+      const checkpoint = batch.checkpoints.find(item => item.locator === metadataPath)!;
+      const { last_read_at, ...cursor } = checkpoint.cursor;
+      assert.match(String(last_read_at), /^\d{4}-\d{2}-\d{2}T.*Z$/);
+      return JSON.parse(JSON.stringify({ ...checkpoint, cursor }));
+    };
+    assert.deepEqual(physicalProgress(read), physicalProgress(eof), 'same persisted EOF progress does not imply same captured bytes; actual read time and discovery scheduling are independent');
     assert.notEqual(read.batch_id, eof.batch_id);
     assert.equal((await store.listEvents({ range: request.range })).length, 1);
   });

@@ -3,13 +3,15 @@ export const SCHEMA_VERSION = 1 as const;
 export type SchemaVersion = typeof SCHEMA_VERSION;
 export interface Versioned { schema_version: SchemaVersion }
 export type Lane = 'live' | 'history';
+export type SelectionBasis = 'event_time' | 'capture_lane';
 export type ReviewKind = 'daily' | 'weekly' | 'monthly';
 export type CaptureStatus = 'complete' | 'partial' | 'unavailable' | 'disabled' | 'unknown';
 export type ReviewStatus = 'complete' | 'partial' | 'pending' | 'not_applicable';
 export type FactKind = 'fact' | 'inference' | 'recommendation' | 'legacy_record';
 export interface UnknownValue<T> extends Versioned { value: T | null; reason: string | null }
 export interface TimeRange extends Versioned { from: string; to: string }
-export interface EventRef extends Versioned { event_id: string; block_id?: string | null }
+/** Paired UTF-8 offsets into the immutable original SourceEvent.body; never slice-relative. */
+export interface EventRef extends Versioned { event_id: string; block_id?: string | null; start_byte?: number; end_byte?: number }
 export interface FactRef extends Versioned { fact_id: string; revision: number }
 export interface SourceIdentity extends Versioned {
   provider: string; account_id: string; conversation_id: string; message_id: string | null; block_id: string | null;
@@ -142,6 +144,8 @@ export interface ArchiveReviewContext extends Versioned {
 }
 export interface ArchiveContextPage extends Versioned { offset: number; next_offset: number | null; total: number }
 export interface MonthlyReviewInput extends Versioned {
+  /** Only frozen outstanding work metadata; prior accepted monthly conclusions stay unchanged. */
+  work_only?: boolean;
   month: string; range: TimeRange; facts: FactRevision[]; coverage: SourceCoverage[];
   coverage_status: AnalysisCoverageStatus; manual_baselines: PageBaseline[];
   prepared_work_ids?: string[]; facts_page?: FactsPage;
@@ -157,6 +161,8 @@ export interface ReviewBundle extends Versioned {
   chunks: ReviewChunk[]; existing_facts: FactRevision[]; baselines: PageBaseline[];
   coverage: SourceCoverage[]; unfinished: CoverageGap[];
   source?: string;
+  /** New daily material requires exact evidence/disposition spans for all admitted primary text roles. */
+  review_requirements?: ReviewRequirements;
   replay?: SemanticReplayScope;
   /** Explicit daily empty-review intent (at most 32 days); observational coverage is not this range. */
   review_range?: TimeRange;
@@ -175,7 +181,7 @@ export interface FactCandidate extends Versioned {
 }
 export interface ChunkReview extends Versioned {
   chunk_id: string; status: 'complete' | 'partial' | 'deferred';
-  reviewed_event_ids: string[]; zero_facts: boolean; reason: string | null;
+  reviewed_event_ids: string[]; reviewed_spans?: ReviewUnit[]; zero_facts: boolean; reason: string | null;
 }
 export interface JournalSuggestion extends Versioned {
   suggestion_id: string; date: string; path: string; baseline_digest: string;
@@ -185,6 +191,8 @@ export interface ReviewResult extends Versioned {
   result_id: string; bundle_id: string; chunks: ChunkReview[]; candidates: FactCandidate[];
   pages: JournalSuggestion[]; created_at: string;
   source?: string;
+  journal_dispositions?: JournalDisposition[];
+  unit_dispositions?: ReviewUnitDisposition[];
   analysis?: WeeklyAnalysisResult; monthly_review?: MonthlyReviewResult;
 }
 export interface FactRevision extends Versioned {
@@ -197,6 +205,7 @@ export interface FactRevision extends Versioned {
 export interface JournalPatch extends Versioned {
   operation_id: string; date: string; path: string; baseline_digest: string;
   mode: 'append' | 'replace'; old_text: string | null; new_text: string; fact_refs: FactRef[];
+  supersedes_operation_id?: string;
 }
 export interface FactArtifact extends Versioned {
   batch_id: string; created_at: string; facts: FactRevision[]; coverage: SourceCoverage[];
@@ -204,9 +213,11 @@ export interface FactArtifact extends Versioned {
   affected_months?: string[]; analysis?: WeeklyAnalysisResult; monthly_review?: MonthlyReviewResult;
 }
 export type FileStatus = 'applied' | 'noop' | 'pending' | 'conflict';
-export interface FileOutcome extends Versioned { operation_id: string; path: string; status: FileStatus; reason: string | null }
-export interface ConsumerOutcome extends Versioned { target: string; status: 'complete' | 'pending' | 'partial' | 'unavailable'; reason: string | null; analytics_pilot?: AnalyticsPilotStats }
+export interface FileOutcome extends Versioned { operation_id: string; path: string; status: FileStatus; reason: string | null; queued_work_ids?: string[]; failure_scope?: 'storage'; failure_code?: string }
+export interface ConsumerOutcome extends Versioned { target: string; status: 'complete' | 'pending' | 'partial' | 'unavailable'; reason: string | null; analytics_pilot?: AnalyticsPilotStats; failure_scope?: 'storage'; failure_code?: string }
 export interface PublishResult extends Versioned {
+  execution_status?: 'complete' | 'partial' | 'storage_unavailable';
+  continuation?: { schema_version: 1; stage: 'export' | 'recovery' | 'monthly' | 'result'; status: 'failed'; reason: string };
   result_id: string | null; fact_commit: 'committed' | 'already_committed' | 'pending' | 'failed';
   batch_id: string | null; export_status: 'ready' | 'pending' | 'failed';
   files: FileOutcome[]; consumers: ConsumerOutcome[]; pending: string[];
@@ -216,8 +227,11 @@ export const ABSENT_DIGEST = 'absent' as const;
 export interface FileIntent extends Versioned {
   operation_id: string; path: string; baseline_digest: string; desired_digest: string;
   desired_bytes_base64: string | null; backup_bytes_base64: string | null;
-  state: 'prepared' | 'applied' | 'pending' | 'conflict'; fact_refs: FactRef[];
+  /** True survives pre-guard crashes and only tightens confirmation; false/absence grants no exemption. */
+  journal_confirmation_required?: boolean;
+  state: 'prepared' | 'applied' | 'pending' | 'conflict' | 'superseded'; fact_refs: FactRef[];
   created_at: string; reason: string | null;
+  supersedes_operation_id?: string;
 }
 export interface OutboxEntry extends Versioned { batch_id: string; artifact: FactArtifact; status: 'pending' | 'ready'; export_path: string | null }
 export interface ConsumerAck extends Versioned { consumer: string; batch_id: string; acknowledged_at: string }
@@ -229,11 +243,138 @@ export interface LegacyIdMapping extends Versioned { source_id: string; target_i
 export interface LegacyImportBatch extends Versioned { migration_key: string; facts: FactRevision[]; mappings: LegacyIdMapping[]; work: WorkItem[] }
 export interface LegacyImportResult extends Versioned { migration_key: string; reused: boolean; imported_facts: number; unresolved: number }
 export interface ReviewCommit extends Versioned { result_id: string; batch_id: string; reused: boolean; facts: FactRevision[]; patches: JournalPatch[] }
-export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean; source?: string }
+export interface EventQuery { range: TimeRange; lane?: Lane; limit?: number; after?: string; include_context?: boolean; source?: string; selection_basis?: SelectionBasis }
 export interface FactQuery { range: TimeRange; scope?: string[]; as_of?: string }
 export interface SemanticReplayRequest extends Versioned { replay_key: string; source: string; range: TimeRange; cutoff: string; event_ids?: string[] }
 export interface SemanticReplayScope extends Versioned { work_id: string; source: string; range: TimeRange }
-export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number; replay_id?: string; source?: string; max_bundles?: number; range?: TimeRange }
+/** Original immutable source identity and exact UTF-8 interval, never a transient slice ID. */
+export interface ReviewUnit extends Versioned { event_id: string; start_byte: number; end_byte: number }
+export interface ReviewRequirements extends Versioned { unit_dispositions: true; inspection_version: 2; completion_policy?: 'primary_spans_v1' }
+export type ReviewUnitDispositionKind = 'no_persistent_information' | 'covered_by_facts' | 'defer';
+/** Exact admitted primary text intervals of every role only; groups never imply unseen source completion. */
+export interface ReviewUnitDisposition extends Versioned {
+  units: ReviewUnit[]; disposition: ReviewUnitDispositionKind; fact_refs: FactRef[]; reason: string;
+}
+export interface PrepareRequest { kind: ReviewKind; lane: Lane; period?: string; cutoff: string; output_dir?: string;
+  work_only?: boolean;
+  context_fact_refs?: FactRef[];
+  selection_basis?: SelectionBasis; candidate_continuation?: PreparationContinuation; page_paths?: string[]; fact_offset?: number; fact_snapshot?: string; archive_context_offset?: number; replay_id?: string; source?: string; max_bundles?: number; range?: TimeRange; skip_units?: ReviewUnit[] }
+
+export type JournalDispositionKind = 'patch' | 'already_present' | 'not_needed' | 'defer';
+export type JournalConsistency = 'consistent' | 'conflicting' | 'unknown';
+export type JournalDimensionComparison = JournalConsistency | 'not_applicable';
+export type JournalSemanticRelation = 'new' | 'clarification' | 'correction' | 'unknown';
+/** Semantic declarations, not automated semantic equivalence proofs. */
+export interface JournalAssessmentDimensions {
+  subject: JournalDimensionComparison; action: JournalDimensionComparison; time: JournalDimensionComparison;
+  result: JournalDimensionComparison; negation: JournalDimensionComparison;
+}
+/** Exact complete Markdown paragraph/list item in full baseline UTF-8 bytes, outside frontmatter. */
+export interface JournalBaselineEvidence extends Versioned {
+  section: 'body'; kind: 'paragraph' | 'list_item'; start_byte: number; end_byte: number;
+  text: string; dimensions: JournalAssessmentDimensions;
+}
+/** Summary and body are assessed independently. Old accepted declarations remain immutable. */
+export interface JournalBaselineAssessment extends Versioned {
+  baseline_digest: string; summary_text: string | null; body_evidence_text: string;
+  consistency: JournalConsistency; reason: string;
+  relation?: JournalSemanticRelation; summary_consistency?: JournalConsistency; body_consistency?: JournalConsistency;
+  summary_dimensions?: JournalAssessmentDimensions;
+  body_evidence?: JournalBaselineEvidence[];
+}
+
+/** Acceptance uses local candidate IDs; Store freezes allocated fact refs in journal work. */
+export interface JournalDisposition extends Versioned {
+  candidate_id: string; date: string; path: string; disposition: JournalDispositionKind;
+  suggestion_id?: string; evidence_text?: string; baseline_assessment?: JournalBaselineAssessment; reason: string | null;
+}
+export interface JournalPublicationPayload extends Versioned {
+  fact_ref: FactRef; date: string; path: string; target_refs: FactRef[];
+  operation_id?: string; disposition?: JournalDispositionKind;
+}
+export interface JournalWorkRequest extends Versioned { cutoff: string; work_ids?: string[]; max_items?: number }
+export interface JournalWorkBundle extends Versioned {
+  journal_bundle_id: string; cutoff: string; work: WorkItem[]; facts: FactRevision[];
+  existing_facts: FactRevision[]; baselines: PageBaseline[]; conflicts: FileOutcome[];
+}
+export interface JournalWorkSuggestion extends Versioned {
+  suggestion_id: string; work_ids: string[]; date: string; path: string; baseline_digest: string;
+  mode: 'append' | 'replace'; old_text: string | null; new_text: string;
+  supersedes_operation_id?: string;
+}
+export interface JournalWorkDisposition extends Versioned {
+  work_id: string; disposition: JournalDispositionKind; suggestion_id?: string; evidence_text?: string; baseline_assessment?: JournalBaselineAssessment; reason: string | null;
+}
+/** File resolution only: no chunk completion, fact candidates or fact outbox. */
+export interface JournalResolution extends Versioned {
+  resolution_id: string; journal_bundle_id: string; created_at: string;
+  dispositions: JournalWorkDisposition[]; pages: JournalWorkSuggestion[];
+}
+/** Complete immutable user-confirmation proposal; source instructions grant no authority. */
+export interface JournalConfirmationProposal extends Versioned {
+  proposal_id: string; proposal_digest: string; operation_id: string; path: string;
+  baseline_digest: string; desired_digest: string; old_text: string; new_text: string;
+  fact_refs: FactRef[]; work_ids: string[]; reason: string;
+  state: 'awaiting_user_confirmation' | 'confirmed' | 'keep_existing' | 'stale';
+}
+export interface JournalConfirmationRequest extends Versioned {
+  patch?: JournalPatch; intent?: FileIntent; current_baseline_digest: string;
+  old_text: string; new_text: string; reason: string;
+  work_ids?: string[]; requires_confirmation: boolean;
+}
+export interface JournalConfirmationGuard extends Versioned {
+  status: 'not_required' | 'confirmed' | 'awaiting_user_confirmation' | 'keep_existing' | 'stale';
+  proposal_id: string | null; work_ids: string[]; reason: string | null;
+}
+/** Cooperative chat confirmation only; fields record an explicit response, not authenticated identity. */
+export interface JournalUserDecision extends Versioned {
+  decision_id: string; proposal_id: string; proposal_digest: string;
+  decision: 'confirm' | 'keep_existing'; basis: 'explicit_user_response';
+  baseline_digest: string; fact_refs: FactRef[]; work_ids: string[]; reason: string;
+  response_source?: string; response_content?: string;
+}
+export interface JournalUserDecisionReceipt extends Versioned {
+  decision_id: string; proposal_id: string; status: 'confirmed' | 'keep_existing' | 'stale';
+  operation_id: string; work_ids: string[]; reason: string | null;
+}
+export interface JournalResolutionCommit extends Versioned {
+  resolution_id: string; reused: boolean; patches: JournalPatch[]; work_ids: string[];
+}
+export interface DailyRoundLimits extends Versioned {
+  task_duration_ms: number; capture_duration_ms: number; semantic_start_duration_ms: number;
+  wave_bundles: number; live_bundles: number; history_bundles: number; max_started_bundles: number;
+}
+/** Acceptance time is measured by Store; model-created timestamps are not that evidence. */
+export interface AcceptedDailyInventoryRequest { from: string; to: string; after_result_id?: string; limit?: number; include_unknown_acceptance?: boolean }
+export interface AcceptedDailyInventoryItem {
+  result_id: string; accepted_at: UnknownValue<string>; result_created_at: string;
+  acceptance_time_basis: 'store_transaction_clock' | 'unknown_legacy_result_time'; window_membership: 'included' | 'unknown';
+  bundle: ReviewBundle; result: ReviewResult; commit: ReviewCommit; facts: FactRevision[]; targets: FactRevision[];
+  patches: { patch: JournalPatch; status: string; reason: string | null }[]; conflicts: FileOutcome[];
+}
+export interface AcceptedDailyInventory extends Versioned { items: AcceptedDailyInventoryItem[]; next_result_id: string | null }
+export interface JournalRecoveryRequest extends Versioned { result_ids: string[]; created_at: string }
+export interface JournalRecoveryReceipt extends Versioned { result_ids: string[]; work_ids: string[] }
+/** Coordinator-selected bounded audit; no source/fact acceptance is rewritten. */
+export interface ReviewRiskInventoryRequest extends Versioned {
+  from: string; to: string; limit?: number; after_result_id?: string; known_mixed_event_ids?: string[];
+}
+export interface ReviewRiskInventoryItem extends Versioned {
+  result_id: string; accepted_at: UnknownValue<string>; acceptance_time_basis: 'store_transaction_clock';
+  primary_units: number; other_primary_zero_candidate_completed: number;
+  known_mixed_event_completed_ids: string[]; weak_closed_journal_work_ids: string[];
+}
+export interface ReviewRiskInventory extends Versioned {
+  items: ReviewRiskInventoryItem[]; next_result_id: string | null; unknown_legacy_acceptance_count: number;
+}
+export interface JournalReassessmentRequest extends Versioned {
+  work_ids: string[]; mode: 'preview' | 'apply'; created_at: string; expected_plan_digest?: string;
+}
+export interface JournalReassessmentItem extends Versioned { work_id: string; eligible: boolean; reason: string }
+export interface JournalReassessmentReceipt extends Versioned {
+  plan_digest: string; items: JournalReassessmentItem[]; reopened_work_ids: string[];
+}
+export interface WikiWriterLock { readonly root: string; readonly token: string; release(): Promise<void> }
 export interface CollectRequest { lane: Lane; cutoff: string; range: TimeRange; budget: CollectionBudget }
 export interface CollectionBudget { max_duration_ms: number; max_bytes: number; max_directory_entries: number }
 export interface AdapterContext { checkpoints: SourceCheckpoint[]; config: BookkeepingConfig; generation_checkpoints?: readonly SourceCheckpoint[] }
@@ -250,9 +391,49 @@ export interface WechatPersonMapping extends Versioned {
 }
 /** Undefined allowlist retains prior participation policy; [] excludes every group. */
 export interface WechatScopeOptions { group_allowlist?: string[]; private_person_registry?: WechatPersonMapping[] }
+export interface PreparationScope extends Versioned {
+  source: string; lane: Lane; range: TimeRange; cutoff: string; selection_basis: SelectionBasis;
+}
+/** Opaque cursor; only Reviewer/Store produce it. Bound to the complete frozen scope. */
+export interface PreparationContinuation extends Versioned { scope: PreparationScope; cursor: string }
+export interface DeferredReviewUnit extends Versioned { unit: ReviewUnit; reason: string }
+export type PreparationPhase = 'candidates' | 'facts' | 'coverage' | 'baselines' | 'bundle';
+/** Digest of actual stable stage/frontier/selected/deferred state, never of a random cursor ID. */
+export interface PreparationProgress extends Versioned {
+  phase: PreparationPhase; frontier: string; advanced: boolean;
+  stages: PreparationStageProgress[];
+}
+export interface PreparationStageProgress extends Versioned { phase: PreparationPhase; rows: number; elapsed_ms: number }
+export interface CandidatePreparation extends Versioned {
+  state: 'ready' | 'more' | 'exhausted' | 'unavailable'; scope: PreparationScope;
+  continuation: PreparationContinuation | null;
+  scanned: { pages: number; rows: number; elapsed_ms: number };
+  deferred_units: DeferredReviewUnit[];
+  progress?: PreparationProgress;
+}
+export interface PublicationOutboxPageRequest extends Versioned { status: 'pending' | 'ready'; limit: number; after?: string }
+export interface PublicationOutboxPage extends Versioned { items: OutboxEntry[]; next_cursor: string | null }
+export interface PublicationFilePageRequest extends Versioned { states: FileIntent['state'][]; limit: number; after?: string }
+export interface PublicationFilePage extends Versioned { items: FileIntent[]; next_cursor: string | null }
+export type PublicationRecoveryKind = 'ready_exports' | 'applied_intents';
+export interface MonthlySemanticDebt extends Versioned {
+  month: string; pending_count: number; oldest_at: UnknownValue<string>; reasons: string[];
+  eligible: boolean; continuation: FactsPage | null;
+}
+/** Progress for exactly one immutable ref manifest; no facts or source text is loaded. */
+export interface FactMaterialProgress extends Versioned {
+  snapshot_id: string; cutoff: string; total: number; first_unread_offset: number | null;
+  /** Count exact frozen IDs whose current state is not complete, including missing IDs. */
+  pending_work_count: number; pending_archive_context_count: number;
+}
+export interface MonthlySemanticStatus extends Versioned {
+  cutoff: string; pending_count: number; oldest_month: string | null; months: MonthlySemanticDebt[];
+}
+export interface MonthlyRoundLimits extends Versioned { task_duration_ms: number; semantic_start_duration_ms: number; max_started_bundles: number }
 export interface ProviderStageOutcome extends Versioned {
   provider: string; stage: 'prepare' | 'material' | 'publish';
   execution_status: 'complete' | 'partial' | 'unavailable'; reason: string | null; bundle_ids: string[];
+  preparation?: CandidatePreparation;
 }
 export interface PreparationResult extends Versioned { bundles: ReviewBundle[]; providers: ProviderStageOutcome[] }
 export interface ProviderConfig extends Versioned {
@@ -264,6 +445,10 @@ export interface PublicCliCommand extends Versioned { executable: string; args: 
 export interface IndexCommands extends Versioned { lint: PublicCliCommand; build_index: PublicCliCommand; qmd: PublicCliCommand }
 export interface PageTargetsManifest extends Versioned { paths: string[] }
 export interface MigrationLimits { max_bytes?: number; max_records?: number; max_record_bytes?: number; max_duration_ms?: number }
+/** Private exact stored-event semantic read restrictions; never review completion. */
+export interface ReviewReadExclusion extends Versioned { event_id: string; reason: string }
+export interface ReviewReadExclusions extends Versioned { events: ReviewReadExclusion[] }
+export interface ReviewReadExclusionMetadata extends Versioned { event_id: string; reason: string; provider: string; account_id: string; unreviewed: boolean }
 export interface BookkeepingConfig extends Versioned {
   wiki_root: string; data_dir: string; journal_timezone: string; analysis_timezone: 'Europe/Amsterdam';
   cutover_at: string; live_start: string; journal_timezone_timeline: JournalTimezoneEntry[]; providers: ProviderConfig[];
@@ -272,6 +457,9 @@ export interface BookkeepingConfig extends Versioned {
   migration_limits?: MigrationLimits;
   analytics_catalog?: AnalyticsCatalog;
   collection_budgets?: { live: CollectionBudget; history: CollectionBudget };
+  daily_round_limits?: DailyRoundLimits;
+  monthly_round_limits?: MonthlyRoundLimits;
+  review_read_exclusions?: ReviewReadExclusions;
   project_whitelist: string[]; goal_whitelist: string[];
 }
 /** One SQLite owner. commitReview MUST atomically persist result, allocated revisions,
@@ -287,14 +475,41 @@ export interface Store {
   listCoverage(range: TimeRange): Promise<SourceCoverage[]>;
   saveBundle(bundle: ReviewBundle): Promise<void>;
   getBundle(bundle_id: string): Promise<ReviewBundle | null>;
+  reviewReadExclusions?(range?: TimeRange, source?: string): ReviewReadExclusionMetadata[] | Promise<ReviewReadExclusionMetadata[]>;
+  assertReviewBundleReadable?(bundle_id: string): void | Promise<void>;
   listPendingChunks(range: TimeRange, lane: Lane): Promise<ReviewChunk[]>;
   getReviewResult(result_id: string): Promise<ReviewResult | null>;
+  acceptedReviewIdentity?(bundle_id: string): Promise<{ schema_version: 1; result_id: string; batch_id: string } | null>;
   commitReview(result: ReviewResult): Promise<ReviewCommit>;
+  acceptedJournalResolutionIdentity?(journal_bundle_id: string): Promise<{schema_version:1;resolution_id:string}|null>;
+  commitJournalResolution?(resolution: JournalResolution): Promise<JournalResolutionCommit>;
+  listJournalConflicts?(): Promise<FileOutcome[]>;
+  ensureJournalConfirmation?(request: JournalConfirmationRequest, lock: WikiWriterLock): Promise<JournalConfirmationGuard>;
+  validateJournalConfirmation?(intent: FileIntent, lock: WikiWriterLock): Promise<JournalConfirmationGuard>;
+  getJournalConfirmation?(proposal_id: string): Promise<JournalConfirmationProposal | null>;
+  decideJournalConfirmation?(decision: JournalUserDecision, lock: WikiWriterLock): Promise<JournalUserDecisionReceipt>;
+  inventoryAcceptedDaily?(request: AcceptedDailyInventoryRequest): Promise<AcceptedDailyInventory>;
+  recoverJournalPublication?(request: JournalRecoveryRequest): Promise<JournalRecoveryReceipt>;
+  reassessJournalPublication?(request: JournalReassessmentRequest): Promise<JournalReassessmentReceipt>;
+  inventoryReviewRisks?(request: ReviewRiskInventoryRequest): Promise<ReviewRiskInventory>;
+  getOperationSupersession?(operation_id: string): Promise<string | null>;
+  lookupFactRevisions?(refs: FactRef[]): FactRevision[] | Promise<FactRevision[]>;
+  completeJournalDisplay?(work_ids: string[], publication_operation_id: string, lock: WikiWriterLock): Promise<void>;
   listPendingPatches(): Promise<JournalPatch[]>;
   markPatchStatus(operation_id: string, status: FileStatus, reason?: string | null): Promise<void>;
   importLegacy(batch: LegacyImportBatch): Promise<LegacyImportResult>;
   readEffectiveFacts(query: FactQuery): Promise<FactRevision[]>;
   listOutbox(status?: 'pending' | 'ready'): Promise<OutboxEntry[]>;
+  getPublicationOutbox?(batch_id: string): Promise<OutboxEntry | null>;
+  getPublicationBatchOrder?(batch_id: string): Promise<number | null>;
+  listPublicationOutbox?(request: PublicationOutboxPageRequest): Promise<PublicationOutboxPage>;
+  listPublicationFileIntents?(request: PublicationFilePageRequest): Promise<PublicationFilePage>;
+  getPublicationRecoveryCursor?(kind: PublicationRecoveryKind): Promise<string | null>;
+  setPublicationRecoveryCursor?(kind: PublicationRecoveryKind, cursor: string | null): Promise<void>;
+  monthlySemanticStatus?(cutoff: string, as_of?: string): Promise<MonthlySemanticStatus>;
+  factMaterialProgress?(snapshot_id: string): Promise<FactMaterialProgress | null>;
+  /** Exact accepted complete monthly conclusion proof; no source/fact text is returned. */
+  hasCompleteMonthlyConclusion?(snapshot_id: string): Promise<boolean>;
   markExportReady(batch_id: string, export_path: string): Promise<void>;
   listReadyBatches(consumer: string, limit?: number, after_batch_id?: string): Promise<FactArtifact[]>;
   acknowledgeConsumer(ack: ConsumerAck): Promise<void>;
@@ -312,6 +527,7 @@ export interface Reviewer {
   prepare(request: PrepareRequest): Promise<ReviewBundle[]>;
   prepareWithOutcomes?(request: PrepareRequest): Promise<PreparationResult>;
   accept(result: ReviewResult): Promise<ReviewCommit>;
+  prepareJournalWork?(request: JournalWorkRequest): Promise<JournalWorkBundle>;
 }
 export interface Publisher {
   publish(result: ReviewResult): Promise<PublishResult>;
@@ -325,6 +541,8 @@ export interface Manifest extends Versioned { manifest_id: string; kind: 'import
 /** CLI composition port. Optional capabilities fail explicitly when unavailable. */
 export interface RuntimeServices {
   close?(): void | Promise<void>;
+  /** Cooperative budget shared by nested publishers/writers/consumers. */
+  setDeadline?(deadline_at: string): void;
   store: Store; adapters: SourceAdapter[]; reviewer: Reviewer; publisher: Publisher;
   consumers: Consumer[];
   archive?: (request: ArchiveRequest) => Promise<unknown>;

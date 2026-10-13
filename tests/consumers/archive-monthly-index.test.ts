@@ -6,12 +6,14 @@ import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createStore } from '../../src/store/index.ts';
+import { createReviewer } from '../../src/review/index.ts';
 import { createArchiveService, readArchiveRecords } from '../../src/consumers/archive/index.ts';
 import { createMonthlyConsumer } from '../../src/consumers/monthly/index.ts';
 import { createIndexConsumer, runPublicCommand } from '../../src/consumers/index/index.ts';
 import { createPublisher, acquireWikiLock, createSafeWikiWriter, digestBytes } from '../../src/publish/index.ts';
 import type { Store, FactRevision, FactArtifact, BookkeepingConfig } from '../../src/contracts/types.ts';
 import { config as baseConfig } from '../../test/fixtures/basic.ts';
+import { result as reviewResult } from '../store/fixtures.ts';
 const now = () => new Date('2026-09-30T12:00:00Z');
 const daily = (date: string) => `wiki/personal/journals/日记_${date.replaceAll('-', '_')}.md`;
 const review = (month: string) => `wiki/personal/journals/reviews/回顾_${month.replaceAll('-', '_')}.md`;
@@ -135,13 +137,17 @@ test('monthly supplement folds replacement/retraction and protects manual body a
 
 test('monthly semantic summary persists history, recovers file fault, excludes already mapped fact refs from supplement', async t => {
   const f = await fixture(t); await importFacts(f.store, [fact('fact:summary', '已在摘要映射内容')], 'summary'); await createPublisher(f.store, f.config, { now }).exportFacts();
-  const base = (await f.store.listReadyBatches('monthly'))[0];
-  const batch: FactArtifact = { ...base, monthly_review: { schema_version: 1, month: '2026-07', summary: '合成月回顾摘要。', fact_refs: [{ schema_version: 1, fact_id: 'fact:summary', revision: 1 }], supplement_text: '', coverage_status: 'partial' } };
+  await f.store.enqueueWork({schema_version:1,work_id:'prepare-monthly:summary-fixture',kind:'prepare_monthly',lane:'history',state:'pending',payload:{month:'2026-07'},reason:'Synthetic acceptance fixture',migration_key:null,updated_at:now().toISOString()});
+  const packet=(await createReviewer(f.store,f.config).prepare({kind:'monthly',lane:'history',period:'2026-07',cutoff:now().toISOString()}))[0];
+  const semantic=reviewResult(packet,'result:summary-fixture',false);
+  semantic.monthly_review={schema_version:1,month:'2026-07',summary:'合成月回顾摘要。',fact_refs:[{schema_version:1,fact_id:'fact:summary',revision:1}],supplement_text:'',coverage_status:'partial'};
+  const accepted=await f.store.commitReview(semantic); await createPublisher(f.store,f.config,{now}).exportFacts();
+  const batch=(await f.store.getPublicationOutbox(accepted.batch_id))!.artifact;
   const failed = await createMonthlyConsumer(f.store, f.config, { now, fault(stage) { if (stage === 'after_target') throw new Error('monthly rename crash'); } }).publishMonthlyReview(batch);
   assert.equal(failed.status, 'pending');
   const monthly = createMonthlyConsumer(f.store, f.config, { now }); assert.equal((await monthly.publishMonthlyReview(batch)).status, 'complete');
   const content = await readFile(join(f.wiki, review('2026-07')), 'utf8'); assert.ok(content.includes('合成月回顾摘要。')); assert.ok(content.includes('仍有采集或审阅缺口')); assert.ok(!content.includes('已在摘要映射内容'));
-  assert.equal((await f.store.listWork('monthly_review_record', 'complete')).length, 1); assert.equal((await f.store.listReadyBatches('monthly-publish')).length, 0);
+  assert.equal((await f.store.listWork('monthly_review_record', 'complete')).length, 1); assert.ok(!(await f.store.listReadyBatches('monthly-publish')).some(item=>item.batch_id===batch.batch_id));
   const context = await monthly.prepareMonthlyContext('2026-07'); assert.equal(context.coverage_status, 'unknown'); assert.equal(context.facts.length, 1);
 });
 
@@ -155,10 +161,10 @@ test('index merges paths, protects build with shared lock, releases before qmd a
     const lock = await acquireWikiLock(f.wiki);
     if (command.executable === 'build_index') { assert.equal(lock, null); await f.seed('index.md', 'synthetic generated index'); }
     else { assert.ok(lock); await lock.release(); }
-    return { exit_code: command.executable === 'qmd' && failQmd ? 1 : 0, stdout: '', stderr: 'synthetic qmd failure' };
+    return { exit_code: command.executable === 'qmd' && failQmd ? 1 : 0, stdout: command.executable === 'lint' ? JSON.stringify({ report_contract_version: 1, capabilities: ['daily-journal-archive-target-v2'], generated_at: '2026-10-11T12:00:00Z', counts: { pages: 1, errors: 0, warnings: 0, suggestions: 0 }, errors: [], warnings: [], suggestions: [], disabled_checks: [], tag_source_report: [], synthesis_candidates: [] }) : '', stderr: 'synthetic qmd failure' };
   } });
   assert.equal((await consumer.consume()).status, 'partial'); assert.equal((await f.store.listWork('index', 'pending')).length, 2);
-  failQmd = false; assert.equal((await consumer.consume()).status, 'complete'); assert.deepEqual(stages, ['lint', 'build_index', 'qmd', 'qmd']);
+  failQmd = false; assert.equal((await consumer.consume()).status, 'complete'); assert.deepEqual(stages, ['lint', 'build_index', 'qmd', 'lint', 'qmd']);
   assert.equal((await f.store.listWork('index', 'pending')).length, 0); assert.equal((await f.store.listWork('index_failure', 'pending')).length, 0);
 });
 
@@ -167,7 +173,7 @@ test('busy index writer delays build and new work arriving during qmd is not swa
   const lock = await acquireWikiLock(f.wiki); assert.ok(lock);
   const commands = Object.fromEntries(['lint', 'build_index', 'qmd'].map(stage => [stage, { executable: stage, args: [] }])) as any;
   const invoked: string[] = [];
-  const consumer = createIndexConsumer(f.store, f.config, { commands, async runner(command) { invoked.push(command.executable); if (command.executable === 'qmd') await indexWork(f.store, 'index:late', 'wiki/a.md'); return { exit_code: 0, stdout: '', stderr: '' }; } });
+  const consumer = createIndexConsumer(f.store, f.config, { commands, async runner(command) { invoked.push(command.executable); if (command.executable === 'qmd') await indexWork(f.store, 'index:late', 'wiki/a.md'); return { exit_code: 0, stdout: command.executable === 'lint' ? JSON.stringify({ report_contract_version: 1, capabilities: ['daily-journal-archive-target-v2'], generated_at: '2026-10-11T12:00:00Z', counts: { pages: 1, errors: 0, warnings: 0, suggestions: 0 }, errors: [], warnings: [], suggestions: [], disabled_checks: [], tag_source_report: [], synthesis_candidates: [] }) : '', stderr: '' }; } });
   assert.equal((await consumer.consume()).status, 'pending'); assert.deepEqual(invoked, ['lint']); await lock.release();
   assert.equal((await consumer.consume()).status, 'complete'); assert.deepEqual((await f.store.listWork('index', 'pending')).map(work => work.work_id), ['index:late']);
 });

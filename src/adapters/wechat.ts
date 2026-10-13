@@ -241,8 +241,10 @@ export function parseWechatHistory(
     gaps.push(gap("wechat_unknown_or_unreadable_shards", chat));
   if (!["ok", "windowed"].includes(meta.status))
     gaps.push(gap(`wechat_status:${meta.status ?? "unknown"}`, chat));
-  if (meta.account_id && String(meta.account_id) !== source.account_id)
+  if (meta.account_id != null && String(meta.account_id) !== source.account_id) {
     gaps.push(gap("wechat_account_mismatch", chat));
+    return { events: [], gaps };
+  }
   const expectedWindow = historyWindow(chat, request, admission.is_group);
   if (
     Number(meta.since_resolved) !== expectedWindow.from ||
@@ -701,6 +703,7 @@ export class WechatAdapter implements SourceAdapter {
                 g.reason.startsWith("wechat_status:") ||
                 g.reason === "wechat_unknown_or_unreadable_shards" ||
                 g.reason === "wechat_window_not_proven" ||
+                g.reason === "wechat_account_mismatch" ||
                 g.reason === "wechat_shards_or_truncation_unknown",
             );
             if (unreliable) {
@@ -736,6 +739,9 @@ export class WechatAdapter implements SourceAdapter {
           attachEventFragments(batch);
           attachHistory(batch);
           yield batch;
+          // A correct preflight cannot authorize a contradictory later response.
+          // Preserve this chat's window and spend remaining budget on peers.
+          if (parsed.gaps.some(item => item.reason === "wechat_account_mismatch")) break;
         } catch (error: any) {
           const failure = gap(`wechat_unavailable:${error.message}`, chat);
           discoveryGaps.push(failure);

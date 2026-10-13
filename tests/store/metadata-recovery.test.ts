@@ -10,7 +10,7 @@ async function fixture(priorFacts: FactRevision[] = []) {
  const c=await config(),s=await createStore(c),b=bundle();await s.saveBundle(b);
  for(const fact of priorFacts)s.db.prepare('INSERT INTO facts VALUES(?,?,?,?)').run(fact.fact_id,fact.revision,canonical(fact),fact.recorded_at);
  const before=(await s.backup(join(c.wiki_root,'backups'))).path;
- const r={...result(b,'metadata-only',false),chunks:[],pages:[{schema_version:1 as const,suggestion_id:'meta',date:'2026-09-30',path:b.baselines[0].path,baseline_digest:'absent',mode:'append' as const,old_text:null,new_text:'Synthetic metadata',candidate_ids:[]}]};
+ const r={...result(b,'metadata-only',false),chunks:[],unit_dispositions:[],pages:[{schema_version:1 as const,suggestion_id:'meta',date:'2026-09-30',path:b.baselines[0].path,baseline_digest:'absent',mode:'append' as const,old_text:null,new_text:'Synthetic metadata',candidate_ids:[]}]};
  const accepted=await s.commitReview(r),batch=accepted.batch_id;
  // Synthetic reproduction of the accepted pre-fix artifact. Production artifacts remain immutable.
  const artifact=(await s.listOutbox())[0].artifact;artifact.affected_dates=['1990-01-01','1991-01-01'];artifact.affected_weeks=['1990-01-01'];artifact.affected_months=['1990-01','1991-01'];s.db.prepare('UPDATE outbox SET json=? WHERE id=?').run(canonical(artifact),batch);await s.markExportReady(batch,join(c.data_dir,'accepted.json'));

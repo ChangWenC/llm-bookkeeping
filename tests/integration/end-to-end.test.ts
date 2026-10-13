@@ -1,3 +1,4 @@
+import {exactReviewUnit} from '../../src/store/unit-dispositions.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, rename, open } from 'node:fs/promises';
@@ -52,7 +53,7 @@ async function fixture(records = lines(header, user('I verified the synthetic pa
 }
 
 function candidate(bundle: ReviewBundle, eventId = bundle.chunks[0].events[0].event_id): FactCandidate {
-  const ref = { schema_version: 1 as const, event_id: eventId };
+  const supplied=bundle.chunks.flatMap(chunk=>chunk.events).find(event=>event.event_id===eventId)!;const ref=exactReviewUnit(supplied);
   return {
     schema_version: 1, candidate_id: 'candidate:synthetic', chunk_id: bundle.chunks[0].chunk_id,
     disposition: 'add', content: 'You verified the synthetic parser.', subject: 'Roy',
@@ -68,10 +69,11 @@ function review(bundle: ReviewBundle, options: { partial?: boolean; page?: boole
     schema_version: 1, result_id: `result:${bundle.bundle_id}`, bundle_id: bundle.bundle_id,
     chunks: bundle.chunks.map(chunk => ({
       schema_version: 1, chunk_id: chunk.chunk_id, status: options.partial ? 'partial' : 'complete',
-      reviewed_event_ids: options.partial ? [selected.event_refs[0].event_id] : chunk.events.map(event => event.event_id),
+      reviewed_event_ids: options.partial ? [bundle.chunks[0].events[0].event_id] : chunk.events.map(event => event.event_id),
       zero_facts: chunk.chunk_id !== selected.chunk_id, reason: options.partial ? 'Second source event remains unreviewed' : null,
     })),
     candidates: [selected],
+    unit_dispositions: [{schema_version:1,units:bundle.chunks.flatMap(chunk=>chunk.events.filter(event=>!selected.event_refs.some(ref=>ref.event_id===exactReviewUnit(event).event_id&&ref.start_byte===exactReviewUnit(event).start_byte&&ref.end_byte===exactReviewUnit(event).end_byte)).map(exactReviewUnit)),disposition:options.partial?'defer':'no_persistent_information',fact_refs:[],reason:options.partial?'Unseen source events remain explicitly deferred':'Synthetic repeated acknowledgement carries no additional durable information'}].filter(group=>group.units.length) as ReviewResult['unit_dispositions'],
     pages: options.page === false ? [] : [{
       schema_version: 1, suggestion_id: 'page:synthetic', date: '2026-09-30',
       path: bundle.baselines[0].path, baseline_digest: bundle.baselines[0].digest,

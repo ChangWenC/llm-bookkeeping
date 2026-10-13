@@ -3,7 +3,7 @@ import { isAbsolute, resolve, relative, dirname, basename, join, sep } from 'nod
 import { homedir } from 'node:os';
 import { MIGRATION_HARD_LIMITS } from './contracts/migration-limits.ts';
 import { InputError, record, string, version, array, zone, utc, utcComparisonKey, parseJsonPreservingIntegers } from './contracts/validation.ts';
-import type { BookkeepingConfig, CollectionBudget, IndexCommands } from './contracts/types.ts';
+import type { BookkeepingConfig, CollectionBudget, DailyRoundLimits, MonthlyRoundLimits, IndexCommands } from './contracts/types.ts';
 
 export const DEFAULT_LIMITS = Object.freeze({
   chunk_events: 80,
@@ -15,10 +15,25 @@ export const DEFAULT_COLLECTION_BUDGETS: Readonly<Record<'live' | 'history', Col
   live: { max_duration_ms: 90_000, max_bytes: 64 * 1024 * 1024, max_directory_entries: 2000 },
   history: { max_duration_ms: 30_000, max_bytes: 32 * 1024 * 1024, max_directory_entries: 2000 },
 });
+/** Explicit coordinator-selected personal profile; existing defaults stay compatible. */
+export const PERSONAL_COLLECTION_BUDGETS: Readonly<Record<'live' | 'history', CollectionBudget>> = Object.freeze({
+  live: Object.freeze({ max_duration_ms: 300_000, max_bytes: 512 * 1024 * 1024, max_directory_entries: 8000 }),
+  history: Object.freeze({ max_duration_ms: 180_000, max_bytes: 256 * 1024 * 1024, max_directory_entries: 8000 }),
+});
+export const PERSONAL_DISCOVERY_MANIFEST_BUDGET = Object.freeze({ max_duration_ms: 10_000, max_bytes: 16 * 1024 * 1024 });
+export const PERSONAL_DAILY_ROUND_LIMITS: Readonly<DailyRoundLimits> = Object.freeze({
+  schema_version: 1, task_duration_ms: 7_200_000, capture_duration_ms: 1_200_000,
+  semantic_start_duration_ms: 6_300_000, wave_bundles: 24, live_bundles: 16,
+  history_bundles: 8, max_started_bundles: 96,
+});
+
+export const DEFAULT_MONTHLY_ROUND_LIMITS: Readonly<MonthlyRoundLimits> = Object.freeze({
+  schema_version: 1, task_duration_ms: 7_200_000, semantic_start_duration_ms: 6_300_000, max_started_bundles: 96,
+});
 
 export const DEFAULT_INDEX_COMMANDS: IndexCommands = {
   schema_version: 1,
-  lint: { schema_version: 1, executable: process.execPath, args: ['scripts/lint.mjs'], timeout_ms: 120_000 },
+  lint: { schema_version: 1, executable: process.execPath, args: ['scripts/lint.mjs','--json'], timeout_ms: 120_000 },
   build_index: { schema_version: 1, executable: process.execPath, args: ['scripts/build_index.mjs'], timeout_ms: 120_000 },
   qmd: { schema_version: 1, executable: 'qmd', args: ['update'], timeout_ms: 120_000 },
 };
@@ -99,6 +114,25 @@ function validateAnalyticsCatalog(value: unknown): void {
   }
 }
 
+/** Validate metadata only. Stored event existence is checked by the Store without bodies. */
+export function validateReviewReadExclusions(value: unknown): void {
+  const exclusions = version(value, 'review_read_exclusions');
+  if (Object.keys(exclusions).some(key => !['schema_version', 'events'].includes(key))) throw new InputError('review_read_exclusions: unknown field');
+  const events = array(exclusions.events, 'review_read_exclusions.events');
+  if (events.length > 100) throw new InputError('review_read_exclusions: at most 100 exact event IDs');
+  const ids = new Set<string>();
+  for (const item of events) {
+    const entry = version(item, 'review_read_exclusions.event');
+    if (Object.keys(entry).some(key => !['schema_version', 'event_id', 'reason'].includes(key))) throw new InputError('review_read_exclusions.event: unknown field');
+    const id = string(entry.event_id, 'review_read_exclusions.event_id');
+    const reason = string(entry.reason, 'review_read_exclusions.reason');
+    if (Buffer.byteLength(id) > 256 || /[\s*?\[\]\x00-\x1f\x7f]/u.test(id)) throw new InputError('review_read_exclusions.event_id: expected bounded exact ID without whitespace, controls or wildcard');
+    if (Buffer.byteLength(reason) > 512 || /[\x00-\x1f\x7f]/u.test(reason)) throw new InputError('review_read_exclusions.reason: expected bounded single-line metadata');
+    if (ids.has(id)) throw new InputError('review_read_exclusions: duplicate event ID');
+    ids.add(id);
+  }
+}
+
 export function validateConfig(value: unknown): BookkeepingConfig {
   const config = version(value, 'config');
   const sourceRoots = validateProviders(config.providers);
@@ -132,6 +166,19 @@ export function validateConfig(value: unknown): BookkeepingConfig {
       for (const key of ['max_duration_ms', 'max_bytes', 'max_directory_entries']) positiveBudget(budget[key], `${lane}.${key}`);
     }
   }
+  if (config.daily_round_limits !== undefined) {
+    const limits = version(config.daily_round_limits, 'daily_round_limits');
+    for (const key of ['task_duration_ms', 'capture_duration_ms', 'semantic_start_duration_ms', 'wave_bundles', 'live_bundles', 'history_bundles', 'max_started_bundles']) positiveBudget(limits[key], `daily_round_limits.${key}`);
+    if (limits.capture_duration_ms > limits.task_duration_ms || limits.semantic_start_duration_ms > limits.task_duration_ms) throw new InputError('Daily phase duration exceeds task duration');
+    if (limits.live_bundles + limits.history_bundles !== limits.wave_bundles) throw new InputError('Daily lane allocations must sum to wave_bundles');
+    if (limits.wave_bundles > limits.max_started_bundles) throw new InputError('Daily wave exceeds max_started_bundles');
+  }
+  if (config.monthly_round_limits !== undefined) {
+    const limits = version(config.monthly_round_limits, 'monthly_round_limits');
+    for (const key of ['task_duration_ms','semantic_start_duration_ms','max_started_bundles']) positiveBudget(limits[key], `monthly_round_limits.${key}`);
+    if (limits.task_duration_ms > 7_200_000 || limits.semantic_start_duration_ms > 6_300_000 || limits.max_started_bundles > 96 || limits.semantic_start_duration_ms > limits.task_duration_ms) throw new InputError('Monthly limits exceed approved two-hour/105-minute/96-start bounds');
+  }
+  if (config.review_read_exclusions !== undefined) validateReviewReadExclusions(config.review_read_exclusions);
   if (config.analytics_catalog !== undefined) validateAnalyticsCatalog(config.analytics_catalog);
   if (config.migration_limits !== undefined) {
     const limits = record(config.migration_limits, 'migration_limits');

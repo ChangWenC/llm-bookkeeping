@@ -1,3 +1,4 @@
+import {exactReviewUnit} from '../../src/store/unit-dispositions.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, canonical } from '../../src/store/index.ts';
@@ -12,7 +13,7 @@ test('first historical monthly freeze includes then-effective revisions after la
     const initial = bundle(events); await store.saveBundle(initial);
     const review = result(initial); review.pages = [];
     review.candidates = events.map((event, i) => ({ ...candidate(initial, 'initial:' + i), content: 'Synthetic then-effective fact ' + i + 'x'.repeat(1200),
-        event_refs: [{ schema_version: 1, event_id: event.event_id }], analytics_projection: { schema_version: 1, value: null, reason: 'No projection in this historical fixture' } }));
+        event_refs: [{ schema_version: 1, ...exactReviewUnit(event) }], analytics_projection: { schema_version: 1, value: null, reason: 'No projection in this historical fixture' } }));
     const accepted = await store.commitReview(review);
     const cutoff = '2026-10-01T00:00:00Z';
     const replaced: FactRevision = { ...accepted.facts[0], revision: 2, action: 'replace', content: 'Synthetic correction recorded after cutoff',

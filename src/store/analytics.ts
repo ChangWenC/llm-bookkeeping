@@ -363,7 +363,7 @@ export class AnalyticsRepository {
                     continue;
                 if (fact.projection.attribution.goal_target_version !== goal.target_version)
                     continue;
-                if (!verification.event_refs.length || verification.event_refs.some(ref => !fact.projection.event_refs.some(source => source.event_id === ref.event_id)))
+                if (!verification.event_refs.length || verification.event_refs.some(ref => !fact.projection.event_refs.some(source => canonical(source) === canonical(ref))))
                     continue;
                 const notice: AnalyticsNotice = { schema_version: 1, notice_id: 'decision:' + contentHash([decision.contract_ref, fact.fact_ref]), decision_ref: decision.contract_ref, fact_ref: fact.fact_ref, subject: decision.subject, verified_at: verification.verified_at };
                 this.db.prepare('INSERT OR IGNORE INTO analytics_notices VALUES(?,?)').run(notice.notice_id, canonical(notice));

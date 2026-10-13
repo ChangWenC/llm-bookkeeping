@@ -1,12 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseJsonPreservingIntegers,validateReviewResult,utc,InputError} from '../src/contracts/validation.ts';
-import {validateConfig} from '../src/config.ts';
+import {validateConfig, PERSONAL_COLLECTION_BUDGETS, PERSONAL_DAILY_ROUND_LIMITS, PERSONAL_DISCOVERY_MANIFEST_BUDGET} from '../src/config.ts';
 import {config,zeroReview} from './fixtures/basic.ts';
 test('wide IDs are preserved before JSON parsing, including strings and escaped quotes',()=>{const result:any=parseJsonPreservingIntegers('{"id":9223372036854775807,"text":"id 9223372036854775807 \\\"quoted\\\"","small":8}');assert.equal(result.id,'9223372036854775807');assert.equal(result.small,8);assert.match(result.text,/quoted/);assert.throws(()=>parseJsonPreservingIntegers('{"x":01}'),InputError);});
 test('review complete with zero facts must be explicit',()=>{assert.equal(validateReviewResult(zeroReview).candidates.length,0);assert.throws(()=>validateReviewResult({...zeroReview,chunks:[{...zeroReview.chunks[0],zero_facts:false}]}),/explicit/);});
 test('partial review remains independently marked',()=>{const result=validateReviewResult({...zeroReview,chunks:[{...zeroReview.chunks[0],status:'partial',zero_facts:false,reason:'remaining slice'}]});assert.equal(result.chunks[0].status,'partial');});
 test('config requires absolute root and explicit ordered travel timeline',()=>{assert.equal(validateConfig(config).wiki_root,'/tmp/wiki');assert.throws(()=>validateConfig({...config,wiki_root:'relative'}),/absolute/);assert.throws(()=>validateConfig({...config,journal_timezone_timeline:[]}),/explicit/);assert.equal(validateConfig({...config,limits:{...config.limits,bundle_bytes:200000}}).limits.bundle_bytes,200000);assert.throws(()=>validateConfig({...config,limits:{...config.limits,bundle_bytes:Infinity}}),/limits/);});
+test('personal daily profile carries independent finite capture and review run bounds', () => {
+ const selected = validateConfig({ ...config, collection_budgets: PERSONAL_COLLECTION_BUDGETS, daily_round_limits: PERSONAL_DAILY_ROUND_LIMITS });
+ assert.equal(selected.collection_budgets?.live.max_bytes, 536870912);
+ assert.equal(selected.collection_budgets?.history.max_duration_ms, 180000);
+ assert.equal(PERSONAL_DISCOVERY_MANIFEST_BUDGET.max_bytes, 16777216);
+ assert.equal(selected.daily_round_limits?.max_started_bundles, 96);
+ assert.equal(selected.limits.bundles_per_round, config.limits.bundles_per_round);
+ assert.throws(() => validateConfig({ ...selected, daily_round_limits: { ...PERSONAL_DAILY_ROUND_LIMITS, semantic_start_duration_ms: 7200001 } }), /phase duration/);
+ assert.throws(() => validateConfig({ ...selected, daily_round_limits: { ...PERSONAL_DAILY_ROUND_LIMITS, live_bundles: 17 } }), /sum/);
+ assert.throws(() => validateConfig({ ...selected, daily_round_limits: { ...PERSONAL_DAILY_ROUND_LIMITS, max_started_bundles: 23 } }), /wave/);
+ assert.throws(() => validateConfig({ ...selected, daily_round_limits: { ...PERSONAL_DAILY_ROUND_LIMITS, task_duration_ms: Infinity } }), /finite/);
+});
 test('UTC validators reject offset guesses and invalid calendar rollover',()=>{assert.throws(()=>utc('2026-09-30T10:00:00+02:00','time'));assert.throws(()=>utc('2026-02-30T10:00:00Z','time'));});
 test('configuration orders nanosecond cutover and timezone entries within the same millisecond',()=>{
  const early='2026-09-30T09:00:00.123456789Z',late='2026-09-30T09:00:00.123456790Z';

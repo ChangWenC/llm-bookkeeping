@@ -6,15 +6,16 @@ import { tmpdir } from 'node:os';
 import { createStore } from '../../src/store/index.ts';
 import { createPublisher } from '../../src/publish/index.ts';
 import { createMonthlyConsumer } from '../../src/consumers/monthly/index.ts';
+import { createReviewer } from '../../src/review/index.ts';
 import { WechatAdapter } from '../../src/adapters/index.ts';
 import { config as baseConfig } from '../../test/fixtures/basic.ts';
-import type { FactRevision, SourceCheckpoint, CollectRequest, BookkeepingConfig } from '../../src/contracts/types.ts';
+import type { FactRevision, SourceCheckpoint, CollectRequest, BookkeepingConfig, ReviewBundle, ReviewResult } from '../../src/contracts/types.ts';
 
 async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'bookkeeping-m2-regression-'));
   const config = { ...baseConfig, wiki_root: join(root, 'wiki'), data_dir: join(root, 'data') } as BookkeepingConfig;
   await mkdir(config.wiki_root);
-  const store = await createStore(config);
+  const store = await createStore(config, { now: () => new Date('2026-10-01T00:00:00Z') });
   t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
   const path = 'wiki/personal/journals/reviews/回顾_2026_07.md';
   const seed = async (body: string) => { await mkdir(dirname(join(config.wiki_root, path)), { recursive: true }); await writeFile(join(config.wiki_root, path), body); };
@@ -32,6 +33,25 @@ const fact = (id: string, content: string, kind: FactRevision['kind'] = 'fact', 
 async function imported(store: Awaited<ReturnType<typeof createStore>>, record: FactRevision, key: string) {
   await store.importLegacy({ schema_version: 1, migration_key: key, facts: [record], mappings: [], work: [] });
 }
+async function prepareMonthly(f: Awaited<ReturnType<typeof fixture>>) {
+  const bundles = await createReviewer(f.store, f.config).prepare({ schema_version: 1, kind: 'monthly', lane: 'history', period: '2026-07', cutoff: '2026-10-01T00:00:00Z' });
+  assert.equal(bundles.length, 1);
+  return bundles[0];
+}
+async function publishPrepared(f: Awaited<ReturnType<typeof fixture>>, b: ReviewBundle, summary: string) {
+  const context = b.monthly_context!;
+  const result: ReviewResult = {
+    schema_version: 1, result_id: `accepted-monthly:${b.bundle_id}`, bundle_id: b.bundle_id,
+    chunks: b.chunks.map(chunk => ({ schema_version: 1, chunk_id: chunk.chunk_id, status: 'complete', reviewed_event_ids: [], zero_facts: true, reason: null })),
+    candidates: [], pages: [], created_at: '2026-10-01T00:00:00Z',
+    monthly_review: { schema_version: 1, month: context.month, summary, fact_refs: context.facts.map(fact => ({ schema_version: 1, fact_id: fact.fact_id, revision: fact.revision })), supplement_text: '', coverage_status: context.coverage_status, completed_work_ids: context.prepared_work_ids ?? [] },
+  };
+  const accepted = await f.store.commitReview(result);
+  await createPublisher(f.store, f.config).exportFacts();
+  const batch = (await f.store.getPublicationOutbox!(accepted.batch_id))!.artifact;
+  assert.ok(await f.store.getPublicationBatchOrder!(accepted.batch_id), 'Publication must use real accepted identity/order proof');
+  return createMonthlyConsumer(f.store, f.config, { now: () => new Date('2026-10-01T00:00:00Z') }).publishMonthlyReview(batch);
+}
 
 test('imported legacy archive is existing month context and is not displayed again as a new supplement', async t => {
   const f = await fixture(t);
@@ -48,9 +68,8 @@ test('retraction of a monthly-summary represented fact visibly invalidates the o
   const f = await fixture(t);
   await imported(f.store, fact('fact:summary', 'Original represented fact'), 'initial:summary');
   await createPublisher(f.store, f.config).exportFacts();
-  const batch = (await f.store.listReadyBatches('monthly-publish'))[0];
-  const monthly = createMonthlyConsumer(f.store, f.config);
-  await monthly.publishMonthlyReview({ ...batch, monthly_review: { schema_version: 1, month: '2026-07', summary: 'The synthetic result succeeded.', fact_refs: [{ schema_version: 1, fact_id: 'fact:summary', revision: 1 }], supplement_text: '', coverage_status: 'partial' } });
+  const prepared = await prepareMonthly(f);
+  assert.equal((await publishPrepared(f, prepared, 'The synthetic result succeeded.')).status, 'complete');
   await imported(f.store, fact('fact:summary', '', 'fact', 2, 'retract'), 'retract:summary');
   await createPublisher(f.store, f.config).resume();
   const body = await readFile(join(f.config.wiki_root, f.path), 'utf8');
@@ -63,13 +82,13 @@ test('successful typed monthly publication acknowledges only explicitly reviewed
   const f = await fixture(t);
   await imported(f.store, fact('fact:queue', 'Synthetic represented fact'), 'initial:queue');
   await createPublisher(f.store, f.config).exportFacts();
-  const monthly = createMonthlyConsumer(f.store, f.config);
+  const monthly = createMonthlyConsumer(f.store, f.config, { now: () => new Date('2026-10-01T00:00:00Z') });
   await monthly.consume();
   const prepared = await f.store.listWork('prepare_monthly', 'pending');
   assert.ok(prepared.length);
+  const bundle = await prepareMonthly(f);
   await f.store.enqueueWork({ schema_version: 1, work_id: 'prepare-monthly:later', kind: 'prepare_monthly', state: 'pending', lane: 'history', payload: { month: '2026-07', batch_id: 'later-unread' }, reason: 'Synthetic after-bundle work', migration_key: null, updated_at: '2026-10-01T00:00:00Z' });
-  const batch = (await f.store.listReadyBatches('monthly-publish'))[0];
-  const outcome = await monthly.publishMonthlyReview({ ...batch, monthly_review: { schema_version: 1, month: '2026-07', summary: '已核验的合成月摘要。', fact_refs: [{ schema_version: 1, fact_id: 'fact:queue', revision: 1 }], supplement_text: '', coverage_status: 'partial', completed_work_ids: prepared.map(work => work.work_id) } });
+  const outcome = await publishPrepared(f, bundle, '已核验的合成月摘要。');
   assert.equal(outcome.status, 'complete');
   assert.deepEqual((await f.store.listWork('prepare_monthly', 'pending')).map(work => work.work_id), ['prepare-monthly:later']);
   const body = await readFile(join(f.config.wiki_root, f.path), 'utf8');

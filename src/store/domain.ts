@@ -85,6 +85,13 @@ export function enrichEvent(previous: SourceEvent, incoming: SourceEvent): Sourc
         for (const key of ['identity_verified', 'media_transcribed'])
             if (previous.context[key] === true)
                 retainedContext[key] = true;
+        // Native transport retries may repeat an earlier unfinished snapshot.
+        // A completion witness is retained; the independent incomplete marker
+        // clears only when the incoming snapshot explicitly proves completion.
+        if (previous.context.turn_complete === true || incoming.context.turn_complete === true)
+            retainedContext.turn_complete = true;
+        if (previous.context.incomplete_turn === true)
+            retainedContext.incomplete_turn = !(incoming.context.turn_complete === true && incoming.context.incomplete_turn === false);
         if (previous.context.context_only === false || incoming.context.context_only === false)
             retainedContext.context_only = false;
         const candidate = { ...incoming, physical_order: previous.physical_order, generation: previous.generation, time_precision: previous.time_precision === 'unknown' ? incoming.time_precision : previous.time_precision, context: retainedContext };

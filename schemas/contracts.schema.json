@@ -51,6 +51,51 @@
     },
     {
       "$ref": "#/$defs/AnalyticsReviewInput"
+    },
+    {
+      "$ref": "#/$defs/ReviewRiskInventoryRequest"
+    },
+    {
+      "$ref": "#/$defs/ReviewRiskInventory"
+    },
+    {
+      "$ref": "#/$defs/JournalReassessmentRequest"
+    },
+    {
+      "$ref": "#/$defs/JournalReassessmentReceipt"
+    },
+    {
+      "$ref": "#/$defs/ReviewUnitDisposition"
+    },
+    {
+      "$ref": "#/$defs/JournalConfirmationProposal"
+    },
+    {
+      "$ref": "#/$defs/JournalUserDecision"
+    },
+    {
+      "$ref": "#/$defs/JournalUserDecisionReceipt"
+    },
+    {
+      "$ref": "#/$defs/JournalWorkRequest"
+    },
+    {
+      "$ref": "#/$defs/JournalWorkBundle"
+    },
+    {
+      "$ref": "#/$defs/JournalResolution"
+    },
+    {
+      "$ref": "#/$defs/JournalResolutionCommit"
+    },
+    {
+      "$ref": "#/$defs/AcceptedDailyInventory"
+    },
+    {
+      "$ref": "#/$defs/JournalRecoveryRequest"
+    },
+    {
+      "$ref": "#/$defs/JournalRecoveryReceipt"
     }
   ],
   "$defs": {
@@ -159,12 +204,30 @@
               "type": "null"
             }
           ]
+        },
+        "start_byte": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "end_byte": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
         "schema_version",
         "event_id"
-      ]
+      ],
+      "dependentRequired": {
+        "start_byte": [
+          "end_byte"
+        ],
+        "end_byte": [
+          "start_byte"
+        ]
+      }
     },
     "FactRef": {
       "type": "object",
@@ -1825,6 +1888,9 @@
         "schema_version": {
           "const": 1
         },
+        "work_only": {
+          "type": "boolean"
+        },
         "month": {
           "type": "string"
         },
@@ -2003,8 +2069,17 @@
         "source": {
           "type": "string"
         },
+        "review_requirements": {
+          "$ref": "#/$defs/ReviewRequirements"
+        },
         "replay": {
           "$ref": "#/$defs/SemanticReplayScope"
+        },
+        "review_range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "review_timezone": {
+          "type": "string"
         },
         "analysis_context": {
           "$ref": "#/$defs/WeeklyAnalysisInput"
@@ -2282,6 +2357,12 @@
             "type": "string"
           }
         },
+        "reviewed_spans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewUnit"
+          }
+        },
         "zero_facts": {
           "type": "boolean"
         },
@@ -2396,6 +2477,18 @@
         },
         "source": {
           "type": "string"
+        },
+        "journal_dispositions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalDisposition"
+          }
+        },
+        "unit_dispositions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewUnitDisposition"
+          }
         },
         "analysis": {
           "$ref": "#/$defs/WeeklyAnalysisResult"
@@ -2605,6 +2698,9 @@
           "items": {
             "$ref": "#/$defs/FactRef"
           }
+        },
+        "supersedes_operation_id": {
+          "type": "string"
         }
       },
       "required": [
@@ -2707,6 +2803,18 @@
               "type": "null"
             }
           ]
+        },
+        "queued_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failure_scope": {
+          "const": "storage"
+        },
+        "failure_code": {
+          "type": "string"
         }
       },
       "required": [
@@ -2746,6 +2854,12 @@
         },
         "analytics_pilot": {
           "$ref": "#/$defs/AnalyticsPilotStats"
+        },
+        "failure_scope": {
+          "const": "storage"
+        },
+        "failure_code": {
+          "type": "string"
         }
       },
       "required": [
@@ -2760,6 +2874,39 @@
       "properties": {
         "schema_version": {
           "const": 1
+        },
+        "execution_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "storage_unavailable"
+          ]
+        },
+        "continuation": {
+          "type": "object",
+          "properties": {
+            "schema_version": {},
+            "stage": {
+              "enum": [
+                "export",
+                "recovery",
+                "monthly",
+                "result"
+              ]
+            },
+            "status": {
+              "const": "failed"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "stage",
+            "status",
+            "reason"
+          ]
         },
         "result_id": {
           "anyOf": [
@@ -2864,12 +3011,16 @@
             }
           ]
         },
+        "journal_confirmation_required": {
+          "type": "boolean"
+        },
         "state": {
           "enum": [
             "prepared",
             "applied",
             "pending",
-            "conflict"
+            "conflict",
+            "superseded"
           ]
         },
         "fact_refs": {
@@ -2890,6 +3041,9 @@
               "type": "null"
             }
           ]
+        },
+        "supersedes_operation_id": {
+          "type": "string"
         }
       },
       "required": [
@@ -3230,6 +3384,1150 @@
         "range"
       ]
     },
+    "ReviewUnit": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "start_byte": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "end_byte": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "start_byte",
+        "end_byte"
+      ]
+    },
+    "ReviewRequirements": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "unit_dispositions": {},
+        "inspection_version": {},
+        "completion_policy": {
+          "const": "primary_spans_v1"
+        }
+      },
+      "required": [
+        "schema_version",
+        "unit_dispositions",
+        "inspection_version"
+      ]
+    },
+    "ReviewUnitDisposition": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewUnit"
+          }
+        },
+        "disposition": {
+          "enum": [
+            "no_persistent_information",
+            "covered_by_facts",
+            "defer"
+          ]
+        },
+        "fact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "units",
+        "disposition",
+        "fact_refs",
+        "reason"
+      ]
+    },
+    "JournalBaselineEvidence": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "section": {
+          "const": "body"
+        },
+        "kind": {
+          "enum": [
+            "paragraph",
+            "list_item"
+          ]
+        },
+        "start_byte": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "end_byte": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "text": {
+          "type": "string"
+        },
+        "dimensions": {
+          "$ref": "#/$defs/JournalAssessmentDimensions"
+        }
+      },
+      "required": [
+        "schema_version",
+        "section",
+        "kind",
+        "start_byte",
+        "end_byte",
+        "text",
+        "dimensions"
+      ]
+    },
+    "JournalBaselineAssessment": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "baseline_digest": {
+          "type": "string"
+        },
+        "summary_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body_evidence_text": {
+          "type": "string"
+        },
+        "consistency": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "relation": {
+          "enum": [
+            "new",
+            "clarification",
+            "correction",
+            "unknown"
+          ]
+        },
+        "summary_consistency": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown"
+          ]
+        },
+        "body_consistency": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown"
+          ]
+        },
+        "summary_dimensions": {
+          "$ref": "#/$defs/JournalAssessmentDimensions"
+        },
+        "body_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalBaselineEvidence"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "baseline_digest",
+        "summary_text",
+        "body_evidence_text",
+        "consistency",
+        "reason"
+      ]
+    },
+    "JournalDisposition": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "candidate_id": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "patch",
+            "already_present",
+            "not_needed",
+            "defer"
+          ]
+        },
+        "suggestion_id": {
+          "type": "string"
+        },
+        "evidence_text": {
+          "type": "string"
+        },
+        "baseline_assessment": {
+          "$ref": "#/$defs/JournalBaselineAssessment"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "candidate_id",
+        "date",
+        "path",
+        "disposition",
+        "reason"
+      ]
+    },
+    "JournalPublicationPayload": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "fact_ref": {
+          "$ref": "#/$defs/FactRef"
+        },
+        "date": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "target_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "patch",
+            "already_present",
+            "not_needed",
+            "defer"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "fact_ref",
+        "date",
+        "path",
+        "target_refs"
+      ]
+    },
+    "JournalWorkRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_items": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "cutoff"
+      ]
+    },
+    "JournalWorkBundle": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "journal_bundle_id": {
+          "type": "string"
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "work": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkItem"
+          }
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "existing_facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "baselines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageBaseline"
+          }
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileOutcome"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "journal_bundle_id",
+        "cutoff",
+        "work",
+        "facts",
+        "existing_facts",
+        "baselines",
+        "conflicts"
+      ]
+    },
+    "JournalWorkSuggestion": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "suggestion_id": {
+          "type": "string"
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "date": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "baseline_digest": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "append",
+            "replace"
+          ]
+        },
+        "old_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_text": {
+          "type": "string"
+        },
+        "supersedes_operation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "suggestion_id",
+        "work_ids",
+        "date",
+        "path",
+        "baseline_digest",
+        "mode",
+        "old_text",
+        "new_text"
+      ]
+    },
+    "JournalWorkDisposition": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "patch",
+            "already_present",
+            "not_needed",
+            "defer"
+          ]
+        },
+        "suggestion_id": {
+          "type": "string"
+        },
+        "evidence_text": {
+          "type": "string"
+        },
+        "baseline_assessment": {
+          "$ref": "#/$defs/JournalBaselineAssessment"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "work_id",
+        "disposition",
+        "reason"
+      ]
+    },
+    "JournalResolution": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "resolution_id": {
+          "type": "string"
+        },
+        "journal_bundle_id": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "dispositions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalWorkDisposition"
+          }
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalWorkSuggestion"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "resolution_id",
+        "journal_bundle_id",
+        "created_at",
+        "dispositions",
+        "pages"
+      ]
+    },
+    "JournalConfirmationProposal": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "proposal_id": {
+          "type": "string"
+        },
+        "proposal_digest": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "baseline_digest": {
+          "type": "string"
+        },
+        "desired_digest": {
+          "type": "string"
+        },
+        "old_text": {
+          "type": "string"
+        },
+        "new_text": {
+          "type": "string"
+        },
+        "fact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "awaiting_user_confirmation",
+            "confirmed",
+            "keep_existing",
+            "stale"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "proposal_id",
+        "proposal_digest",
+        "operation_id",
+        "path",
+        "baseline_digest",
+        "desired_digest",
+        "old_text",
+        "new_text",
+        "fact_refs",
+        "work_ids",
+        "reason",
+        "state"
+      ]
+    },
+    "JournalConfirmationRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "patch": {
+          "$ref": "#/$defs/JournalPatch"
+        },
+        "intent": {
+          "$ref": "#/$defs/FileIntent"
+        },
+        "current_baseline_digest": {
+          "type": "string"
+        },
+        "old_text": {
+          "type": "string"
+        },
+        "new_text": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requires_confirmation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "current_baseline_digest",
+        "old_text",
+        "new_text",
+        "reason",
+        "requires_confirmation"
+      ]
+    },
+    "JournalConfirmationGuard": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "status": {
+          "enum": [
+            "not_required",
+            "confirmed",
+            "awaiting_user_confirmation",
+            "keep_existing",
+            "stale"
+          ]
+        },
+        "proposal_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "proposal_id",
+        "work_ids",
+        "reason"
+      ]
+    },
+    "JournalUserDecision": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "decision_id": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": "string"
+        },
+        "proposal_digest": {
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "confirm",
+            "keep_existing"
+          ]
+        },
+        "basis": {
+          "const": "explicit_user_response"
+        },
+        "baseline_digest": {
+          "type": "string"
+        },
+        "fact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "response_source": {
+          "type": "string"
+        },
+        "response_content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "decision_id",
+        "proposal_id",
+        "proposal_digest",
+        "decision",
+        "basis",
+        "baseline_digest",
+        "fact_refs",
+        "work_ids",
+        "reason"
+      ]
+    },
+    "JournalUserDecisionReceipt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "decision_id": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "confirmed",
+            "keep_existing",
+            "stale"
+          ]
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "decision_id",
+        "proposal_id",
+        "status",
+        "operation_id",
+        "work_ids",
+        "reason"
+      ]
+    },
+    "JournalResolutionCommit": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "resolution_id": {
+          "type": "string"
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "patches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalPatch"
+          }
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "resolution_id",
+        "reused",
+        "patches",
+        "work_ids"
+      ]
+    },
+    "DailyRoundLimits": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "task_duration_ms": {
+          "type": "number"
+        },
+        "capture_duration_ms": {
+          "type": "number"
+        },
+        "semantic_start_duration_ms": {
+          "type": "number"
+        },
+        "wave_bundles": {
+          "type": "number"
+        },
+        "live_bundles": {
+          "type": "number"
+        },
+        "history_bundles": {
+          "type": "number"
+        },
+        "max_started_bundles": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "task_duration_ms",
+        "capture_duration_ms",
+        "semantic_start_duration_ms",
+        "wave_bundles",
+        "live_bundles",
+        "history_bundles",
+        "max_started_bundles"
+      ]
+    },
+    "AcceptedDailyInventory": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AcceptedDailyInventoryItem"
+          }
+        },
+        "next_result_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "items",
+        "next_result_id"
+      ]
+    },
+    "JournalRecoveryRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "result_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "result_ids",
+        "created_at"
+      ]
+    },
+    "JournalRecoveryReceipt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "result_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "result_ids",
+        "work_ids"
+      ]
+    },
+    "ReviewRiskInventoryRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        },
+        "after_result_id": {
+          "type": "string"
+        },
+        "known_mixed_event_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "from",
+        "to"
+      ]
+    },
+    "ReviewRiskInventoryItem": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "result_id": {
+          "type": "string"
+        },
+        "accepted_at": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "acceptance_time_basis": {
+          "const": "store_transaction_clock"
+        },
+        "primary_units": {
+          "type": "number"
+        },
+        "other_primary_zero_candidate_completed": {
+          "type": "number"
+        },
+        "known_mixed_event_completed_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "weak_closed_journal_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "result_id",
+        "accepted_at",
+        "acceptance_time_basis",
+        "primary_units",
+        "other_primary_zero_candidate_completed",
+        "known_mixed_event_completed_ids",
+        "weak_closed_journal_work_ids"
+      ]
+    },
+    "ReviewRiskInventory": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewRiskInventoryItem"
+          }
+        },
+        "next_result_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknown_legacy_acceptance_count": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "items",
+        "next_result_id",
+        "unknown_legacy_acceptance_count"
+      ]
+    },
+    "JournalReassessmentRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true
+        },
+        "mode": {
+          "enum": [
+            "preview",
+            "apply"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "expected_plan_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "work_ids",
+        "mode",
+        "created_at"
+      ]
+    },
+    "JournalReassessmentItem": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "work_id",
+        "eligible",
+        "reason"
+      ]
+    },
+    "JournalReassessmentReceipt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "plan_digest": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JournalReassessmentItem"
+          }
+        },
+        "reopened_work_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "plan_digest",
+        "items",
+        "reopened_work_ids"
+      ]
+    },
     "WechatPersonMapping": {
       "type": "object",
       "properties": {
@@ -3257,6 +4555,482 @@
         "wiki_path",
         "relationship",
         "verified"
+      ]
+    },
+    "PreparationScope": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "source": {
+          "type": "string"
+        },
+        "lane": {
+          "enum": [
+            "live",
+            "history"
+          ]
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "selection_basis": {
+          "enum": [
+            "event_time",
+            "capture_lane"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "source",
+        "lane",
+        "range",
+        "cutoff",
+        "selection_basis"
+      ]
+    },
+    "PreparationContinuation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/PreparationScope"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "scope",
+        "cursor"
+      ]
+    },
+    "DeferredReviewUnit": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "unit": {
+          "$ref": "#/$defs/ReviewUnit"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "unit",
+        "reason"
+      ]
+    },
+    "PreparationProgress": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "phase": {
+          "enum": [
+            "candidates",
+            "facts",
+            "coverage",
+            "baselines",
+            "bundle"
+          ]
+        },
+        "frontier": {
+          "type": "string"
+        },
+        "advanced": {
+          "type": "boolean"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PreparationStageProgress"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "phase",
+        "frontier",
+        "advanced",
+        "stages"
+      ]
+    },
+    "PreparationStageProgress": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "phase": {
+          "enum": [
+            "candidates",
+            "facts",
+            "coverage",
+            "baselines",
+            "bundle"
+          ]
+        },
+        "rows": {
+          "type": "number"
+        },
+        "elapsed_ms": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "phase",
+        "rows",
+        "elapsed_ms"
+      ]
+    },
+    "CandidatePreparation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "more",
+            "exhausted",
+            "unavailable"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/PreparationScope"
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreparationContinuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scanned": {
+          "type": "object",
+          "properties": {
+            "pages": {
+              "type": "number"
+            },
+            "rows": {
+              "type": "number"
+            },
+            "elapsed_ms": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "pages",
+            "rows",
+            "elapsed_ms"
+          ]
+        },
+        "deferred_units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeferredReviewUnit"
+          }
+        },
+        "progress": {
+          "$ref": "#/$defs/PreparationProgress"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state",
+        "scope",
+        "continuation",
+        "scanned",
+        "deferred_units"
+      ]
+    },
+    "PublicationOutboxPageRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "ready"
+          ]
+        },
+        "limit": {
+          "type": "number"
+        },
+        "after": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "limit"
+      ]
+    },
+    "PublicationOutboxPage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OutboxEntry"
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "items",
+        "next_cursor"
+      ]
+    },
+    "PublicationFilePageRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "states": {
+          "type": "array",
+          "items": {}
+        },
+        "limit": {
+          "type": "number"
+        },
+        "after": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "states",
+        "limit"
+      ]
+    },
+    "PublicationFilePage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileIntent"
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "items",
+        "next_cursor"
+      ]
+    },
+    "MonthlySemanticDebt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "month": {
+          "type": "string"
+        },
+        "pending_count": {
+          "type": "number"
+        },
+        "oldest_at": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactsPage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "month",
+        "pending_count",
+        "oldest_at",
+        "reasons",
+        "eligible",
+        "continuation"
+      ]
+    },
+    "FactMaterialProgress": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "snapshot_id": {
+          "type": "string"
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "total": {
+          "type": "number"
+        },
+        "first_unread_offset": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending_work_count": {
+          "type": "number"
+        },
+        "pending_archive_context_count": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "snapshot_id",
+        "cutoff",
+        "total",
+        "first_unread_offset",
+        "pending_work_count",
+        "pending_archive_context_count"
+      ]
+    },
+    "MonthlySemanticStatus": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "cutoff": {
+          "type": "string"
+        },
+        "pending_count": {
+          "type": "number"
+        },
+        "oldest_month": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "months": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MonthlySemanticDebt"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "cutoff",
+        "pending_count",
+        "oldest_month",
+        "months"
+      ]
+    },
+    "MonthlyRoundLimits": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "task_duration_ms": {
+          "type": "number"
+        },
+        "semantic_start_duration_ms": {
+          "type": "number"
+        },
+        "max_started_bundles": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "task_duration_ms",
+        "semantic_start_duration_ms",
+        "max_started_bundles"
       ]
     },
     "ProviderStageOutcome": {
@@ -3297,6 +5071,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "preparation": {
+          "$ref": "#/$defs/CandidatePreparation"
         }
       },
       "required": [
@@ -3456,6 +5233,83 @@
         "paths"
       ]
     },
+    "ReviewReadExclusion": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\s*?\\[\\]\\x00-\\x1f\\x7f]+$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\x00-\\x1f\\x7f]+$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewReadExclusions": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewReadExclusion"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "schema_version",
+        "events"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewReadExclusionMetadata": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "unreviewed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "reason",
+        "provider",
+        "account_id",
+        "unreviewed"
+      ]
+    },
     "BookkeepingConfig": {
       "type": "object",
       "properties": {
@@ -3600,6 +5454,15 @@
             "history"
           ]
         },
+        "daily_round_limits": {
+          "$ref": "#/$defs/DailyRoundLimits"
+        },
+        "monthly_round_limits": {
+          "$ref": "#/$defs/MonthlyRoundLimits"
+        },
+        "review_read_exclusions": {
+          "$ref": "#/$defs/ReviewReadExclusions"
+        },
         "project_whitelist": {
           "type": "array",
           "items": {
@@ -3655,6 +5518,196 @@
         "manifest_id",
         "kind",
         "entries"
+      ]
+    },
+    "AcceptedDailyInventoryRequest": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "after_result_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        },
+        "include_unknown_acceptance": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "AcceptedDailyInventoryItem": {
+      "type": "object",
+      "properties": {
+        "result_id": {
+          "type": "string"
+        },
+        "accepted_at": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UnknownValue"
+            },
+            {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "result_created_at": {
+          "type": "string"
+        },
+        "acceptance_time_basis": {
+          "enum": [
+            "store_transaction_clock",
+            "unknown_legacy_result_time"
+          ]
+        },
+        "window_membership": {
+          "enum": [
+            "included",
+            "unknown"
+          ]
+        },
+        "bundle": {
+          "$ref": "#/$defs/ReviewBundle"
+        },
+        "result": {
+          "$ref": "#/$defs/ReviewResult"
+        },
+        "commit": {
+          "$ref": "#/$defs/ReviewCommit"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRevision"
+          }
+        },
+        "patches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "patch": {
+                "$ref": "#/$defs/JournalPatch"
+              },
+              "status": {
+                "type": "string"
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "patch",
+              "status",
+              "reason"
+            ]
+          }
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileOutcome"
+          }
+        }
+      },
+      "required": [
+        "result_id",
+        "accepted_at",
+        "result_created_at",
+        "acceptance_time_basis",
+        "window_membership",
+        "bundle",
+        "result",
+        "commit",
+        "facts",
+        "targets",
+        "patches",
+        "conflicts"
+      ]
+    },
+    "JournalAssessmentDimensions": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "action": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "time": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "result": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "negation": {
+          "enum": [
+            "consistent",
+            "conflicting",
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      },
+      "required": [
+        "subject",
+        "action",
+        "time",
+        "result",
+        "negation"
       ]
     },
     "AnalyticsReviewInput": {

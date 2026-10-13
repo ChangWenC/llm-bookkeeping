@@ -1,3 +1,4 @@
+import {exactReviewUnit} from '../../src/store/unit-dispositions.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
@@ -11,6 +12,7 @@ import { analysisWeekRange } from '../../src/time.ts';
 import { config, event, collection, bundle, result, value, range } from '../store/fixtures.ts';
 import type { WeeklyAnalysisInput, WeeklyAnalysisResult, AnalysisRevisionRef } from '../../src/contracts/types.ts';
 const at = '2026-10-05T00:00:00Z', week = '2026-10-04';
+const asOf = '2026-10-04T12:00:00Z';
 async function fixture(projectionMissing = false) {
     const c = await config();
     c.project_whitelist = ['a'];
@@ -34,7 +36,7 @@ async function fixture(projectionMissing = false) {
         r.candidates[0].analytics_projection = { schema_version: 1, value: null, reason: 'Missing professional projection' };
     const commit = await s.commitReview(r);
     await s.markExportReady(commit.batch_id, c.data_dir + '/synthetic-ready.json');
-    return { c, s, commit, consumer: createAnalyticsConsumer(s, c) };
+    return { c, s, commit, consumer: createAnalyticsConsumer(s, c, {now:()=>new Date(asOf)}) };
 }
 function semantic(input: WeeklyAnalysisInput): WeeklyAnalysisResult { return { schema_version: 1, snapshot: { schema_version: 1, analysis_ref: input.analysis_ref!, week_end: input.week_end, coverage_status: input.coverage_status, observations: input.observation_candidates ?? [], capabilities: input.facts.length ? [{ schema_version: 1, capability_id: 'parser', trend: 'improving', explanation: 'Explicit verification evidence', evidence_refs: [input.facts[0].fact_ref] }] : [], goal_gaps: [], direction: 'unknown', patterns: ['Verification precedes publication'], validation_action: input.facts.length ? { schema_version: 1, action_ref: { schema_version: 1, logical_id: 'action:parser', revision: 1 }, subject: 'Roy', description: 'Verify one independent parser fixture', evidence_refs: [input.facts[0].fact_ref], state: 'active' } : null }, prior_action_disposition: null, proposed_confirmations: input.observation_candidates?.slice(0, 3).map(o => o.observation_ref) ?? [], freshness_at: at }; }
 async function acceptWeek(f: Awaited<ReturnType<typeof fixture>>, analysis?: WeeklyAnalysisResult) { const reviewer = createReviewer(f.s, f.c), b = (await reviewer.prepare({ kind: 'weekly', lane: 'history', period: week, cutoff: at }))[0]; const r = result(b, 'week:' + digest(canonical(analysis ?? b)), false); r.analysis = analysis ?? semantic(b.analysis_context!); const commit = await reviewer.accept(r); await f.s.markExportReady(commit.batch_id, f.c.data_dir + '/week.json'); return { b, commit, analysis: r.analysis }; }
@@ -46,6 +48,7 @@ test('ready professional ledger, capability semantics and typed weekly publicati
         await mkdir(join(f.c.wiki_root, 'wiki/personal/synthesis'), { recursive: true });
         await writeFile(cockpit, 'Human authored goals stay here.\n');
         assert.equal((await f.consumer.consume()).status, 'complete');
+        assert((await f.s.listFileIntents()).filter(intent=>intent.operation_id.startsWith('analytics-cockpit:')).every(intent=>Date.parse(intent.created_at)===Date.parse(asOf)));
         const input = await prepareWeeklyAnalysis(f.s, f.c, week);
         assert.equal(input.coverage_status, 'complete');
         assert.equal(input.facts[0].projection.scope[0], 'project:a');
@@ -226,7 +229,7 @@ test('major decisions require exact confirmed goal version, subject, validity an
         assert.equal((await review(f, decision.contract_ref))[0].status, 'pending');
         await review(f, goal.contract_ref);
         await review(f, decision.contract_ref, 'confirm', 'decision-confirm-after-goal');
-        assert.equal(repo.currentOutput('x').notices.length, 0);
+        assert.equal(repo.currentOutput('x', f.c, asOf).notices.length, 0);
         for (const [i, kind, subject, version, verifiedAt] of [[1, 'inference', 'Roy', 'v1', '2026-09-30T09:00:00Z'], [2, 'fact', 'Other', 'v1', '2026-09-30T09:00:00Z'], [3, 'fact', 'Roy', 'v2', '2026-09-30T09:00:00Z'], [4, 'fact', 'Roy', 'v1', '2026-09-30T09:00:00Z']] as const) {
             const e = event('verification:' + i, 'Synthetic user explicit verification', verifiedAt);
             await f.s.saveCollection(collection([e], 'live', 'verified-source:' + i));
@@ -239,24 +242,33 @@ test('major decisions require exact confirmed goal version, subject, validity an
             candidate.subject = subject;
             candidate.analytics_projection.value!.subject = subject;
             candidate.analytics_projection.value!.attribution = { actor: subject, responsibility: 'verification', goal_target_version: version };
-            candidate.analytics_projection.value!.verification = { schema_version: 1, name: 'parser_verified', value: 'yes', subject, verified_at: verifiedAt, event_refs: [{ schema_version: 1, event_id: e.event_id }], basis: 'user_explicit_verification' };
+            candidate.analytics_projection.value!.verification = { schema_version: 1, name: 'parser_verified', value: 'yes', subject, verified_at: verifiedAt, event_refs: [{ schema_version: 1, ...exactReviewUnit(e) }], basis: 'user_explicit_verification' };
             const commit = await f.s.commitReview(r);
             await f.s.markExportReady(commit.batch_id, f.c.data_dir + '/verified-' + i + '.json');
             await f.consumer.consume();
-            assert.equal(repo.currentOutput('x').notices.length, i === 4 ? 1 : 0);
+            assert.equal(repo.currentOutput('x', f.c, asOf).notices.length, i === 4 ? 1 : 0);
         }
         await f.consumer.consume();
         await review(f, decision.contract_ref, 'confirm', 'decision-confirm-repeat');
-        assert.equal(repo.currentOutput('x').notices.length, 1);
+        assert.equal(repo.currentOutput('x', f.c, asOf).notices.length, 1);
         await review(f, goal.contract_ref, 'retract');
-        assert.equal(repo.currentOutput('x').notices.length, 0);
+        assert.equal(repo.currentOutput('x', f.c, asOf).notices.length, 0);
         const newGoal = { ...goal, contract_ref: { ...goal.contract_ref, revision: 2 }, target_version: 'v2' };
         await f.consumer.review({ schema_version: 1, kind: 'goal_contract', contract: newGoal });
-        assert.equal(repo.confirmedGoals(f.c).length, 0);
+        assert.equal(repo.confirmedGoals(f.c, asOf).length, 0);
     }
     finally {
         f.s.close();
     }
+});
+test('expired Analytics deadline starts no batch or acknowledgement and returns pending review receipts without semantic review changes',async()=>{
+    const f=await fixture();try {
+        const consumer=createAnalyticsConsumer(f.s,f.c,{now:()=>new Date(asOf),writer:{remaining_ms:()=>0}});
+        const before=(await f.s.listReadyBatches('analytics')).length;
+        assert.equal((await consumer.consume()).status,'pending');assert.equal((await f.s.listReadyBatches('analytics')).length,before);assert.equal((await f.s.listFileIntents()).length,0);
+        const review={schema_version:1,kind:'review',events:[{schema_version:1,review_id:'deadline-review',target_ref:{schema_version:1,logical_id:'unknown',revision:1},action:'confirm',correction:null,evidence_refs:[],created_at:asOf}]};
+        const receipts=await consumer.review(review);assert.equal(receipts[0]!.status,'pending');assert.equal(analyticsRepository(f.s).currentOutput('deadline',f.c,asOf).overlays.length,0);
+    }finally{f.s.close();}
 });
 test('prior action explicitly continues into an empty later week rather than failing for a missing run', async () => {
     const f = await fixture();

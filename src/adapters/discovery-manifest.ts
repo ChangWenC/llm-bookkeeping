@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BookkeepingConfig, ProviderConfig } from "../contracts/types.ts";
 import { hash } from "./common.ts";
+import { markStorageFailure } from "../storage-errors.ts";
 
 export interface DirectoryManifest {
   id: string;
@@ -29,6 +30,10 @@ async function canonicalMissing(target: string): Promise<string> {
   }
 }
 const within = (target: string, root: string) => target === root || target.startsWith(root + path.sep);
+async function localWrite<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw markStorageFailure(error, "local_write"); }
+}
 
 /** Derived metadata stays in the local state tree, never in a source or Wiki root. */
 export async function manifestDirectory(config: BookkeepingConfig, source: ProviderConfig, scope: string): Promise<string> {
@@ -39,11 +44,11 @@ export async function manifestDirectory(config: BookkeepingConfig, source: Provi
   if (/\/(?:Mobile Documents|CloudStorage)(?:\/|$)/.test(data) ||
       [wiki, ...sourceRoots].some(root => within(data, root) || within(root, data)))
     throw new Error("manifest_data_dir_overlaps_wiki_source_or_cloud");
-  await mkdir(data, { recursive: true, mode: 0o700 });
+  await localWrite(() => mkdir(data, { recursive: true, mode: 0o700 }));
   let current = data;
   for (const part of ["adapters", "discovery", hash(`${source.provider}:${source.account_id}:${scope}`)]) {
     current = path.join(current, part);
-    await mkdir(current, { mode: 0o700 }).catch((error: any) => { if (error.code !== "EEXIST") throw error; });
+    await localWrite(() => mkdir(current, { mode: 0o700 })).catch((error: any) => { if (error.code !== "EEXIST") throw error; });
     const info = await lstat(current);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe_manifest_directory");
   }
@@ -92,11 +97,20 @@ export async function buildManifest(
   if (!bytes) return { id, offset: 0, bytes, entries, complete, reason };
   const target = path.join(storage, id + ".jsonl");
   const temporary = path.join(storage, `${id}.${randomUUID()}.tmp`);
-  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(content); await handle.sync(); }
-  finally { await handle.close(); }
-  try { await rename(temporary, target); }
-  finally { await unlink(temporary).catch((error: any) => { if (error.code !== "ENOENT") throw error; }); }
+  const handle = await localWrite(() => open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600));
+  let failure: unknown;
+  try {
+    await localWrite(() => handle.writeFile(content));
+    await localWrite(() => handle.sync());
+  } catch (error) { failure = error; throw error; }
+  finally {
+    // Release the descriptor even on failure, while preserving the first write
+    // error. Leave failed derived temporary bytes in place; do not start rename
+    // or another cleanup write after a shared-storage failure.
+    await localWrite(() => handle.close()).catch(error => { if (!failure) throw error; });
+  }
+  await localWrite(() => rename(temporary, target));
+  await localWrite(() => unlink(temporary)).catch((error: any) => { if (error.code !== "ENOENT") throw error; });
   return { id, offset: 0, bytes, entries, complete, reason };
 }
 

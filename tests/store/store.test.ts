@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { writeFile, readFile, stat } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
@@ -26,7 +27,7 @@ test('every semantic transaction fault rolls back facts, review, patches, chunk 
 test('killed process during transaction leaves no accepted semantic state; restart accepts once',async()=>{
  const c=await config();const s=await createStore(c);const b=bundle();await s.saveCollection(collection());await s.saveBundle(b);s.close();
  const input=join(c.wiki_root,'crash-input.json');await writeFile(input,JSON.stringify({config:c,result:result(b),step:'review_outbox'}));
- const child=spawnSync(process.execPath,[new URL('./crash-process.ts',import.meta.url).pathname,input],{encoding:'utf8'});assert.equal(child.status,71,child.stderr);
+ const child=spawnSync(process.execPath,[fileURLToPath(new URL('./crash-process.ts',import.meta.url)),input],{encoding:'utf8'});assert.equal(child.status,71,child.stderr);
  const recovered=await createStore(c);assert.deepEqual(await recovered.listOutbox(),[]);assert.equal((await recovered.status()).facts,0);const first=await recovered.commitReview(result(b));recovered.close();
  const restarted=await createStore(c);const again=await restarted.commitReview({...result(b),result_id:'new-model-label'});assert.equal(again.reused,true);assert.equal(again.batch_id,first.batch_id);assert.deepEqual(again.facts,first.facts);assert.deepEqual(again.patches,first.patches);assert.equal((await restarted.listPendingPatches()).length,1);assert.equal(await restarted.getFileIntent(first.patches[0].operation_id),null);restarted.close();
 });
@@ -40,14 +41,14 @@ test('two independent writer threads serialize competing acceptance without losi
 
 test('reviewing half the capture remains partial; explicit zero facts closes only actual reviewed events',async()=>{
  const c=await config();const s=await createStore(c);const events=[event('a'),event('b')];await s.saveCollection(collection(events));const b=bundle(events);await s.saveBundle(b);
- const r=result(b,'partial',false);r.chunks[0]={...r.chunks[0],status:'partial',reviewed_event_ids:['a'],reason:'b not yet read'};await s.commitReview(r);const box=await s.listOutbox();assert.equal(box[0].artifact.coverage[0].capture_status,'complete');assert.equal(box[0].artifact.coverage[0].review_status,'partial');assert.equal((await s.listPendingChunks(range,'live')).length,1);
+ const r=result(b,'partial',false);r.unit_dispositions=[{schema_version:1,units:[{schema_version:1,event_id:'a',start_byte:0,end_byte:Buffer.byteLength(events[0].body!)}],disposition:'no_persistent_information',fact_refs:[],reason:'Read exact a'}, {schema_version:1,units:[{schema_version:1,event_id:'b',start_byte:0,end_byte:Buffer.byteLength(events[1].body!)}],disposition:'defer',fact_refs:[],reason:'Unread b'}];r.chunks[0]={...r.chunks[0],status:'partial',reviewed_event_ids:['a'],reason:'b not yet read'};await s.commitReview(r);const box=await s.listOutbox();assert.equal(box[0].artifact.coverage[0].capture_status,'complete');assert.equal(box[0].artifact.coverage[0].review_status,'partial');assert.equal((await s.listPendingChunks(range,'live')).length,1);
  const remaining=bundle([events[1]],'remaining');await s.saveBundle(remaining);await s.commitReview(result(remaining,'zero',false));assert.equal((await s.listCoverage(range))[0].review_status,'complete');assert.equal((await s.readEffectiveFacts({range})).length,0);s.close();
 });
 
 test('context cannot count as reviewed evidence and unknown candidates defer only their events',async()=>{
  const c=await config();const s=await createStore(c);const events=[event('a'),event('b')];await s.saveCollection(collection(events));const b=bundle(events);b.chunks[0].context_events=[event('context')];await s.saveBundle(b);
  const bad=result(b);bad.chunks[0].reviewed_event_ids.push('context');await assert.rejects(s.commitReview(bad),/outside chunk/);
- const r=result(b);r.candidates[0].attribution.subject_known=false;r.candidates.push({...candidate(b,'candidate:2'),analytics_projection:{schema_version:1,value:null,reason:'Not projected'},event_refs:[{schema_version:1,event_id:'b'}]});r.pages=[];await s.commitReview(r);assert.equal((await s.readEffectiveFacts({range})).length,1);assert.equal((await s.listWork('review_candidate'))[0].reason,'Unknown fact subject');assert.equal((await s.listCoverage(range))[0].review_status,'partial');assert.deepEqual((await s.getReviewableEvents({range,lane:'live'},'daily')).map(e=>e.event_id),['a']);s.close();
+ const r=result(b);r.unit_dispositions=[];r.candidates[0].attribution.subject_known=false;r.candidates.push({...candidate(b,'candidate:2'),analytics_projection:{schema_version:1,value:null,reason:'Not projected'},event_refs:[{schema_version:1,event_id:'b',start_byte:0,end_byte:Buffer.byteLength(events[1].body!)}]});r.pages=[];await s.commitReview(r);assert.equal((await s.readEffectiveFacts({range})).length,1);assert.equal((await s.listWork('review_candidate'))[0].reason,'Unknown fact subject');assert.equal((await s.listCoverage(range))[0].review_status,'partial');assert.deepEqual((await s.getReviewableEvents({range,lane:'live'},'daily')).map(e=>e.event_id),['a']);s.close();
 });
 
 test('replace/retract fold immutable history with as-of, move periods, stale targets defer locally',async()=>{

@@ -1,3 +1,4 @@
+import {exactReviewUnit} from '../../src/store/unit-dispositions.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore, canonical } from '../../src/store/index.ts';
@@ -14,7 +15,7 @@ test('frozen weekly and monthly pages keep immutable references across backdated
     await s.saveBundle(b);
     const r = result(b);
     r.pages = [];
-    r.candidates = events.map((e, i) => ({ ...candidate(b, 'candidate:' + i), content: 'PRIVATE mixed source ' + 'x'.repeat(1200), event_refs: [{ schema_version: 1, event_id: e.event_id }], analytics_projection: { schema_version: 1, value: { ...candidate(b).analytics_projection.value!, summary: 'Professional summary ' + i + ' '.repeat(500), event_refs: [{ schema_version: 1, event_id: e.event_id }] }, reason: null } }));
+    r.candidates = events.map((e, i) => ({ ...candidate(b, 'candidate:' + i), content: 'PRIVATE mixed source ' + 'x'.repeat(1200), event_refs: [{ schema_version: 1, ...exactReviewUnit(e) }], analytics_projection: { schema_version: 1, value: { ...candidate(b).analytics_projection.value!, summary: 'Professional summary ' + i + ' '.repeat(500), event_refs: [{ schema_version: 1, ...exactReviewUnit(e) }] }, reason: null } }));
     const commit = await s.commitReview(r);
     await s.markExportReady(commit.batch_id, c.data_dir + '/initial.json');
     const consumer = createAnalyticsConsumer(s, c);
@@ -78,7 +79,7 @@ test('accepted consecutive pages accumulate monthly refs and weekly observations
     await s.saveBundle(b);
     const r = result(b);
     r.pages = [];
-    r.candidates = events.map((e, i) => ({ ...candidate(b, 'claim:' + i), content: 'Monthly original ' + i + 'x'.repeat(1800), event_refs: [{ schema_version: 1, event_id: e.event_id }], analytics_projection: { schema_version: 1, value: { ...candidate(b).analytics_projection.value!, summary: 'Professional ' + i + 'x'.repeat(500), event_refs: [{ schema_version: 1, event_id: e.event_id }] }, reason: null } }));
+    r.candidates = events.map((e, i) => ({ ...candidate(b, 'claim:' + i), content: 'Monthly original ' + i + 'x'.repeat(1800), event_refs: [{ schema_version: 1, ...exactReviewUnit(e) }], analytics_projection: { schema_version: 1, value: { ...candidate(b).analytics_projection.value!, summary: 'Professional ' + i + 'x'.repeat(500), event_refs: [{ schema_version: 1, ...exactReviewUnit(e) }] }, reason: null } }));
     const initial = await s.commitReview(r);
     await s.markExportReady(initial.batch_id, c.data_dir + '/initial.json');
     const analytics = createAnalyticsConsumer(s, c);

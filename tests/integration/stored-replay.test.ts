@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { writeFile,rm } from 'node:fs/promises';
+import { dirname,join } from 'node:path';
+import { createStore } from '../../src/store/index.ts';
+import { parseArgs,executeCommand } from '../../src/cli.ts';
+import { config as cfg,event,collection,range } from '../store/fixtures.ts';
+import type { RuntimeServices } from '../../src/contracts/types.ts';
+test('explicit stored-only exact replay uses metadata before exclusion and never calls an adapter',async t=>{
+ const config=await cfg(),root=dirname(config.wiki_root);t.after(()=>rm(root,{recursive:true,force:true}));config.providers=[{schema_version:1,provider:'synthetic',enabled:true,account_id:'self',roots:[],options:{}}];
+ const seed=await createStore(config);const allowed=event('allowed:synthetic'),protectedEvent=event('protected:synthetic','Synthetic protected body sentinel');
+ await seed.saveCollection({...collection([allowed,protectedEvent]),coverage:[],checkpoints:[]});seed.close();
+ config.review_read_exclusions={schema_version:1,events:[{schema_version:1,event_id:protectedEvent.event_id,reason:'Synthetic body must never be loaded'}]};const store=await createStore(config);t.after(()=>store.close());
+ const originalPrepare=store.db.prepare.bind(store.db);let bodyQueries=0,adapterCalls=0;
+ store.db.prepare=(sql:string)=>{if(/SELECT\s+(?:e\.)?json\s+FROM\s+events|json_extract\([^,]+,\s*['"]\$\.body/i.test(sql)){bodyQueries++;throw new Error('Body SQL must not run in metadata request');}return originalPrepare(sql);};
+ const services={store,adapters:[{provider:'synthetic',async *collect(){adapterCalls++;throw new Error('Adapter trap');},async *replay(){adapterCalls++;throw new Error('Adapter trap');}}]} as unknown as RuntimeServices;
+ const input=join(root,'exact-ids.json'),args=['replay','--source','synthetic','--from',range.from,'--to',range.to,'--stored-only','--events',input,'--replay-key','new-exact-selection'];
+ await writeFile(input,JSON.stringify({schema_version:1,event_ids:[allowed.event_id]}));const receipt:any=await executeCommand(parseArgs(args),config,services,range.to);
+ assert.equal(receipt.selection_basis,'stored_exact');assert.deepEqual(receipt.recapture,[]);assert.equal(adapterCalls,0);assert.equal(bodyQueries,0);assert.deepEqual((await store.getSemanticReplay(receipt.replay_id))!.payload.event_ids,[allowed.event_id]);
+ await writeFile(input,JSON.stringify({schema_version:1,event_ids:[protectedEvent.event_id]}));await assert.rejects(executeCommand(parseArgs([...args.slice(0,-1),'another-exact-key']),config,services,range.to),/excluded/);assert.equal(adapterCalls,0);assert.equal(bodyQueries,0);
+ assert.throws(()=>parseArgs(['replay','--stored-only','--source','synthetic','--from',range.from,'--to',range.to,'--events',input]),/replay-key/);
+});

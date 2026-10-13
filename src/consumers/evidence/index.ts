@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BookkeepingConfig, Consumer, Store } from '../../contracts/types.ts';
 import { canonical, digest } from '../../analytics/serialization.ts';
-import { createSafeWikiWriter, readWikiTarget, syncDirectory, type WriterOptions } from '../../publish/files.ts';
+import { createSafeWikiWriter, readWikiTarget, syncDirectory, hasOperationTime, type WriterOptions } from '../../publish/files.ts';
 
 export const evidencePath = (batchId: string): string => `wiki/personal/_evidence/bookkeeping/batches/${digest(batchId)}.json`;
 export interface EvidenceOptions extends WriterOptions { max_batches?: number }
@@ -45,6 +45,7 @@ export function createEvidenceConsumer(store: Store, config: BookkeepingConfig, 
     finally { await unlink(temporary).catch(() => {}); }
   }
   return { target: 'evidence', async consume() {
+    if (!hasOperationTime(options)) return { schema_version: 1, target: 'evidence', status: 'pending', reason: 'Task deadline reached; mirror work retained' };
     try {
     // Cursor is a disposable optimization, never an acknowledgement. Wrap so
     // conflicted old batches remain retryable without blocking newer batches.
@@ -52,7 +53,10 @@ export function createEvidenceConsumer(store: Store, config: BookkeepingConfig, 
     let batches = await store.listReadyBatches('evidence', limit + 1, cursor);
     if (!batches.length && cursor) { cursor = undefined; batches = await store.listReadyBatches('evidence', limit + 1); }
     const selected = batches.slice(0, limit), failures: string[] = [];
+    const visited: string[] = [];
     for (const batch of selected) {
+      if (!hasOperationTime(options)) break;
+      visited.push(batch.batch_id);
       const path = evidencePath(batch.batch_id), bytes = Buffer.from(canonical(batch) + '\n');
       const operation = `evidence:${batch.batch_id}`;
       try {
@@ -75,7 +79,7 @@ export function createEvidenceConsumer(store: Store, config: BookkeepingConfig, 
           payload: { batch_id: batch.batch_id, path }, reason, migration_key: null, updated_at: (options.now?.() ?? new Date()).toISOString() });
       }
     }
-    await saveCursor(selected.at(-1)?.batch_id ?? null);
+    await saveCursor(visited.at(-1) ?? cursor ?? null);
     // A continuation can have skipped earlier failed batches. Check the head
     // with one row before claiming the entire consumer is caught up.
     const outstanding = batches.length > limit || (await store.listReadyBatches('evidence', 1)).length > 0;

@@ -20,32 +20,45 @@ export function sessionIdentity(
     provider === "codex"
       ? rows.find((r) => r.type === "session_meta")?.payload
       : rows.find((r) => r.sessionId || r.session_id);
-  const id =
+  const id = provider !== "codex" ? (meta?.sessionId ?? meta?.session_id ?? null) :
     meta?.id ??
     meta?.session_id ??
     meta?.sessionId ??
     meta?.thread_id ??
     rows.find((r) => r.sessionId)?.sessionId ??
     null;
-  const source = meta?.thread_source ?? meta?.source;
+  const matching = provider === "codex" ? rows.filter(row => row.type === "session_meta" && String(row.payload?.id ?? row.payload?.session_id ?? row.payload?.sessionId) === String(id)).map(row => row.payload) : rows.filter(row =>
+    id != null && String(row.sessionId ?? row.session_id) === String(id));
+  // Claude identity/scope evidence may appear in any complete session record.
+  // Filenames and partial JSON are never identity evidence.
+  const combined = Object.assign({}, ...matching.filter(Boolean));
+  if (provider !== "codex" && meta) {
+    for (const field of ["isSidechain", "parent_session_id", "automation_id", "is_automation"])
+      if (matching.some(row => row?.[field])) combined[field] = matching.find(row => row?.[field])![field];
+  }
+  const evidence = meta ? combined : undefined;
+  const source = evidence?.thread_source ?? evidence?.source;
   const nested = typeof source === "object" && source !== null ? source : {};
   const sub =
-    meta?.isSidechain === true ||
-    meta?.parent_session_id ||
-    meta?.parent_thread_id ||
-    meta?.creator_agent_id ||
-    meta?.subagent_id ||
+    evidence?.isSidechain === true ||
+    evidence?.parent_session_id ||
+    evidence?.parent_thread_id ||
+    evidence?.creator_agent_id ||
+    evidence?.subagent_id ||
     nested.subagent ||
     nested.sub_agent ||
     nested.parent_thread_id ||
     (typeof source === "string" && ["subagent", "sub_agent"].includes(source));
   const auto =
-    meta?.automation_id ||
-    meta?.scheduled_task_id ||
-    meta?.is_automation === true ||
+    evidence?.automation_id ||
+    evidence?.scheduled_task_id ||
+    evidence?.is_automation === true ||
     nested.automation ||
     (typeof source === "string" &&
       ["automation", "scheduled"].includes(source));
+  const metadata: Record<string, unknown> = {};
+  for (const key of ["id", "session_id", "sessionId", "thread_id", "thread_source", "source", "isSidechain", "parent_session_id", "parent_thread_id", "creator_agent_id", "subagent_id", "automation_id", "scheduled_task_id", "is_automation", "cwd", "runtime_workspace_roots"])
+    if (evidence?.[key] !== undefined) metadata[key] = evidence[key];
   return {
     id: id == null ? null : String(id),
     classification: sub
@@ -55,13 +68,15 @@ export function sessionIdentity(
         : meta
           ? "main"
           : "unknown",
-    cwd: meta?.cwd ?? meta?.runtime_workspace_roots?.[0] ?? null,
-    metadata: meta ?? {},
+    cwd: evidence?.cwd ?? evidence?.runtime_workspace_roots?.[0] ?? null,
+    metadata,
   };
 }
 export interface ParseState {
   lastTime?: unknown;
   cwd?: string;
+  native_update_conflicts?: string[];
+  native_update_conflict_overflow?: boolean;
   codex_turn_origin?: CodexTurnOrigin;
   mirror?: {
     role: string;

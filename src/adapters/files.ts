@@ -11,8 +11,10 @@ import type {
   CoverageGap,
   SourceEvent,
 } from "../contracts/types.ts";
-import { coverage, gap, hash } from "./common.ts";
-import type { ParseState } from "./parsers.ts";
+import { coverage, gap, hash, parseLossless } from "./common.ts";
+import { coalesceNativeUpdates } from "./native-updates.ts";
+import { storageFailureCode } from "../storage-errors.ts";
+import { sessionIdentity, type ParseState, type SessionIdentity } from "./parsers.ts";
 import { buildManifest, consumeManifest, manifestDirectory, type DirectoryManifest, type ManifestBudget } from "./discovery-manifest.ts";
 import {
   openApprovedSource,
@@ -20,11 +22,6 @@ import {
   readTail,
   parseCapturedLines,
 } from "./file-reader.ts";
-function uniqueEvents(events: SourceEvent[]): SourceEvent[] {
-  const byId = new Map<string, SourceEvent>();
-  for (const e of events) if (!byId.has(e.event_id)) byId.set(e.event_id, e);
-  return [...byId.values()];
-}
 const HEAD = 64 * 1024,
   STEP = 1024 * 1024,
   TAIL = 8 * STEP;
@@ -42,7 +39,7 @@ interface Discovery {
   incomplete_directories?: DirectoryCursor[];
 }
 interface FileCursor {
-  identity: string;
+  identity: string | null;
   offset: number;
   history_end: number;
   size: number;
@@ -63,6 +60,10 @@ interface FileCursor {
   pending_line_start?: number;
   parse_state?: ParseState;
   recent_event_ids?: string[];
+  identity_evidence?: SessionIdentity;
+  identity_probe?: { offset: number; pending_base64: string; evidence: SessionIdentity; exhausted?: boolean };
+  last_read_at?: string;
+  unread_bytes?: number;
 }
 export class FileAdapter implements SourceAdapter {
   readonly provider: string;
@@ -80,19 +81,23 @@ export class FileAdapter implements SourceAdapter {
     deadline: number,
     duration: number,
     scope: string,
+    sharedBudget?: ManifestBudget,
   ): Promise<CoverageGap[]> {
     let visited = 0;
     const discoveryGaps: CoverageGap[] = [];
     const options = this.source.options.discovery_manifest_budget as any;
-    const finite = (value: unknown, fallback: number, maximum: number) =>
-      typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(maximum, Math.floor(value)) : fallback;
-    const budget: ManifestBudget = {
-      deadline: Math.min(deadline, Date.now() + Math.min(duration / 4, finite(options?.max_duration_ms, 5000, 30000))),
-      remaining: finite(options?.max_bytes, 4 * STEP, 64 * STEP),
+    const finite = (value: unknown, fallback: number) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
+    const budget: ManifestBudget = sharedBudget ?? {
+      deadline: Math.min(deadline, Date.now() + Math.min(duration / 4, finite(options?.max_duration_ms, 5000))),
+      remaining: finite(options?.max_bytes, 4 * STEP),
     };
     let storage: string;
     try { storage = await manifestDirectory(this.config, this.source, scope); }
-    catch (error: any) { return [gap(`discovery_manifest_unavailable:${error.message}`, this.config.data_dir)]; }
+    catch (error: any) {
+      if (storageFailureCode(error)) throw error;
+      return [gap(`discovery_manifest_unavailable:${error.message}`, this.config.data_dir)];
+    }
     while (d.directories.length && visited < limit && Date.now() < budget.deadline && budget.remaining > 0) {
       const current = d.directories[0];
       let completed = false;
@@ -127,6 +132,7 @@ export class FileAdapter implements SourceAdapter {
         }
         completed = consumed.done;
       } catch (error: any) {
+        if (storageFailureCode(error)) throw error;
         completed = true;
         if (current.manifest) {
           // Missing/corrupt derived metadata is rebuildable. Do not certify the
@@ -152,23 +158,18 @@ export class FileAdapter implements SourceAdapter {
     req: CollectRequest,
     context: AdapterContext,
   ): AsyncIterable<CollectionBatch> {
+    const finite = (value: number, fallback: number) => Number.isSafeInteger(value) && value > 0 ? value : fallback;
     const request = {
       ...req,
       budget: {
-        max_duration_ms: Math.min(
-          req.budget.max_duration_ms,
-          req.lane === "live" ? 90000 : 30000,
-        ),
-        max_bytes: Math.min(
-          req.budget.max_bytes,
-          req.lane === "live" ? 64 * STEP : 32 * STEP,
-        ),
-        max_directory_entries: Math.min(
-          65536,
+        max_duration_ms: finite(req.budget.max_duration_ms, req.lane === "live" ? 90000 : 30000),
+        max_bytes: finite(req.budget.max_bytes, req.lane === "live" ? 64 * STEP : 32 * STEP),
+        max_directory_entries: finite(
           Number(
             this.source.options.max_directory_entries ??
               req.budget.max_directory_entries,
           ),
+          2000,
         ),
       },
     };
@@ -185,8 +186,9 @@ export class FileAdapter implements SourceAdapter {
       c.provider === this.provider &&
       c.cursor.account_id === this.source.account_id &&
       c.cursor.source_scope === scope;
+    const progress = [...context.checkpoints];
     const cp = (locator: string, lane = request.lane) =>
-      context.checkpoints.find(
+      progress.find(
         (c) => matches(c) && c.locator === locator && c.lane === lane,
       );
     const checkpoint = (
@@ -217,17 +219,18 @@ export class FileAdapter implements SourceAdapter {
       conversation: string | null = null,
       status?: any,
     ): CollectionBatch => {
+      const merged = coalesceNativeUpdates(events);
       const batch: CollectionBatch = {
         schema_version: 1,
         batch_id: "",
-        events: uniqueEvents(events),
+        events: merged.events,
         fragments,
         coverage: [
           coverage(
             this.provider,
             this.source.account_id,
             request,
-            gaps,
+            [...gaps, ...merged.gaps],
             conversation,
             status,
           ),
@@ -247,15 +250,16 @@ export class FileAdapter implements SourceAdapter {
     const d: Discovery = dc
       ? structuredClone(dc.cursor as unknown as Discovery)
       : { directories: [], files: [], root_index: 0, cycle: 0 };
-    // Recent Codex day directories are visited before an otherwise persistent traversal.
-    if (!dc && this.provider === "codex")
+    // Refresh recent directories every round without replacing the all-tree cursor.
+    const recent: Discovery = { directories: [], files: [], root_index: 0, cycle: 0 };
+    if (this.provider === "codex")
       for (const root of this.source.roots)
         for (let age = 0; age < 3; age++) {
           const day = new Date(Date.parse(request.cutoff) - age * 86400000)
             .toISOString()
             .slice(0, 10)
             .split("-");
-          d.directories.push({ path: path.join(root, ...day), skip: 0 });
+          recent.directories.push({ path: path.join(root, ...day), skip: 0 });
         }
     if (!dc)
       d.directories.push(
@@ -275,29 +279,50 @@ export class FileAdapter implements SourceAdapter {
         .map((c) => c.locator),
     );
     const known = [...pendingPaths];
-    const knownStart = d.known_skip ?? 0;
-    const knownBatch = known.slice(
-      knownStart,
-      knownStart + request.budget.max_directory_entries,
-    );
-    d.known_skip =
-      knownStart + knownBatch.length >= known.length
-        ? 0
-        : knownStart + knownBatch.length;
+    const priorKnownStart = d.known_skip ?? 0;
+    const knownStart = known.length && Number.isSafeInteger(priorKnownStart) && priorKnownStart >= 0 ? priorKnownStart % known.length : 0;
+    const knownCount = Math.min(known.length, request.budget.max_directory_entries);
+    // Fill the finite known-file allocation across the end of the ring. A saved
+    // cursor is scheduling state, never evidence that the omitted prefix is read.
+    const knownBatch = [
+      ...known.slice(knownStart, knownStart + knownCount),
+      ...known.slice(0, Math.max(0, knownStart + knownCount - known.length)),
+    ];
+    d.known_skip = known.length ? (knownStart + knownCount) % known.length : 0;
+    const deferred = d.files.splice(0, request.budget.max_directory_entries);
     const candidates = [
       ...new Set([
-        ...d.files.splice(0, request.budget.max_directory_entries),
+        ...deferred,
         ...knownBatch,
       ]),
     ];
-    const discoveryGaps = await this.scanDirectories(
+    const recentCandidates: string[] = [];
+    const metadataOptions = this.source.options.discovery_manifest_budget as any;
+    const metadataBudget: ManifestBudget = {
+      deadline: Math.min(deadline, Date.now() + Math.min(request.budget.max_duration_ms / 4, finite(Number(metadataOptions?.max_duration_ms), 5000))),
+      remaining: finite(Number(metadataOptions?.max_bytes), 4 * STEP),
+    };
+    const recentLimit = this.provider === "codex" ? Math.floor(request.budget.max_directory_entries / 4) : 0;
+    const recentMetadata: ManifestBudget = {
+      deadline: Math.min(metadataBudget.deadline, Date.now() + Math.max(0, (metadataBudget.deadline - Date.now()) / 2)),
+      remaining: Math.floor(metadataBudget.remaining / 2),
+    };
+    const recentAllowance = recentMetadata.remaining;
+    const recentGaps = recentLimit ? await this.scanDirectories(recent, recentCandidates, recentLimit, deadline, request.budget.max_duration_ms / 2, scope, recentMetadata) : [];
+    metadataBudget.remaining -= recentAllowance - recentMetadata.remaining;
+    const discoveryGaps = [...recentGaps, ...await this.scanDirectories(
       d,
       candidates,
-      request.budget.max_directory_entries,
+      request.budget.max_directory_entries - recentLimit,
       deadline,
-      request.budget.max_duration_ms,
+      request.budget.max_duration_ms / (recentLimit ? 2 : 1),
       scope,
-    );
+      metadataBudget,
+    )];
+    candidates.push(...recentCandidates);
+    const admitted = new Set(candidates);
+    if (known.some(locator => !admitted.has(locator)))
+      discoveryGaps.push(gap("known_file_rotation_remaining"));
     const fileGaps: CoverageGap[] = [];
     const discoveryComplete =
       d.directories.length === 0 && d.files.length === 0 && !d.incomplete_directories?.length;
@@ -312,6 +337,7 @@ export class FileAdapter implements SourceAdapter {
         const s = await stat(p);
         ranked.push({ p, mtime: s.mtimeMs });
       } catch (error: any) {
+        if (storageFailureCode(error)) throw error;
         yield make(
           [],
           [gap(`source_unavailable:${error.code ?? "error"}`, p)],
@@ -322,42 +348,103 @@ export class FileAdapter implements SourceAdapter {
         );
       }
     }
-    ranked.sort((a, b) => b.mtime - a.mtime || a.p.localeCompare(b.p));
-    let processed = 0;
-    for (const { p } of ranked) {
+    // Deferred/known paths are never re-sorted by mtime. They own the front of
+    // the persisted queue; only newly discovered paths receive recency ranking.
+    const established = new Set([...deferred, ...knownBatch]);
+    const queue = [...ranked.filter(item => established.has(item.p)), ...ranked.filter(item => !established.has(item.p)).sort((a, b) => b.mtime - a.mtime || a.p.localeCompare(b.p))];
+    const deferredAfter: string[] = [];
+    const discoveryCheckpoint = () => checkpoint("@discovery", "0", {
+      ...structuredClone(d), files: [...new Set([...d.files, ...queue.map(item => item.p), ...deferredAfter])],
+    });
+    while (queue.length) {
       if (Date.now() >= deadline || bytes >= request.budget.max_bytes) {
-        d.files.push(...ranked.slice(processed).map((x) => x.p));
+        d.files.push(...queue.map((x) => x.p));
         break;
       }
-      processed++;
+      const { p } = queue.shift()!;
       let handle;
       try {
         handle = await openApprovedSource(p, this.source.roots);
         const s = await handle.stat();
         const eof = s.size;
+        const visitLimit = cp(p) ? 4 * STEP : Number.POSITIVE_INFINITY;
+        let visitBytes = 0;
+        let lastReadAt = (cp(p)?.cursor.last_read_at as string | undefined);
         const read = async (start: number, n: number): Promise<Buffer> => {
           const length = Math.min(
-            n,
+            n, STEP, Math.max(0, visitLimit - visitBytes),
             Math.max(0, request.budget.max_bytes - bytes),
           );
           const b = Buffer.alloc(length);
           const r = await handle!.read(b, 0, length, start);
           bytes += r.bytesRead;
+          visitBytes += r.bytesRead;
+          if (r.bytesRead > 0) lastReadAt = new Date().toISOString();
           return b.subarray(0, r.bytesRead);
         };
         if (request.budget.max_bytes - bytes < Math.min(eof, HEAD)) {
-          d.files.push(p);
+          deferredAfter.push(p);
           continue;
         }
         const head = await read(0, Math.min(eof, HEAD));
-        const { identity, header_hash: headerHash } = parseHeader(
+        let { identity, header_hash: headerHash } = parseHeader(
           this.provider,
           head,
         );
+        const prior = cp(p)?.cursor as unknown as FileCursor | undefined;
+        const emptyHash = hash(Buffer.alloc(0));
+        const compatibleHeader = prior && (prior.header_hash === headerHash || prior.header_hash === emptyHash);
+        if (compatibleHeader && prior.identity_evidence) identity = prior.identity_evidence;
+        const needsScope = Array.isArray(this.source.options.allowed_project_roots) && this.source.options.allowed_project_roots.length > 0;
+        const unresolvedIdentity = () => !identity.id || (needsScope && !identity.cwd && identity.classification !== "automation" && identity.classification !== "subagent");
+        const identityFragments: CollectionBatch["fragments"] = [];
+        if (unresolvedIdentity()) {
+          const probe = compatibleHeader && prior.identity_probe ? structuredClone(prior.identity_probe) :
+            { offset: 0, pending_base64: "", evidence: identity, exhausted: false };
+          let pending = Buffer.from(probe.pending_base64, "base64");
+          const probeLimit = Math.min(eof, probe.offset + Math.max(0, 4 * STEP - visitBytes));
+          while (!probe.exhausted && probe.offset < probeLimit && Date.now() < deadline && bytes < request.budget.max_bytes && unresolvedIdentity()) {
+            const start = probe.offset;
+            const piece = await read(start, Math.min(STEP, probeLimit - start));
+            if (!piece.length) break;
+            probe.offset += piece.length;
+            identityFragments.push({ schema_version: 1, fragment_id: hash(`${this.provider}:${this.source.account_id}:${p}:identity:${start}:${hash(piece)}`), locator: p, bytes_base64: piece.toString("base64"), sha256: hash(piece) });
+            pending = Buffer.concat([pending, piece]);
+            let newline: number;
+            while ((newline = pending.indexOf(10)) >= 0) {
+              if (newline > 64 * STEP) { probe.exhausted = true; pending = Buffer.alloc(0); break; }
+              const line = pending.subarray(0, newline);
+              pending = pending.subarray(newline + 1);
+              try {
+                const row = parseLossless(line.toString("utf8"));
+                const previous = this.provider === "codex" ? { type: "session_meta", payload: probe.evidence.metadata } : probe.evidence.metadata;
+                identity = sessionIdentity(this.provider, [...(probe.evidence.id ? [previous] : []), row]);
+                probe.evidence = identity;
+              } catch { /* Source records are data; malformed rows supply no identity. */ }
+            }
+            if (pending.length > 64 * STEP) { pending = Buffer.alloc(0); probe.exhausted = true; }
+          }
+          probe.pending_base64 = pending.toString("base64");
+          // Probe bytes are retained, but never counted as parsed source progress.
+          // Resume the untouched body range after identity/scope becomes provable.
+          if (unresolvedIdentity()) {
+            const pendingGap = gap(!identity.id ? "session_identity_unknown" : "session_cwd_unknown", p);
+            const probeGap = gap(probe.exhausted ? "identity_record_requires_import" : "identity_probe_pending", p);
+            fileGaps.push(pendingGap, probeGap);
+            deferredAfter.push(p);
+            yield make([], [pendingGap, probeGap], [checkpoint(p, cp(p)?.generation ?? "0", {
+              ...(prior ?? {}), identity: identity.id, offset: prior?.offset ?? 0, history_end: prior?.history_end ?? eof,
+              size: eof, header_hash: headerHash, anchor: prior?.anchor ?? null, inode: `${s.dev}:${s.ino}`, excluded: false,
+              identity_probe: probe, identity_evidence: identity,
+              ...(lastReadAt ? { last_read_at: lastReadAt } : {}), unread_bytes: Math.max(0, eof - (prior?.offset ?? 0)),
+            }), discoveryCheckpoint()], identityFragments, identity.id, "partial");
+            continue;
+          }
+        }
         const inode = `${s.dev}:${s.ino}`;
         const existing =
           cp(p) ??
-          context.checkpoints.find(
+          progress.find(
             (c) =>
               matches(c) &&
               c.lane === request.lane &&
@@ -366,7 +453,7 @@ export class FileAdapter implements SourceAdapter {
           );
         const live =
           cp(p, "live") ??
-          context.checkpoints.find(
+          progress.find(
             (c) =>
               matches(c) &&
               c.lane === "live" &&
@@ -374,18 +461,20 @@ export class FileAdapter implements SourceAdapter {
               identity.id !== null,
           );
         let old = existing?.cursor as unknown as FileCursor | undefined;
+        if (request.lane === "live" && old?.identity_probe && old.offset === 0) old = undefined;
         // Normal checkpoints supplied as witnesses never enter discovery or read
         // progress. Only scoped checkpoints may supply offsets, history boundaries,
         // pending lines, parse state or already-seen event IDs.
         const progressBase = old ?? (live?.cursor as unknown as FileCursor | undefined);
-        const witness = !progressBase ? context.generation_checkpoints
+        const probeOnly = progressBase?.identity_probe && progressBase.offset === 0;
+        const witness = (!progressBase || probeOnly) ? context.generation_checkpoints
           ?.filter(c => matches(c) && c.locator !== "@discovery" &&
             (c.locator === p || (identity.id !== null && c.cursor.identity === identity.id)))
           .sort((a, b) => Number(b.locator === p) - Number(a.locator === p) ||
             b.updated_at.localeCompare(a.updated_at) ||
             Number(b.lane === "live") - Number(a.lane === "live"))[0] : undefined;
-        const base = progressBase ?? (witness?.cursor as unknown as FileCursor | undefined);
-        let generation = existing?.generation ?? live?.generation ?? witness?.generation ?? "0";
+        const base = probeOnly && witness ? witness.cursor as unknown as FileCursor : progressBase ?? (witness?.cursor as unknown as FileCursor | undefined);
+        let generation = probeOnly && witness ? witness.generation : existing?.generation ?? live?.generation ?? witness?.generation ?? "0";
         let anchorUncertainty = base?.anchor_uncertainty;
         let rewritten = false;
         let verifiedAnchor: string | null = null;
@@ -398,11 +487,15 @@ export class FileAdapter implements SourceAdapter {
           // scope. Leave this source for a later valid witness rather than reset.
           const uncertain = gap("generation_witness_metadata_invalid", p);
           fileGaps.push(uncertain);
-          d.files.push(p);
+          deferredAfter.push(p);
           yield make([], [uncertain], [], [], identity.id, "partial");
           continue;
         }
-        if (base && (eof < base.offset || base.header_hash !== headerHash)) {
+        if (base && base.header_hash === emptyHash && base.header_hash !== headerHash) {
+          gaps.push(gap("legacy_header_unproven", p));
+          anchorUncertainty ??= { from: 0, to: head.length, generation, reason: "legacy_header_unproven" };
+        }
+        if (base && (eof < base.offset || (base.header_hash !== headerHash && base.header_hash !== emptyHash))) {
           rewritten = true;
           generation = hash(
             `${generation}:${headerHash}:${eof}:${inode}`,
@@ -464,6 +557,7 @@ export class FileAdapter implements SourceAdapter {
                 anchor: "",
                 inode,
                 excluded: true,
+                ...(lastReadAt ? { last_read_at: lastReadAt } : {}), unread_bytes: 0,
               }),
             ],
             [],
@@ -493,7 +587,7 @@ export class FileAdapter implements SourceAdapter {
         if (request.lane === "live" && historyEnd > 0) {
           const historical =
             cp(p, "history") ??
-            context.checkpoints.find(
+            progress.find(
               (c) =>
                 matches(c) &&
                 c.lane === "history" &&
@@ -513,7 +607,7 @@ export class FileAdapter implements SourceAdapter {
             start,
             end,
             deadline,
-            () => request.budget.max_bytes - bytes,
+            () => Math.min(request.budget.max_bytes - bytes, visitLimit - visitBytes),
             read,
           );
           readStart = tail.start;
@@ -523,7 +617,17 @@ export class FileAdapter implements SourceAdapter {
           // boundary where no partial-line adjustment will run below.
           historyEnd = Math.max(historyEnd, readStart);
           if (tail.exhausted) gaps.push(gap("tail_budget_exhausted", p));
-        } else buffer = await read(start, Math.min(STEP, end - start));
+        } else {
+          const pieces: Buffer[] = [];
+          let at = start;
+          while (at < end && visitBytes < 4 * STEP && Date.now() < deadline && bytes < request.budget.max_bytes) {
+            const piece = await read(at, Math.min(STEP, end - at, 4 * STEP - visitBytes));
+            if (!piece.length) break;
+            pieces.push(piece);
+            at += piece.length;
+          }
+          buffer = Buffer.concat(pieces);
+        }
         // Persist the complete unparsed suffix in the atomic checkpoint. The next range
         // starts after those captured bytes and reconstructs the line before parsing.
         let pending = old?.pending_line_base64
@@ -630,13 +734,16 @@ export class FileAdapter implements SourceAdapter {
           bytes_base64: buffer.toString("base64"),
           sha256: hash(buffer),
         };
+        // Progress gaps can close in a later quantum during this same call.
+        // Keep substantive parse/time/identity gaps from earlier saved batches.
+        for (let index = fileGaps.length - 1; index >= 0; index--)
+          if (fileGaps[index].locator === p && (
+            ["append_remaining", "history_remaining", "incomplete_line_pending", "checkpoint_anchor_unknown", "discovery_remaining", "tail_budget_exhausted"].includes(fileGaps[index].reason) ||
+            fileGaps[index].reason.startsWith("unread_history_prefix:"))) fileGaps.splice(index, 1);
         fileGaps.push(...gaps);
-        yield make(
-          events,
-          gaps,
-          [
-            checkpoint(p, generation, {
+        const saved = checkpoint(p, generation, {
               identity: identity.id,
+              identity_evidence: identity,
               offset,
               history_end: historyEnd,
               size: eof,
@@ -650,9 +757,21 @@ export class FileAdapter implements SourceAdapter {
               pending_line_start: parsedOffset,
               parse_state: state,
               recent_event_ids: [...knownEvents].slice(-10000),
-            }),
+              ...(lastReadAt ? { last_read_at: lastReadAt } : {}),
+              unread_bytes: Math.max(0, end - offset) + suffix.length + (request.lane === "live" ? Math.max(0, historyEnd - Number(cp(p, "history")?.generation === generation ? cp(p, "history")?.cursor.offset ?? 0 : 0)) : 0),
+            });
+        const savedIndex = progress.findIndex(item => item.checkpoint_id === saved.checkpoint_id);
+        if (savedIndex >= 0) progress[savedIndex] = saved;
+        else progress.push(saved);
+        if (offset > start && offset < end) queue.push({ p, mtime: 0 });
+        yield make(
+          events,
+          gaps,
+          [
+            saved,
+            discoveryCheckpoint(),
           ],
-          buffer.length ? [fragment, ...rowFragments] : rowFragments,
+          [...identityFragments, ...(buffer.length ? [fragment, ...rowFragments] : rowFragments)],
           identity.id,
         );
       } catch (error: any) {
@@ -668,6 +787,8 @@ export class FileAdapter implements SourceAdapter {
         await handle?.close();
       }
     }
+    d.files.push(...deferredAfter);
+    d.files = [...new Set(d.files)];
     if (!d.directories.length && !d.files.length) {
       d.cycle++;
       d.directories = this.source.roots.map((p) => ({ path: p, skip: 0 }));
@@ -700,9 +821,8 @@ export class FileAdapter implements SourceAdapter {
       ? options.allowed_project_roots.map(String)
       : [];
     return (
-      roots.length > 0 &&
-      (!cwd ||
-        !roots.some((root) => cwd === root || cwd.startsWith(root + path.sep)))
+      roots.length > 0 && cwd !== null &&
+        !roots.some((root) => cwd === root || cwd.startsWith(root + path.sep))
     );
   }
   replay(range: any, context: AdapterContext) {

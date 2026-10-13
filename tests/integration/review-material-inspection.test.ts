@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { inspectReviewMaterial, readReviewMaterial, MAX_MATERIAL_INPUT_BYTES } from '../../src/review-material-inspection.ts';
+import { inspectReviewMaterial, readReviewMaterial, MAX_MATERIAL_INPUT_BYTES, inspectReviewMaterialV2 } from '../../src/review-material-inspection.ts';
 import { bundle, event, value } from '../store/fixtures.ts';
 
 const tool = fileURLToPath(new URL('../../tools/inspect-review-material.ts', import.meta.url));
@@ -59,11 +59,14 @@ test('actual inspection tool prints complete saved material without changing inp
   const bytes = JSON.stringify(saved); await writeFile(path, bytes);
   const result = spawnSync(process.execPath, [tool, '--input', path, '--section', 'events', '--offset', '0', '--limit', '1'], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 });
   assert.equal(result.status, 0, result.stderr); const json = JSON.parse(result.stdout);
-  assert.equal(json.items[0].body, saved.chunks[0].events[0].body); assert.equal(json.page.next_offset, 1);
+  assert.equal(json.schema_version,2); assert.ok(Buffer.byteLength(result.stdout)<=16384);
+  let cursor=json.next_cursor, reconstructed=json.fragments[0].json_fragment;
+  while(cursor&&cursor.item_index===0){const next=inspectReviewMaterialV2(saved,'events',cursor);reconstructed+=next.fragments[0].json_fragment;cursor=next.next_cursor;}
+  assert.equal(JSON.parse(reconstructed).body,saved.chunks[0].events[0].body);
   assert.equal(await readFile(path, 'utf8'), bytes); assert.equal(json.inspection_only, true);
   const loaded = await readReviewMaterial(path); assert.deepEqual(loaded, saved);
   const context = spawnSync(process.execPath, [tool, '--input', path, '--offset', '1', '--limit', '1'], { encoding: 'utf8' });
-  assert.equal(context.status, 0, context.stderr); assert.equal(JSON.parse(context.stdout).items[0].body, saved.chunks[0].context_events[0].body);
+  assert.equal(context.status, 0, context.stderr); assert.equal(JSON.parse(JSON.parse(context.stdout).fragments[0].json_fragment).body,saved.chunks[0].context_events[0].body);
   assert.equal(await readFile(path, 'utf8'), bytes);
 });
 

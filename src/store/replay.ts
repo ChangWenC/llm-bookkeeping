@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { SemanticReplayRequest, SemanticReplayScope, SourceEvent, WorkItem, TimeRange } from '../contracts/types.ts';
 import { canonical, digest } from '../analytics/serialization.ts';
 import { scopeSql, senderSql } from './wechat-scope.ts';
+import { readAllowedSql } from './read-exclusions.ts';
 import { normalized, rangeCheck, utc, version } from './domain.ts';
 
 /** One explicit review job freezes source identities, never copies raw bodies. */
@@ -32,7 +33,7 @@ export class SemanticReplayRepository {
         }
         const selection = selected === undefined ? '' : ' AND id IN (SELECT value FROM json_each(?))';
         const selectionArgs: any[] = selected === undefined ? [] : [canonical(selected)];
-        const eligible = `json_extract(json,'$.source.provider')=? AND time>=? AND time<? AND classification IN ('main','unknown') AND COALESCE(json_extract(json,'$.context.context_only'),0)!=1 AND ${scopeSql()}${selection}`;
+        const eligible = `${readAllowedSql()} AND json_extract(json,'$.source.provider')=? AND time>=? AND time<? AND classification IN ('main','unknown') AND COALESCE(json_extract(json,'$.context.context_only'),0)!=1 AND ${scopeSql()}${selection}`;
         if (selected !== undefined) {
             const count = (this.db.prepare(`SELECT COUNT(*) AS n FROM events WHERE ${eligible}`).get(request.source, range.from, range.to, ...selectionArgs) as any).n;
             if (count !== selected.length) throw new Error('Replay selected event missing, excluded or outside source/range scope');
@@ -48,10 +49,10 @@ export class SemanticReplayRepository {
         this.db.prepare('UPDATE work SET json=? WHERE id=?').run(canonical(item), id);
         return item;
     }
-    events(id: string, limit: number): SourceEvent[] {
+    events(id: string, limit: number, excluded:string[]=[]): SourceEvent[] {
         if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid semantic replay event limit');
-        return this.db.prepare(`SELECT e.json FROM semantic_replay_events p JOIN events e ON e.id=p.event_id WHERE p.work_id=? AND e.classification='main' AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane='history') AND ${scopeSql('e')} AND ${senderSql('e')} ORDER BY e.time,e.ordering,e.id LIMIT ?`)
-            .all(id, 'replay:' + id, limit).map((row: any) => JSON.parse(row.json));
+        return this.db.prepare(`SELECT e.json FROM semantic_replay_events p JOIN events e ON e.id=p.event_id WHERE ${readAllowedSql('e')} AND p.work_id=? AND e.classification='main' AND COALESCE(json_extract(e.json,'$.context.incomplete_turn'),0)!=1 AND (json_extract(e.json,'$.role')='user' OR COALESCE(json_extract(e.json,'$.context.turn_complete'),1)!=0) AND NOT EXISTS(SELECT 1 FROM reviewed_sources r WHERE r.source_id=e.id AND r.kind=? AND r.lane='history') AND ${scopeSql('e')} AND ${senderSql('e')} AND e.id NOT IN (SELECT value FROM json_each(?)) ORDER BY e.time,e.ordering,e.id LIMIT ?`)
+            .all(id, 'replay:' + id, canonical(excluded),limit).map((row: any) => JSON.parse(row.json));
     }
     contains(id: string, eventId: string): boolean {
         return Boolean(this.db.prepare('SELECT 1 FROM semantic_replay_events WHERE work_id=? AND event_id=?').get(id, eventId));

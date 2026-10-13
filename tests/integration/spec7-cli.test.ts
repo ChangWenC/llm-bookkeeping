@@ -41,7 +41,7 @@ async function fixture(t: test.TestContext) {
     candidate.analytics_projection.value!.summary = '合成职业解析器验证。';
     candidate.analytics_projection.value!.attribution = { responsibility: 'verification', actor: 'Roy', capability_ids: ['capability:design', 'capability:verify'], goal_target_version: 'goal-v1' };
     if (replace) { candidate.disposition = 'replace'; candidate.target_refs = [{ schema_version: 1, ...replace }]; }
-    if (verification) candidate.analytics_projection.value!.verification = { schema_version: 1, name: 'parser_pass', value: 'yes', subject: 'Roy', verified_at: source.utc_time.value!, event_refs: [{ schema_version: 1, event_id: source.event_id }], basis: 'user_explicit_verification' };
+    if (verification) candidate.analytics_projection.value!.verification = { schema_version: 1, name: 'parser_pass', value: 'yes', subject: 'Roy', verified_at: source.utc_time.value!, event_refs: candidate.event_refs, basis: 'user_explicit_verification' };
     await input('publish', semantic); await cli(['consume', '--target', 'analytics']);
     return repository.facts().find(fact => fact.projection.event_refs.some(item => item.event_id === source.event_id))!;
   };

@@ -16,7 +16,7 @@ test('actual monthly CLI accumulates explicit original daily material across zer
   const store = await createStore(c);
   const cli = async (args: string[]) => {
     let out = '', err = '';
-    const code = await runCli([...args, '--config', configPath], { stdout: value => { out += value; }, stderr: value => { err += value; } });
+    const code = await runCli([...args, '--config', configPath], { stdout: value => { out += value; }, stderr: value => { err += value; }, now: () => '2026-10-05T00:00:00Z' });
     assert.equal(code, 0, err); return JSON.parse(out);
   };
   try {
@@ -59,7 +59,7 @@ test('actual CLI archive originals resume bounded material, reject excerpt ackno
   const store = await createStore(c);
   const cli = async (args: string[], expected = 0) => {
     let out = '', err = '';
-    const code = await runCli([...args, '--config', configPath], { stdout: value => { out += value; }, stderr: value => { err += value; } });
+    const code = await runCli([...args, '--config', configPath], { stdout: value => { out += value; }, stderr: value => { err += value; }, now: () => '2026-10-05T00:00:00Z' });
     assert.equal(code, expected, err); return code === 0 ? JSON.parse(out) : err;
   };
   const original = '# 完整合成旧日记\n\n' + 'x'.repeat(7000) + '\n原文尾部不可丢失。\n';

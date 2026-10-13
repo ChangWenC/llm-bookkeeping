@@ -13,7 +13,8 @@ import { createSafeWikiWriter, readWikiTarget, syncDirectory, type WriterOptions
 export const analyticsRepository = (store: Store): AnalyticsPort => getAnalyticsPort(store);
 export interface AnalyticsOptions {
     now?: () => Date;
-    writer?: WriterOptions;
+    remaining_ms?: () => number;
+    writer?: WriterOptions & { remaining_ms?: () => number };
     fault?: (stage: 'after_output' | 'before_ack', batchId: string) => void | Promise<void>;
 }
 export interface AnalyticsConsumer extends Consumer {
@@ -111,9 +112,13 @@ function region(output: AnalyticsOutput): string {
 }
 export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig, options: AnalyticsOptions = {}): AnalyticsConsumer {
     const repository = analyticsRepository(store);
-    const writer = createSafeWikiWriter(store, config, options.writer);
+    const writerOptions: WriterOptions & { remaining_ms?: () => number } = { ...options.writer, now: options.now ?? options.writer?.now, remaining_ms: options.remaining_ms ?? options.writer?.remaining_ms };
+    const writer = createSafeWikiWriter(store, config, writerOptions);
     const now = () => (options.now?.() ?? new Date()).toISOString();
+    const hasTime=()=> (options.remaining_ms?.() ?? options.writer?.remaining_ms?.() ?? Infinity)>0;
+    const deadlineReason='Task deadline exhausted; Analytics continuation remains pending';
     const publishCockpit = async (output: AnalyticsOutput): Promise<ConsumerOutcome> => {
+        if(!hasTime()) return {schema_version:1,target:'analytics',status:'pending',reason:deadlineReason};
         const pendingIntent = repository.pendingCockpit();
         if (pendingIntent) {
             const intent = await store.getFileIntent(pendingIntent.operation_id);
@@ -129,6 +134,7 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
         const day = now().slice(0, 10);
         const current = target.bytes?.toString('utf8') ?? `---\ntitle: 职业学习分析\nnamespace: personal\ntype: personal-synthesis\nsummary: 职业学习证据与周验证动作\nsources: []\ntags: [self-analytics]\nstatus: stable\nprivacy: private\naliases: []\ncreated: ${day}\nupdated: ${day}\n---\n\n# 职业学习分析\n`;
         const desiredRegion = region(output);
+        if(!hasTime()) return {schema_version:1,target:'analytics',status:'pending',reason:deadlineReason};
         if (output.observations.some(o => o.summary.includes(START) || o.summary.includes(END)) || output.snapshots.some(snapshot => canonical(snapshot).includes(START) || canonical(snapshot).includes(END)))
             throw new Error('Managed-region delimiters cannot be semantic content');
         const start = current.indexOf(START);
@@ -156,10 +162,12 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
     return {
         target: 'analytics',
         async consume(): Promise<ConsumerOutcome> {
+            if(!hasTime()) return {schema_version:1,target:'analytics',status:'pending',reason:deadlineReason};
             const batches = await store.listReadyBatches('analytics');
             let pending: string | null = null;
             const reports = new Set<string>();
             for (const batch of batches) {
+                if(!hasTime()) {pending=deadlineReason;break;}
                 try {
                     const oldSnapshot = batch.analysis ? repository.rawSnapshot(batch.analysis.snapshot.week_end) : null;
                     const output = repository.ingest(batch, config, now());
@@ -167,6 +175,7 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                         reports.add('Weekly analysis changed; exact proposed confirmations remain user decisions');
                     if (output.exclusions.some(item => item.reason !== 'Outside professional whitelist'))
                         reports.add('Some professional evidence is excluded or pending; coverage cannot be treated as quiet');
+                    if(!hasTime()) {pending=deadlineReason;break;}
                     await immutableOutput(join(config.data_dir, 'analytics', 'batches', digest(batch.batch_id) + '.json'), Buffer.from(canonical(output) + '\n'));
                     await options.fault?.('after_output', batch.batch_id);
                     for (const week of batch.analysis ? [] : batch.affected_weeks)
@@ -185,6 +194,7 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                                 await store.completeWork(id);
                         }
                     await options.fault?.('before_ack', batch.batch_id);
+                    if(!hasTime()) {pending=deadlineReason;break;}
                     await store.acknowledgeConsumer({ schema_version: 1, consumer: 'analytics', batch_id: batch.batch_id, acknowledged_at: now() });
                     const queue = (await store.listWork('consumer')).find(item => item.work_id === 'consumer:analytics:' + batch.batch_id);
                     if (queue)
@@ -195,7 +205,7 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                 }
             }
             // Expiration changes the current display even when no new fact batch arrives.
-            if (!batches.length && repository.cockpitRegion() !== null) {
+            if (hasTime() && !batches.length && repository.cockpitRegion() !== null) {
                 try {
                     const cockpit = await publishCockpit(repository.currentOutput('clock-refresh', config, now()));
                     if (cockpit.status !== 'complete')
@@ -206,7 +216,7 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
                 }
             }
             const display = await store.listWork('analytics_display', 'pending');
-            if (display.length) {
+            if (hasTime() && display.length) {
                 try {
                     const cockpit = await publishCockpit(repository.currentOutput('display', config, now()));
                     if (cockpit.status === 'complete')
@@ -223,8 +233,14 @@ export function createAnalyticsConsumer(store: Store, config: BookkeepingConfig,
         },
         async review(value: unknown): Promise<ReviewReceipt[]> {
             const input: AnalyticsReviewInput = validateAnalyticsInput(value);
+            if(!hasTime()) {
+                if(input.kind==='review') return input.events.map(event=>({schema_version:1,review_id:event.review_id,target_ref:event.target_ref,status:'pending',reason:deadlineReason}));
+                const target_ref=input.kind==='capability_candidate'?input.definition.definition_ref:input.contract.contract_ref;
+                return [{schema_version:1,review_id:'pending:'+target_ref.logical_id+':'+target_ref.revision,target_ref,status:'pending',reason:deadlineReason}];
+            }
             const receipts = repository.applyReview(input, config, false, now());
             const output = repository.currentOutput('review:' + digest(canonical(input)), config, now());
+            if(!hasTime()) {await queueCockpit(output,deadlineReason);return receipts;}
             await immutableOutput(join(config.data_dir, 'analytics', 'reviews', digest(canonical(input)) + '.json'), Buffer.from(canonical({ schema_version: 1, input, receipts: receipts.map(receipt => ({ ...receipt, status: receipt.status === 'already_applied' ? 'applied' : receipt.status })) }) + '\n'));
             const cockpit = await publishCockpit(output);
             if (cockpit.status !== 'complete')

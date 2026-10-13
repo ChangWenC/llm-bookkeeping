@@ -12,7 +12,7 @@ test('CLI typed weekly/monthly/pages publish and all consumers share actual SQLi
   const c = await config(), root = dirname(c.wiki_root), configPath = join(root, 'config.json');
   c.project_whitelist = ['a'];
   c.journal_timezone_timeline = [{ schema_version: 1, effective_from: '1970-01-01T00:00:00Z', timezone: 'Europe/Amsterdam', basis: 'synthetic test' }];
-  c.index_commands = { schema_version: 1, lint: { schema_version: 1, executable: process.execPath, args: ['-e', 'process.exit(0)'] }, build_index: { schema_version: 1, executable: process.execPath, args: ['-e', 'process.exit(0)'] }, qmd: { schema_version: 1, executable: process.execPath, args: ['-e', 'process.exit(0)'] } };
+  c.index_commands = { schema_version: 1, lint: { schema_version: 1, executable: process.execPath, args: ['-e', 'console.log(JSON.stringify({report_contract_version:1,capabilities:["daily-journal-archive-target-v2"],generated_at:"2026-10-13T10:00:00Z",counts:{pages:1,errors:0,warnings:0,suggestions:0},errors:[],warnings:[],suggestions:[],disabled_checks:[],tag_source_report:{},synthesis_candidates:[]}))'] }, build_index: { schema_version: 1, executable: process.execPath, args: ['-e', 'process.exit(0)'] }, qmd: { schema_version: 1, executable: process.execPath, args: ['-e', 'process.exit(0)'] } };
   await writeFile(configPath, JSON.stringify(c));
   const cockpit = join(c.wiki_root, 'wiki/personal/synthesis/综合_self_analytics_current.md');
   await mkdir(dirname(cockpit), { recursive: true }); await writeFile(cockpit, '人工职业目标保留。\n');

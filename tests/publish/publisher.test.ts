@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createPublisher, createSafeWikiWriter, acquireWikiLock, withWikiLock, digestBytes, wikiLockLocation } from '../../src/publish/index.ts';
-import type { Store, FileIntent, WorkItem, JournalPatch, OutboxEntry, ReviewCommit, FileStatus, BookkeepingConfig } from '../../src/contracts/types.ts';
+import type { Store, FileIntent, WorkItem, JournalPatch, OutboxEntry, ReviewCommit, FileStatus, BookkeepingConfig, JournalConfirmationRequest } from '../../src/contracts/types.ts';
 import { config as baseConfig, zeroReview } from '../../test/fixtures/basic.ts';
 
 const fixedNow = () => new Date('2026-09-30T12:00:00Z');
@@ -28,12 +28,28 @@ class FakeStore {
   async markPatchStatus(id: string, status: FileStatus) { this.statuses.set(id, status); }
   async enqueueWork(work: WorkItem) { if (!this.work.has(work.work_id)) this.work.set(work.work_id, structuredClone(work)); }
   async listWork(kind?: string, state?: WorkItem['state']) { return [...this.work.values()].filter(item => (!kind || item.kind === kind) && (!state || item.state === state)); }
-  async completeWork(id: string) { this.work.get(id)!.state = 'complete'; }
+  async completeWork(id: string) { const work = this.work.get(id); if (work) work.state = 'complete'; }
   async listOutbox(status?: OutboxEntry['status']) { return [...this.outbox.values()].filter(entry => !status || entry.status === status); }
+  cursors = new Map<string, string | null>();
+  async getPublicationOutbox(id: string) { return this.outbox.get(id) ?? null; }
+  async listPublicationOutbox(request: { status: OutboxEntry['status']; limit: number; after?: string }) {
+    const all = (await this.listOutbox(request.status)).sort((a,b) => a.batch_id.localeCompare(b.batch_id)).filter(item => !request.after || item.batch_id > request.after);
+    const items = all.slice(0, request.limit);
+    return { schema_version: 1, items, next_cursor: all.length > request.limit ? items.at(-1)!.batch_id : null };
+  }
+  async listPublicationFileIntents(request: { states: FileIntent['state'][]; limit: number; after?: string }) {
+    const all = (await this.listFileIntents(request.states)).sort((a,b) => a.operation_id.localeCompare(b.operation_id)).filter(item => !request.after || item.operation_id > request.after);
+    const items = all.slice(0, request.limit);
+    return { schema_version: 1, items, next_cursor: all.length > request.limit ? items.at(-1)!.operation_id : null };
+  }
+  async getPublicationRecoveryCursor(kind: string) { return this.cursors.get(kind) ?? null; }
+  async setPublicationRecoveryCursor(kind: string, cursor: string | null) { this.cursors.set(kind, cursor); }
   async markExportReady(id: string, export_path: string) { Object.assign(this.outbox.get(id)!, { status: 'ready', export_path }); }
   async listReadyBatches(consumer: string) { return [...this.outbox.values()].filter(entry => entry.status === 'ready' && !this.acks.has(`${consumer}:${entry.batch_id}`)).map(entry => entry.artifact); }
   async acknowledgeConsumer(ack: { consumer: string; batch_id: string }) { this.acks.add(`${ack.consumer}:${ack.batch_id}`); }
   async readEffectiveFacts() { return []; }
+  async ensureJournalConfirmation(request: JournalConfirmationRequest) { return { schema_version: 1, status: request.requires_confirmation ? 'awaiting_user_confirmation' : 'not_required', proposal_id: null, work_ids: [], reason: null }; }
+  async validateJournalConfirmation() { return { schema_version: 1, status: 'not_required', proposal_id: null, work_ids: [], reason: null }; }
   async commitReview(): Promise<ReviewCommit> { const reused = this.accepts++ > 0; return { schema_version: 1, result_id: 'result:zero', batch_id: 'batch:zero', reused, facts: [], patches: [...this.patches.values()] }; }
   artifact(id = 'batch:zero') { this.outbox.set(id, { schema_version: 1, batch_id: id, status: 'pending', export_path: null,
     artifact: { schema_version: 1, batch_id: id, created_at: fixedNow().toISOString(), facts: [], coverage: [], affected_dates: ['2026-09-30'], affected_weeks: ['2026-10-04'] } }); }
@@ -168,11 +184,14 @@ test('archived and window-excluded missing pages queue supplements while retaine
   const old = { ...patch('op:old', 'wiki/personal/journals/日记_2026_07_31.md', ''), date: '2026-07-31', baseline_digest: 'absent' };
   const retained = { ...patch('op:retained', 'wiki/personal/journals/日记_2026_09_16.md', ''), date: '2026-09-16' };
   await seed(f.wiki, retained.path, '---\nintentional-journal: true\n---\nhuman body\n');
+  retained.baseline_digest = digestBytes(await readFile(join(f.wiki, retained.path)));
   const archivePath = 'wiki/personal/_evidence/daily_journals/daily_2026.jsonl';
   await seed(f.wiki, archivePath, JSON.stringify({ schema_version: 'daily-journal-jsonl-v1', date: '2026-09-15', retention: 'archived' }) + '\n' + JSON.stringify({date: '2026-09-16', retention: 'archived'}) + '\n');
   const original = await readFile(join(f.wiki, archivePath)); const store = new FakeStore([archived, old, retained]);
   const result = await createPublisher(store.port(), f.config, { now: fixedNow }).applyPatches([archived, old, retained]);
-  assert.deepEqual(result.map(file => file.status), ['noop', 'noop', 'applied']);
+  assert.deepEqual(result.map(file => file.status), ['pending', 'pending', 'applied']);
+  assert.deepEqual(result[0].queued_work_ids, ['journal_supplement:op:archived']);
+  assert.deepEqual(result[1].queued_work_ids, ['journal_supplement:op:old']);
   assert.equal((await store.listWork('journal_supplement')).length, 2);
   for (const p of [archived, old]) await assert.rejects(readFile(join(f.wiki, p.path)), { code: 'ENOENT' });
   assert.deepEqual(await readFile(join(f.wiki, archivePath)), original);
@@ -184,7 +203,7 @@ test('retention reconstruction uses completed archive work and timezone timeline
   const config = { ...f.config, journal_timezone_timeline: [{ schema_version: 1 as const, effective_from: '1970-01-01T00:00:00Z', timezone: 'Asia/Tokyo', basis: 'synthetic timeline' }] };
   const ps = [{ ...patch('op:from-work', 'wiki/personal/journals/日记_2026_09_16.md', ''), date: '2026-09-16', baseline_digest: 'absent' }, { ...patch('op:timeline', 'wiki/personal/journals/日记_2026_08_15.md', ''), date: '2026-08-15', baseline_digest: 'absent' }];
   const result = await createPublisher(store.port(), config, { now: () => new Date('2026-09-30T16:00:00Z') }).applyPatches(ps);
-  assert.deepEqual(result.map(file => file.status), ['noop', 'noop']);
+  assert.deepEqual(result.map(file => file.status), ['pending', 'pending']);
 });
 
 test('safe writes reject traversal, outside absolute, symlink escape, raw, immutable archives and released lock', async t => {
@@ -224,6 +243,7 @@ test('monthly, weekly and project patches with archived dates publish normally; 
   ps.push({...patch('op:weekly-generic-type',weeklyPath),date:'2026-07-31'});
   const pinned = { ...patch('op:tagged', 'wiki/personal/journals/日记_2026_07_31.md', ''), date: '2026-07-31' };
   await seed(f.wiki, pinned.path, '---\ntags:\n  - pinned-daily\n---\nhuman daily\n'); ps.push(pinned);
+  pinned.baseline_digest = digestBytes(await readFile(join(f.wiki, pinned.path)));
   const outcomes = await createPublisher(store.port(), f.config, { now: fixedNow }).applyPatches(ps);
   assert.deepEqual(outcomes.map(file => file.status), ['applied', 'applied', 'applied', 'applied', 'applied']);
   assert.equal((await store.listWork('journal_supplement')).length, 0);

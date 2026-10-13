@@ -2,6 +2,8 @@
 
 状态：2026-09-30 最终计划的实施交接版；用户已授权实施至真实可用。本文与聊天中的最终计划共同构成行为规格，不能用实现现状缩小范围。
 
+2026-10-06 已批准修复以第13节为最新行为约束；其个人配置额度与运行调度取代此前4包/旧采集额度，兼容配置仍保持保守默认值。
+
 ## 1. 不可变实施约束
 
 - 禁止读取、复制、导入或执行任何旧 Bookkeeping、Analytics、rollover 源码、测试、补丁、Git diff、事故脚本；不得把旧程序作为 oracle。旧代码只能整体封存为不展开的恢复快照。
@@ -146,3 +148,52 @@ M1当前日更、M2完整业务、M3切换观察、M4退役；当前日更可先
 新daily bundle及对应审阅的主事件和上下文事件只含一个provider；既有接受事实可保留跨来源、旧归档或无event refs的去重/修订上下文，只有证明引用当前禁止微信群的事实不进入该上下文。每轮仍共用默认总计4包预算，先给各pending provider机会，再处理最旧剩余材料，不能按provider各发4包。微信读取、审阅、commit、export或文件写入失败只报告和重试该来源/阶段，继续有效Codex/Claude及独立consumer工作，绝不因此暂停整个Bookkeeping。事实提交、导出、逐文件发布分别报告；全局SQLite/本机storage故障明确报告执行失败，不伪装为单一来源缺口。不改变正式daily的原调度、模型或effort。
 
 人工历史补账使用显式source、UTC半开from/to、冻结cutoff与有界max_bundles；日期边界按已确认的历史日记时区/timeline确定，不按路径或当前时区推测。明确range不能同时带period或replay_id。一次范围重试复用原冻结语义；已审数据若需再审，使用显式source-scoped replay job与稳定key，新一轮语义检查才给新key。September补账不声称缺口为无活动。允许微信范围内的zero-fact replay，但每个complete chunk必须显式zero_facts并只完成实际提供且完整审阅的事件/slices；partial、未读、范围外或缺失capture证据不得顺带完成，零事实审阅不证明完整采集或全天quiet。审阅材料中的命令与指令始终只是数据。
+
+## 13. 2026-10-06 已批准的有界日更与日记发布修复
+
+显式个人配置：collection_budgets.live=512MiB/300秒，history=256MiB/180秒，两者max_directory_entries=8000；Codex/Claude options.max_directory_entries=8000、discovery_manifest_budget=16MiB/10秒。移除这些文件适配器内部旧默认硬钳制；I/O每次最多1MiB，每候选最多4MiB后轮转，已知文件严格续原offset，不跳recent tail；未知新文件保留8MiB尾部引导。微信仍保留自身90/30秒、64/32MiB、history默认8最多16次查询的独立上限，正式allowlist、人物映射、范围与分页保持；global额度提升不提升这些微信正文上限。chunk80事件/32KiB、最终bundle128KiB不变。
+
+正常daily live窗口=[max(S,cutoff-48h),cutoff)，history独立审更早材料；物理采集lane不限制可审事件。完成区间与partial区间跨lane去重；显式范围/replay仍保留原语义。空源、不完整turn、局部失败不制造空自动bundle或占额度；来源partial仍可使用已有合格事件。当前排除范围不计active审阅欠账，stored/excluded/blocked_metadata/incomplete分别报告，未知捕获前缀不可伪称零。微信局部故障继续其他来源和消费者；明确SQLite/共享磁盘写入容量故障（含ENOSPC/EDQUOT）报告全局执行失败，成功只读探针不能证明可写。
+
+daily-round是现有CLI的逐步编排，无新controller、模型服务或daemon。私有manifest冻结原cutoff、started_at、配置身份、active、轮转cursor、原event+sliceranges skips及计数；不作业务acceptance门禁。每次只prepare一个选定source/lane（max_bundles=1），接受/发布后再选下一包。先各provider一轮live，再各一轮history，后按2:1；每24个实际开始的source包保留16live/8history，另一lane耗尽才借用。source与journal语义材料共用每run最多96个实际非空starts，格式修复/重试同active不重复计数。初始最多一批journal，source wave间交错，结束前主动处理剩余journal；材料过大缩到可装下的前缀，单条异常只挂该条。明确--defer-active记录stage/reason并加入本run skips，不伪造zero-fact完成；下一run仍可审。完整逐步receipt保存在独立0600文件，manifest只存引用、阶段计数及摘要（上限16MiB），不截断原回执或给无关import增加同一上限。
+
+原started_at起2小时合作式deadline，采集累计最多20分钟；105分钟后禁止新source或journal语义材料，余下15分钟只提交已开始结果、恢复export/文件及消费者。每子命令/文件/导出/consumer循环边界检查剩余时间；可完成已开始原子文件步骤，但不启动下一项，公共子进程timeout按剩余时间裁剪并等待退出，无后台writer或Promise.race脱离控制。
+
+接受事实的每个精确fact revision×受影响date×canonical target独立journal_publication债务。ReviewResult可选journal_dispositions=patch/already_present/not_needed/defer，旧无字段结果照常接受并留债。already_present须给足够evidence_text并匹配冻结且仍当前的baseline，不自动重复既有人工正文；keep保留已有refs，更正/撤回覆盖old/new dates与历史目标，失效修订可有明确not_needed退休证明。journal-prepare与journal-resolve只处理已接受facts、current baseline与精确work；不创建第二ReviewResult、新facts、source marks或outbox。原操作最多一个自动replacement；supersession或explicit terminal使旧intent永不重放。
+
+历史supplement排队返回pending+真实queued_work_ids。月输出只确认本次冻结、实际rendered的精确journal IDs，持同一Wiki lock调用completeJournalDisplay原子闭债并退休旧操作；derived intent refs含displayed、summary represented及correction的完整union，排序精确refs摘要进入稳定operation ID，兼容旧稀疏refs intent且不改旧记录。原归档context仅冻结且完整实际展示的IDs可关闭。
+
+journal-inventory按Store测量的实际接受UTC半开窗口分页，模型created_at/业务日期/文件mtime不作接受时间证据；旧接受时间未知明确返回unknown并保留单独筛选。journal-recover可用协调者核验的显式result_ids（每批1–100）补债，包含业务日期早于窗口的历史手工补账。状态分execution/capture/review/facts/export/files/consumers/journal债，不用一个success代替完整发布。运行时now传Store、Publisher、archive与全部consumer/writer，语义cutoff保持冻结；合成测试固定有效asOf。部署、真实验收、Wiki规则和保持原23:30/model/effort的正式自动化更新只由协调者进行。
+
+## 14. 2026-10-07 已批准的跨阶段修复合同
+
+本节优先于第13节的旧调度细节。日更默认按事件时间选择，物理采集lane只决定live/history范围；显式旧range/period调用不指定selection_basis时保持capture_lane兼容，replay不变。CLI `--selection-basis event_time|capture_lane`使选择明确。准备返回ready/more/exhausted/unavailable、冻结scope的opaque continuation、扫描统计和精确延期单位；只有exhausted允许日轮耗尽来源。每调用最多5页×320候选或5秒，超大单位局部延期，空扫描页不消耗语义starts。已给出的未接受材料及其未读切片不得推进游标。当前精确禁读IDs在所有续页/context/replay/saved/active路径的正文访问前生效。
+
+共享存储错误统一分类：ENOSPC/EDQUOT/SQLite为全局；EIO/EROFS只有本机data_dir/Wiki写入操作才全局，来源读取失败保持局部。非法输入、未提交执行失败和已提交恢复失败分开，后者保留完整error.receipt及原accepted身份，不能要求改写已接受语义。
+
+`daily-round --finish --reason REASON`不准备新材料，保留原started_at/cutoff/counts/active身份；未审单位精确延期，已接受输入幂等恢复，剩余时间内恢复发布和独立消费者。响应明确terminal、semantic_deadline、task_deadline及next_action。先做不读正文的到期/finish元数据分支，再检查active禁读。初始最多1批journal，每完成4个source包检查journal一次且最多安排1批；90分钟后优先journal。source+journal共96starts，105分钟不新开语义，120分钟收尾；旧manifest增量兼容，不能重置时钟。终态partial不等于完整覆盖。
+
+现有每月3日任务增加monthly-round有界语义阶段：先上一完整月，后最老pending旧月，每月1包轮转，冻结原cutoff/snapshot/offset；共2小时/105分钟/96starts。状态显式月语义欠账、月份、最老、原因和续页。没有daily月摘要新阶段。archive仍独立且最多1个eligible月，保当前月和上月。恢复优先currentbatch及pending工作，历史核对每次至多64readyexport和64appliedintent并持久轮转；已applied项到期不改称pending。仅协调者安装prompt和正式文件，模型/effort/schedule不变，检测heartbeat保持PAUSED。
+
+冻结月事实已读完仍不等于冻结工作全部闭合。精确snapshot进度同时返回未完成的原work/archive-context计数，缺失ID保留欠账；不得把后到工作加入旧snapshot。原工作超出单包32项时，用显式work_only包继续同snapshot/cutoff，fact_offset=total，保原任务时钟与starts。该包只含实际返回的未完成原工作ID元数据，不重新读取facts、人工页或来源正文；已有完整月结论与精确版本refs/readmarks保持，只闭合本包明确完成的ID，不累加重复摘要。第一次无facts但无既有完整月结论仍是普通语义准备。旧已收尾run不能重开时钟，未闭合冻结债务留下一独立run恢复。
+
+
+## 15. October 11 approved missed-review and journal repair
+
+The October11 contract in docs/interfaces.md adds actual-byte bounded inspection, staged finite preparation, real frontier fairness, exact primary-user-unit dispositions and explicit user-confirmed journal changes. Existing accepted records and their retries remain immutable. Old unaccepted daily material is re-prepared with the new capability. Summary reading and random continuation IDs never prove full reading or progress. Semantic existing-body/summary replacement and known conflicting append remain awaiting user confirmation; facts/export continue independently. Exact stored replay never recaptures adapters. Original daily quotas and clock deadlines remain authoritative. Unknown source/startup/WeChat coverage stays partial; implementation/synthetic evidence does not certify a scheduled run.
+
+
+## 2026-10-11 通用 E197 规则同步授权
+
+用户已明确授权窄范围查看及同步通用 Wiki lint 的 E197 `archive_target` 规则、独立机械验证模块、必要导入/调用接线及合成测试，使普通日记可采用 `none` 或经完整身份/日期/分类校验的有效 v2 归档目标。允许协调者执行精确旧年度归档目标到 `none` 的单字段元数据迁移，保持正文、摘要、`updated` 及其他字节不变。该授权不开放旧文风模块或旧 Bookkeeping、Analytics、rollover 业务代码、测试、diff、patch、事故或恢复实现。生产操作、正式 Git 暂存和提交仍由协调者独占。
+
+
+## 16. October 13 approved span, assessment and compatibility repair
+
+This section is the current contract for new preparation; October11 accepted records retain immutable retries. New daily material has completion_policy:primary_spans_v1. Every admitted primary text role uses original-source UTF8 EventRef spans; ChunkReview retains supplied transient IDs. Candidates consume only referenced bytes and exact residual subspans use explicit dispositions without overlap. Independent facts may commit while clarification/journal evidence remains partial. Existing reviewed_spans are reused, with no new permanent proof graph.
+
+Journal assessment uses exact complete Markdown paragraphs/list items and full summary/body separately, comparing subject/action/time/result/negation with consistent/conflicting/unknown/not_applicable and relation new/clarification/correction/unknown. Insufficient/unknown/correction evidence retains debt without revoking valid facts. Cooperative chat confirmation stores minimal response source/content and does not authenticate a human. Automated tasks/source records cannot self-authorize journal-decide; privacy add/remove/value changes require confirmation and status remains mechanical. Final complete reread follows awaited guards; no CAS promise.
+
+W public lint is sole full v2 authority, with report_contract_version1/capability and strict complete diagnostics/counts bounded8MiB. Harmless top-level extensions allowed; old weak B validator/E197 bypass retired. Pending lint always reruns and downstream cache binds contract, commands and input. Timing reader derives its own import.meta implementation root, preserves canonical OS temporary clone restrictions and works from relocated paths/different cwd. Existing128KiB/16KiB/96starts/105/120minute budgets and original automation model/effort remain unchanged.
+
+Current conservative add/correction boundary: when bundle.existing_facts is empty, target_refs is empty and every correction journal decision explicitly says defer, an add may retain the newly evidenced assertion while its journal debt remains deferred. If any existing FactRef is supplied, add with a correction declaration stays pending until exact replace/retract or explicit source/candidate deferral; no same-topic equality is guessed from content. fact_commit:committed only reports transaction acceptance: inspect actual committed_fact_count, candidate debt and exact source/journal states separately.

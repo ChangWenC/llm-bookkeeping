@@ -7,10 +7,14 @@ import { canonical, digest } from '../analytics/serialization.ts';
 import { utc, normalized, rangeCheck, version, unique, refKey, factWeek, weekFor } from './domain.ts';
 import type { AnalyticsRepository } from './analytics.ts';
 import type { SemanticReplayRepository } from './replay.ts';
+import { queueAcceptedJournalWork } from './journal.ts';
+import { monthlyChunksCompleteSql, factMaterialProgress, completeMonthlyConclusion, assertCurrentMonthlyConclusion } from './monthly-status.ts';
+import { validateUnitDispositions,unreadMedia,evidenceEvent,eventForSpan,exactReviewUnit,overlaps } from './unit-dispositions.ts';
 interface SemanticStore {
     db: DatabaseSync;
     options: {
         onTransactionStep?: (step: string) => void;
+        now?: () => Date;
     };
     journalTimezone: string;
     transaction<T>(operation: () => T): T;
@@ -24,6 +28,9 @@ interface SemanticStore {
     replayRepository(): SemanticReplayRepository;
     markReplayUnit(event: SourceEvent, workId: string): void;
     sourceAllowed(event: SourceEvent): boolean;
+    assertReviewBundleReadable(id: string): void;
+    currentJournalPresentPaths?: Set<string>;
+    wikiLockHeld?: boolean;
 }
 const parse = <T>(row: any): T => JSON.parse(row.json);
 export async function commitSemanticReview(store: SemanticStore, result: ReviewResult): Promise<ReviewCommit> {
@@ -37,6 +44,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 throw new Error('Review result/bundle identity conflict');
             return { ...JSON.parse(old.commit_json), reused: true };
         }
+        store.assertReviewBundleReadable(result.bundle_id);
         const row = store.db.prepare('SELECT json FROM bundles WHERE id=?').get(result.bundle_id);
         if (!row)
             throw new Error('Unknown review bundle');
@@ -61,12 +69,30 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             if (!store.sourceAllowed(event)) throw new Error('Prepared WeChat source scope changed; prepare a fresh bundle');
             const current = store.db.prepare('SELECT classification,json FROM events WHERE id=?').get(id) as any;
             if (current && !store.sourceAllowed(JSON.parse(current.json))) throw new Error('Prepared WeChat source scope changed; prepare a fresh bundle');
-            if (event.source.provider === 'wechat' && (event.role === 'unknown' || (current && JSON.parse(current.json).role === 'unknown'))) throw new Error('Unknown WeChat sender remains pending');
+
             if (current && current.classification !== 'main')
                 throw new Error('Prepared source classification changed; prepare a fresh bundle');
         }
         validateReviewResult(result);
+        const primarySpans=validateUnitDispositions(bundle,result,store.db);
+        const dispositionHeld=primarySpans.held;
         const completedSemantic = result.chunks.some(chunk => chunk.status === 'complete');
+        const completeMonthlyMaterial = bundle.chunks.length > 0 && bundle.chunks.every(chunk => result.chunks.some(review => review.chunk_id === chunk.chunk_id && review.status === 'complete'));
+        let priorWorkConclusion:import('../contracts/types.ts').MonthlyReviewResult|null=null;
+        if (bundle.monthly_context?.work_only) {
+            const context=bundle.monthly_context,page=context.facts_page;
+            const snapshot=page && store.db.prepare("SELECT json_extract(json,'$.kind') AS kind,json_extract(json,'$.period') AS period,json_extract(json,'$.cutoff') AS cutoff FROM fact_material_snapshots WHERE id=?").get(page.snapshot_id) as {kind:string;period:string;cutoff:string}|undefined;
+            const proof=page && factMaterialProgress(store.db,page.snapshot_id);
+            if (!page || !snapshot || snapshot.kind!=='monthly' || snapshot.period!==context.month || snapshot.period!==bundle.period || snapshot.cutoff!==bundle.cutoff || page.cutoff!==snapshot.cutoff || !proof || page.total!==proof.total || page.offset!==proof.total || proof.first_unread_offset!==null || proof.pending_archive_context_count!==0)
+                throw new Error('Work-only monthly scope requires exact completed frozen facts and no pending archive context');
+            if (context.facts.length || context.manual_baselines.length || context.archive_contexts?.length || context.archive_context_page || bundle.existing_facts.length || bundle.baselines.length || bundle.chunks.some(chunk=>chunk.events.length||chunk.context_events.length) || result.candidates.length || result.pages.length || !result.monthly_review)
+                throw new Error('Work-only monthly cannot introduce facts, source/page/archive material or new semantic candidates');
+            if (!context.prepared_work_ids?.length || context.prepared_work_ids.length>32 || new Set(context.prepared_work_ids).size!==context.prepared_work_ids.length) throw new Error('Work-only monthly requires one bounded unique frozen work page');
+            for (const id of context.prepared_work_ids??[]) if (!store.db.prepare("SELECT 1 FROM fact_material_snapshots s,json_each(s.json,'$.work_ids') frozen WHERE s.id=? AND frozen.value=?").get(page.snapshot_id,id)) throw new Error('Work-only prepared ID outside original frozen snapshot');
+            assertCurrentMonthlyConclusion(store.db,page.snapshot_id);
+            priorWorkConclusion=completeMonthlyConclusion(store.db,page.snapshot_id);
+            if (!priorWorkConclusion) throw new Error('Work-only monthly requires prior accepted complete conclusion');
+        }
         if (bundle.analysis_context && completedSemantic && !result.analysis)
             throw new Error('Completed weekly review requires typed analysis');
         if (bundle.monthly_context && completedSemantic && !result.monthly_review)
@@ -88,6 +114,8 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 throw new Error('Monthly review cannot upgrade incomplete coverage');
             if (!Array.isArray(review.fact_refs) || review.fact_refs.some(ref => !context.facts.some(fact => refKey(fact) === refKey(ref))))
                 throw new Error('Monthly review references facts outside prepared context');
+            if (!completeMonthlyMaterial && ((review.completed_work_ids?.length ?? 0) || (review.completed_archive_context_ids?.length ?? 0)))
+                throw new Error('Monthly work completion requires every prepared semantic chunk explicitly complete');
             if (review.completed_work_ids) {
                 unique(review.completed_work_ids, 'completed monthly work IDs');
                 if (review.completed_work_ids.some(id => !context.prepared_work_ids?.includes(id)))
@@ -124,9 +152,10 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 throw new Error('zero_facts contradicts candidates');
         }
         const availableTargets = new Set(bundle.existing_facts.map(refKey));
-        const liveTargets = new Set(store.effective().map(refKey));
+        const liveTargets = new Set(bundle.monthly_context?.work_only ? [] : bundle.kind==='daily'?bundle.existing_facts.filter(fact=>fact.action!=='retract'&&!!store.db.prepare(`SELECT 1 FROM facts f WHERE f.id=? AND f.revision=? AND NOT EXISTS(SELECT 1 FROM facts later WHERE later.id=f.id AND later.revision>f.revision) AND NOT EXISTS(SELECT 1 FROM fact_targets t WHERE t.target_id=f.id AND t.target_revision>=f.revision)`).get(fact.fact_id,fact.revision)).map(refKey):store.effective().map(refKey));
         const failed = new Set<string>();
-        const heldEvents = new Set<string>();
+        for(const chunk of bundle.chunks)if(chunk.events.some(event=>dispositionHeld.has(event.event_id)))failed.add(chunk.chunk_id);
+        const finalizedEvents = new Set<string>();
         const facts: FactRevision[] = [];
         const refs = new Map<string, FactRef[]>();
         for (const candidate of result.candidates) {
@@ -137,9 +166,14 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 throw new Error('Candidate outside reviewed chunk');
             const reviewed = new Set(review.reviewed_event_ids);
             const eventMap = new Map(chunk.events.map(e => [e.event_id, e]));
-            const derivedRefs = new Set(bundle.existing_facts.flatMap(f => f.event_refs.map(r => r.event_id)));
+            if(bundle.kind==='daily')for(const ref of candidate.event_refs)eventMap.set(ref.event_id,evidenceEvent(bundle,candidate.chunk_id,ref));
+            for(const event of chunk.events) {
+                const original=(event.context.review_slice as any)?.source_event_id;
+                if(typeof original==='string'&&chunk.events.filter(unit=>(unit.context.review_slice as any)?.source_event_id===original||unit.event_id===original).length===1)eventMap.set(original,event);
+            }
+            const derivedRefs = new Set(bundle.existing_facts.flatMap(f => f.event_refs.map(canonical)));
             const derived = bundle.kind !== 'daily' && ['inference', 'recommendation'].includes(candidate.kind);
-            if (candidate.event_refs.some(ref => !((eventMap.has(ref.event_id) && reviewed.has(ref.event_id)) || (derived && derivedRefs.has(ref.event_id)))))
+            if (candidate.event_refs.some(ref => !((eventMap.has(ref.event_id) && reviewed.has(eventMap.get(ref.event_id)!.event_id)) || (derived && derivedRefs.has(canonical(ref))))))
                 throw new Error('Candidate uses unreviewed/context event');
             if (bundle.kind !== 'daily' && candidate.disposition === 'add' && !derived)
                 throw new Error('Weekly/monthly cannot allocate duplicate direct facts');
@@ -152,8 +186,15 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             if (candidate.occurred_at.value)
                 utc(candidate.occurred_at.value);
             let reason: string | null = null;
+            const declaredCorrections=result.journal_dispositions?.filter(decision=>decision.candidate_id===candidate.candidate_id&&decision.baseline_assessment?.relation==='correction')??[];
+            // A new assertion may correct only unstructured journal text when no FactRef
+            // is supplied and every correction journal target is explicitly deferred.
+            // Any fact context remains conservatively unresolved; no same-topic inference.
+            if(candidate.disposition==='add'&&declaredCorrections.length&&!(bundle.existing_facts.length===0&&targetKeys.length===0&&declaredCorrections.every(decision=>decision.disposition==='defer')))
+                reason='Declared correction cannot be add with supplied fact context or automatic journal closure; repair exact replace/retract refs or explicitly defer the source candidate';
+            if(candidate.event_refs.some(ref=>{const event=eventMap.get(ref.event_id);return event&&unreadMedia(event);}))reason='Unread media evidence remains pending; it cannot create a fact or complete a unit';
             const evidenceKind = bundle.replay ? 'replay:' + bundle.replay.work_id : 'daily';
-            if (bundle.kind === 'daily' && candidate.disposition === 'add' && candidate.event_refs.every(ref => store.db.prepare('SELECT 1 FROM reviewed_units WHERE kind=? AND event_id=? LIMIT 1').get(evidenceKind, ref.event_id)))
+            if (bundle.kind === 'daily' && candidate.disposition === 'add' && candidate.event_refs.some(ref => (store.db.prepare('SELECT start_byte,end_byte FROM reviewed_spans WHERE kind=? AND source_id=?').all(evidenceKind,ref.event_id) as any[]).some(span=>overlaps({...span,schema_version:1,event_id:ref.event_id},{schema_version:1,event_id:ref.event_id,start_byte:ref.start_byte!,end_byte:ref.end_byte!}))))
                 reason = 'Evidence already semantically reviewed; prepare again with existing facts';
             if (!candidate.subject.trim() || candidate.attribution?.subject_known === false)
                 reason = 'Unknown fact subject';
@@ -161,7 +202,6 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 reason = 'Unresolved or stale target reference';
             if (reason) {
                 failed.add(candidate.chunk_id);
-                candidate.event_refs.forEach(r => heldEvents.add(r.event_id));
                 store.putWork({ schema_version: 1, work_id: store.allocateId('work'), kind: 'review_candidate', lane: bundle.lane, state: 'pending', payload: { bundle_id: bundle.bundle_id, candidate }, reason, migration_key: null, updated_at: result.created_at });
                 continue;
             }
@@ -176,7 +216,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             const projection = structuredClone(candidate.analytics_projection ?? { schema_version: 1 as const, value: null, reason: 'Analytics projection not supplied' });
             if (projection.value)
                 projection.value.event_refs = projection.value.event_refs.map(ref => {
-                    const index = candidate.event_refs.findIndex(original => original.event_id === ref.event_id);
+                    const index = candidate.event_refs.findIndex(original => canonical(original) === canonical(ref));
                     if (index < 0)
                         throw new Error('Analytics projection evidence outside fact evidence');
                     return { ...ref, event_id: eventRefs[index].event_id };
@@ -188,6 +228,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 if (verification.basis !== 'user_explicit_verification' || !verification.name?.trim() || !verification.value?.trim() || verification.subject !== candidate.subject || !verification.event_refs.length)
                     throw new Error('Invalid explicit verification');
                 verification.event_refs = verification.event_refs.map(ref => {
+                    if(!candidate.event_refs.some(original=>canonical(original)===canonical(ref)) || !projection.value!.event_refs.some(original=>canonical(original)===canonical(ref)))throw new Error('Verification requires exact fact/projection evidence span');
                     const event = eventMap.get(ref.event_id);
                     if (!event || event.role !== 'user' || !event.utc_time.value || normalized(event.utc_time.value) !== normalized(verification.verified_at))
                         throw new Error('Verification requires a user event at the actual verification time');
@@ -195,7 +236,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                     return { ...ref, event_id: original ?? ref.event_id };
                 });
             }
-            const attribution = derived ? { ...candidate.attribution, derived_from: bundle.existing_facts.filter(f => f.event_refs.some(r => candidate.event_refs.some(c => c.event_id === r.event_id))).map(f => ({ schema_version: 1, fact_id: f.fact_id, revision: f.revision })) } : candidate.attribution;
+            const attribution = derived ? { ...candidate.attribution, derived_from: bundle.existing_facts.filter(f => f.event_refs.some(r => candidate.event_refs.some(c => canonical(c) === canonical(r)))).map(f => ({ schema_version: 1, fact_id: f.fact_id, revision: f.revision })) } : candidate.attribution;
             const fact: FactRevision = { schema_version: 1, fact_id: factId, revision: (max.revision ?? 0) + 1, event_refs: eventRefs, content: candidate.content, subject: candidate.subject, occurred_at: candidate.occurred_at, journal_date: candidate.journal_date, kind: candidate.kind, analytics_projection: projection, action: candidate.disposition === 'add' ? 'assert' : candidate.disposition, target_refs: candidate.target_refs, scope: candidate.scope, attribution, recorded_at: result.created_at };
             store.db.prepare('INSERT INTO facts VALUES(?,?,?,?)').run(fact.fact_id, fact.revision, canonical(fact), normalized(fact.recorded_at));
             facts.push(fact);
@@ -206,15 +247,24 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         }
         store.options.onTransactionStep?.('review_facts');
         for (const review of result.chunks) {
-            for (const id of review.reviewed_event_ids.filter(id => !heldEvents.has(id)))
-                if (bundle.replay) store.markReplayUnit(chunks.get(review.chunk_id)!.events.find(e => e.event_id === id)!, bundle.replay.work_id);
-                else store.markUnit(chunks.get(review.chunk_id)!.events.find(e => e.event_id === id)!, bundle.kind, bundle.lane);
+            for (const id of review.reviewed_event_ids) {
+                const event=chunks.get(review.chunk_id)!.events.find(e=>e.event_id===id)!;
+                const spans=bundle.kind==='daily'?(primarySpans.final.get(id)??[]):[exactReviewUnit(event)];
+                for(const span of spans) {
+                    // A failed candidate holds only its own evidence interval.
+                    const rejected=result.candidates.filter(candidate=>candidate.chunk_id===review.chunk_id && !refs.has(candidate.candidate_id)).flatMap(candidate=>candidate.event_refs);
+                    if(rejected.some(ref=>ref.start_byte!==undefined&&ref.end_byte!==undefined&&overlaps(span,{schema_version:1,event_id:ref.event_id,start_byte:ref.start_byte,end_byte:ref.end_byte})))continue;
+                    const unit=eventForSpan(event,span);
+                    finalizedEvents.add(id);
+                    if(bundle.replay)store.markReplayUnit(unit,bundle.replay.work_id);else store.markUnit(unit,bundle.kind,bundle.lane);
+                }
+            }
             if (review.status === 'complete' && chunks.get(review.chunk_id)!.events.length === 0)
                 store.db.prepare('INSERT OR IGNORE INTO reviewed_units VALUES(?,?,?)').run(bundle.kind, bundle.lane, review.chunk_id);
             store.db.prepare('UPDATE chunks SET state=? WHERE id=?').run(failed.has(review.chunk_id) ? 'partial' : review.status, review.chunk_id);
         }
         const semanticContext = bundle.analysis_context ?? bundle.monthly_context;
-        if (semanticContext?.facts_page && result.chunks.some(chunk => chunk.status === 'complete') && (result.analysis || result.monthly_review))
+        if (!bundle.monthly_context?.work_only && semanticContext?.facts_page && (bundle.monthly_context ? completeMonthlyMaterial : completedSemantic) && (result.analysis || result.monthly_review))
             store.markFactMaterialRead(semanticContext.facts_page.snapshot_id, semanticContext.facts.map(fact => 'fact_ref' in fact ? fact.fact_ref : { schema_version: 1, fact_id: fact.fact_id, revision: fact.revision }));
         store.options.onTransactionStep?.('review_chunks');
         if (bundle.replay && !failed.size && result.chunks.length && result.chunks.every(chunk => chunk.status === 'complete'))
@@ -240,6 +290,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
             patches.push(patch);
         }
         store.options.onTransactionStep?.('review_patches');
+        queueAcceptedJournalWork(store.db, bundle, result, facts, patches, refs, item => store.putWork(item), store.journalTimezone, store.currentJournalPresentPaths,store.wikiLockHeld);
         const batchId = store.allocateId('batch');
         const sourceChunks = bundle.chunks.filter(chunk => !chunk.chunk_id.startsWith('pages:'));
         const explicitEmpty = sourceChunks.length > 0 && sourceChunks.every(chunk => chunk.events.length === 0 && reviews.get(chunk.chunk_id)?.status === 'complete' && reviews.get(chunk.chunk_id)?.zero_facts === true);
@@ -250,19 +301,30 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
                 store.db.prepare('UPDATE coverage SET json=? WHERE id=?').run(canonical(coverage), coverage.coverage_id);
         const artifact: FactArtifact = { schema_version: 1, batch_id: batchId, created_at: result.created_at, facts, coverage: reviewedCoverage, affected_dates: [...new Set(facts.flatMap(f => f.journal_date.value ? [f.journal_date.value] : []))].sort(), affected_weeks: [] };
         const pageContext = bundle.analysis_context ?? bundle.monthly_context;
-        if (pageContext?.facts_page && (result.analysis || result.monthly_review)) {
+        if (bundle.monthly_context?.work_only && priorWorkConclusion) {
+            // Work continuation acknowledges exact frozen IDs; its raw note is retained
+            // in ReviewResult but never becomes another accumulated semantic conclusion.
+            artifact.monthly_review={...structuredClone(priorWorkConclusion),completed_work_ids:[...new Set([...(priorWorkConclusion.completed_work_ids??[]),...(result.monthly_review?.completed_work_ids??[])])]};
+        }
+        else if (pageContext?.facts_page && (result.analysis || (result.monthly_review && completeMonthlyMaterial))) {
             const value = result.analysis ?? result.monthly_review!;
             // The machine-produced monthly target changes after publishing. It is not a new source material page.
             const automaticPath = `wiki/personal/journals/reviews/回顾_${bundle.period?.replace('-', '_')}.md`;
             const sources = bundle.kind === 'monthly' ? bundle.monthly_context!.manual_baselines.filter(page => page.path !== automaticPath).map(page => ({ path: page.path, digest: page.digest, content: page.content })) : [];
-            const materialId = digest(canonical({ offset: pageContext.facts_page.offset, sources, archives: bundle.monthly_context?.archive_contexts?.map(item => ({ work_id: item.work_id, original_digest: item.original_digest, content_excerpt: item.content_excerpt })), archive_page: bundle.monthly_context?.archive_context_page }));
-            const oldPage = store.db.prepare('SELECT json FROM semantic_material_pages WHERE snapshot_id=? AND material_id=?').get(pageContext.facts_page.snapshot_id, materialId) as any;
+            const materialId = (bundle.kind === 'monthly' ? 'monthly-complete:' : '') + digest(canonical({ offset: pageContext.facts_page.offset, sources, archives: bundle.monthly_context?.archive_contexts?.map(item => ({ work_id: item.work_id, original_digest: item.original_digest, content_excerpt: item.content_excerpt })), archive_page: bundle.monthly_context?.archive_context_page }));
+            // Earlier draft rows stay immutable. Only proven complete accepted monthly pages
+            // contribute to final aggregation; new complete pages have a distinct identity.
+            const provenMonthly = (alias:string) => `EXISTS(SELECT 1 FROM results r JOIN bundles b ON b.id=r.bundle_id WHERE b.kind='monthly' AND json_extract(b.json,'$.monthly_context.facts_page.snapshot_id')=${alias}.snapshot_id AND json_extract(b.json,'$.monthly_context.facts_page.offset')=${alias}.offset AND json_extract(r.json,'$.monthly_review')=${alias}.json AND ${monthlyChunksCompleteSql('b','r')})`;
+            const priorComplete = bundle.kind === 'monthly' ? store.db.prepare(`SELECT p.json FROM semantic_material_pages p WHERE p.snapshot_id=? AND p.material_id=? AND ${provenMonthly('p')}`).get(pageContext.facts_page.snapshot_id,materialId.slice('monthly-complete:'.length)) as {json:string}|undefined : undefined;
+            const oldPage = priorComplete ?? store.db.prepare('SELECT json FROM semantic_material_pages WHERE snapshot_id=? AND material_id=?').get(pageContext.facts_page.snapshot_id, materialId) as any;
             if (oldPage && oldPage.json !== canonical(value))
                 throw new Error('Accepted material page semantic content conflict');
-            store.db.prepare('INSERT OR IGNORE INTO semantic_material_pages VALUES(?,?,?,?,?)').run(pageContext.facts_page.snapshot_id, materialId, pageContext.facts_page.offset, bundle.kind, canonical(value));
-            const pages = store.db.prepare('SELECT offset,json FROM semantic_material_pages WHERE snapshot_id=? AND kind=? ORDER BY offset,rowid').all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
+            if (!priorComplete) store.db.prepare('INSERT OR IGNORE INTO semantic_material_pages VALUES(?,?,?,?,?)').run(pageContext.facts_page.snapshot_id, materialId, pageContext.facts_page.offset, bundle.kind, canonical(value));
+            const completeFilter = bundle.kind === 'monthly' ? ` AND (substr(p.material_id,1,17)='monthly-complete:' OR (NOT EXISTS(SELECT 1 FROM semantic_material_pages final WHERE final.snapshot_id=p.snapshot_id AND final.material_id='monthly-complete:'||p.material_id) AND ${provenMonthly('p')}))` : '';
+            const pages = store.db.prepare(`SELECT p.offset,p.json FROM semantic_material_pages p WHERE p.snapshot_id=? AND p.kind=?${completeFilter} ORDER BY p.offset,p.rowid`).all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
             // Preserve accepted pages from the earlier new schema without rewriting their immutable conclusions.
-            const legacyPages = store.db.prepare('SELECT offset,json FROM semantic_pages WHERE snapshot_id=? AND kind=? ORDER BY offset').all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
+            const legacyFilter = bundle.kind === 'monthly' ? ` AND ${provenMonthly('p')}` : '';
+            const legacyPages = store.db.prepare(`SELECT p.offset,p.json FROM semantic_pages p WHERE p.snapshot_id=? AND p.kind=?${legacyFilter} ORDER BY p.offset`).all(pageContext.facts_page.snapshot_id, bundle.kind).map((row: any) => ({ offset: row.offset, result: JSON.parse(row.json) }));
             pages.unshift(...legacyPages.filter(page => !pages.some(current => current.offset === page.offset && canonical(current.result) === canonical(page.result))));
             if (result.analysis)
                 artifact.analysis = accumulateWeekly(pages, result.analysis);
@@ -295,7 +357,7 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         if (bundle.kind === 'daily') {
             // Capture coverage describes what may exist, not what this result read.
             for (const review of result.chunks)
-                for (const id of review.reviewed_event_ids.filter(id => !heldEvents.has(id))) {
+                for (const id of review.reviewed_event_ids.filter(id => finalizedEvents.has(id))) {
                     const event = chunks.get(review.chunk_id)!.events.find(event => event.event_id === id)!;
                     if (event.journal_date.value) dates.add(event.journal_date.value);
                     if (event.utc_time.value) weeks.add(weekFor(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(event.utc_time.value))));
@@ -336,6 +398,9 @@ export async function commitSemanticReview(store: SemanticStore, result: ReviewR
         store.options.onTransactionStep?.('review_outbox');
         const commit: ReviewCommit = { schema_version: 1, result_id: result.result_id, batch_id: batchId, reused: false, facts, patches };
         store.db.prepare('INSERT INTO results VALUES(?,?,?,?,?)').run(result.result_id, result.bundle_id, canonical(result), content, canonical(commit));
+        const acceptedAt=(store.options.now?.() ?? new Date()).toISOString();
+        store.db.prepare('INSERT INTO acceptance_times VALUES(?,?)').run(result.result_id,normalized(acceptedAt));
+        store.db.prepare('INSERT INTO publication_acceptance_order(batch_id) VALUES(?)').run(batchId);
         store.options.onTransactionStep?.('review_result');
         return commit;
     });

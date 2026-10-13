@@ -1,3 +1,4 @@
+import {exactReviewUnit} from '../../src/store/unit-dispositions.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore } from '../../src/store/index.ts';
@@ -18,7 +19,7 @@ async function setup() {
     await s.saveBundle(b);
     const r = result(b);
     r.pages = [];
-    r.candidates[0].analytics_projection.value!.verification = { schema_version: 1, name: 'verified', value: 'yes', subject: 'Roy', verified_at: '2026-09-30T09:00:00Z', event_refs: [{ schema_version: 1, event_id: events[0].event_id }], basis: 'user_explicit_verification' };
+    r.candidates[0].analytics_projection.value!.verification = { schema_version: 1, name: 'verified', value: 'yes', subject: 'Roy', verified_at: '2026-09-30T09:00:00Z', event_refs: [{ schema_version: 1, ...exactReviewUnit(events[0]) }], basis: 'user_explicit_verification' };
     r.candidates[0].analytics_projection.value!.attribution = { actor: 'Roy', responsibility: 'verification', capability_ids: ['design', 'verify'], goal_target_version: 'v1' };
     const accepted = await s.commitReview(r);
     await s.markExportReady(accepted.batch_id, c.data_dir + '/initial.json');

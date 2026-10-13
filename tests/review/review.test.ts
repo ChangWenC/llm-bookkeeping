@@ -24,9 +24,9 @@ test('daily review progress is shared across transport lanes while weekly/monthl
  const monthly=(await r.prepare({kind:'monthly',lane:'history',period:'2026-09',cutoff}))[0];assert.equal(monthly.chunks[0].events.length,0);assert.equal(monthly.monthly_context!.facts.length,1);s.close();
 });
 
-test('capture absence/unknown is explicit and accepting zero facts cannot claim empty day coverage',async()=>{
- const c=await config();const s=await createStore(c);const r=createReviewer(s,c);const noCapture=(await r.prepare({kind:'daily',lane:'live',cutoff}))[0];assert.ok(noCapture.unfinished.some(g=>g.reason.includes('No capture')));await r.accept(result(noCapture,'no-source',false));assert.deepEqual((await s.listOutbox())[0].artifact.coverage,[]);
- const batch=collection([]);batch.coverage[0].capture_status='unknown';batch.coverage[0].gaps=[{schema_version:1,range,reason:'unread prefix',locator:'synthetic',resumable:true}];await s.saveCollection(batch);const partial=(await r.prepare({kind:'daily',lane:'live',cutoff}))[0];await r.accept(result(partial,'unknown-source',false));assert.equal((await s.listOutbox()).at(-1)!.artifact.coverage[0].review_status,'pending');s.close();
+test('capture absence/unknown stays explicit pending debt without generating empty semantic starts',async()=>{
+ const c=await config();const s=await createStore(c);const r=createReviewer(s,c);assert.deepEqual(await r.prepare({kind:'daily',lane:'live',cutoff}),[]);const noCapture=await r.prepareWithOutcomes!({kind:'daily',lane:'live',cutoff,period:'2026-09-30'});assert.deepEqual(noCapture.bundles,[]);assert.equal(noCapture.providers[0].preparation!.state,'exhausted');assert.equal(noCapture.providers[0].execution_status,'partial');assert.deepEqual(await s.listOutbox(),[]);
+ const batch=collection([]);batch.coverage[0].capture_status='unknown';batch.coverage[0].gaps=[{schema_version:1,range,reason:'unread prefix',locator:'synthetic',resumable:true}];await s.saveCollection(batch);assert.deepEqual(await r.prepare({kind:'daily',lane:'live',cutoff}),[]);const partial=await r.prepareWithOutcomes!({kind:'daily',lane:'live',cutoff,period:'2026-09-30'});assert.deepEqual(partial.bundles,[]);assert.equal(partial.providers[0].execution_status,'partial');assert.equal((await s.listCoverage(range))[0].review_status,'pending');assert.equal(s.db.prepare('SELECT COUNT(*) n FROM bundles').get()!.n,0);s.close();
 });
 
 test('multi-day batches expose separate page baselines and historical dates target a monthly addendum',async()=>{
@@ -91,6 +91,7 @@ test('stored Claude human input ignores assistant completion metadata while expl
  assert.equal((await s.listCoverage(range))[0].review_status,'partial');
  const next=await reviewer.prepare({kind:'daily',lane:'live',cutoff});
  assert(!next.flatMap(b=>b.chunks.flatMap(chunk=>chunk.events)).some(e=>e.event_id===user.event_id));
- assert(next.some(b=>b.unfinished.some(issue=>issue.reason.includes('Incomplete'))));
+ assert.deepEqual(next,[]); // Incomplete capture stays durable without manufacturing an automatic semantic bundle.
+ assert.equal((await s.listCoverage(range))[0].review_status,'partial');
  s.close();
 });

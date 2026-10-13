@@ -1,5 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const implementationRoot=fileURLToPath(new URL('../',import.meta.url));
 import { spawnSync } from 'node:child_process';
 const files = [];
 async function discover(directory) {
@@ -12,9 +14,9 @@ async function discover(directory) {
     else if (entry.isFile() && entry.name.endsWith('.test.ts')) files.push(path);
   }
 }
-await discover('test');
-await discover('tests');
+await discover(join(implementationRoot,'test'));
+await discover(join(implementationRoot,'tests'));
 if (!files.length) throw new Error('No test files found');
-const result = spawnSync(process.execPath, ['--test', ...files.sort()], { stdio: 'inherit' });
+const result = spawnSync(process.execPath, ['--test', ...files.sort()], { stdio: 'inherit', cwd:implementationRoot });
 if (result.error) throw result.error;
 process.exitCode = result.status ?? 1;

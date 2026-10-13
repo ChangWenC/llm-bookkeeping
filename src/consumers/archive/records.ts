@@ -5,6 +5,11 @@ import type { BookkeepingConfig, Store, FactRevision } from '../../contracts/typ
 import { readWikiTarget } from '../../publish/files.ts';
 
 export const archiveFolder = 'wiki/personal/_evidence/daily_journals';
+export function archiveVersionPath(month: string, identity: string): string {
+  checkMonth(month);
+  if (!/^[a-f0-9]{64}$/.test(identity)) throw new Error('Archive identity must be a complete SHA256');
+  return `${archiveFolder}/v2/${month}/${identity}.json`;
+}
 export const sha = (text: string | Uint8Array): string => createHash('sha256').update(text).digest('hex');
 export const monthlyPath = (month: string): string => `wiki/personal/journals/reviews/回顾_${month.replaceAll('-', '_')}.md`;
 export function checkMonth(month: string): void {
@@ -16,8 +21,8 @@ export function monthRange(month: string) {
   start.setUTCDate(start.getUTCDate() - 2); end.setUTCDate(end.getUTCDate() + 2);
   return { schema_version: 1 as const, from: start.toISOString(), to: end.toISOString() };
 }
-export async function effectiveMonthFacts(store: Store, month: string): Promise<FactRevision[]> {
-  return (await store.readEffectiveFacts({ range: monthRange(month) })).filter(fact => (fact.journal_date.value ?? fact.occurred_at.value?.slice(0, 10))?.startsWith(month))
+export async function effectiveMonthFacts(store: Store, month: string, asOf?: string): Promise<FactRevision[]> {
+  return (await store.readEffectiveFacts({ range: monthRange(month), ...(asOf ? { as_of: asOf } : {}) })).filter(fact => (fact.journal_date.value ?? fact.occurred_at.value?.slice(0, 10))?.startsWith(month))
     .sort((a, b) => (a.journal_date.value ?? a.occurred_at.value ?? '').localeCompare(b.journal_date.value ?? b.occurred_at.value ?? '') || a.fact_id.localeCompare(b.fact_id) || a.revision - b.revision);
 }
 /** Shared scope for backlink planning AND final deletion checks. Root Markdown

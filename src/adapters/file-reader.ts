@@ -8,6 +8,7 @@ import type {
   CoverageGap,
 } from "../contracts/types.ts";
 import { gap, hash, parseLossless } from "./common.ts";
+import { isClaudeCompletion, coalesceNativeUpdates } from "./native-updates.ts";
 import {
   sessionIdentity,
   parseSessionRow,
@@ -48,7 +49,7 @@ export function parseHeader(provider: string, head: Buffer) {
       } catch {}
   return {
     identity: sessionIdentity(provider, rows),
-    header_hash: hash(head.subarray(0, Math.max(0, head.indexOf(10) + 1))),
+    header_hash: hash(head.subarray(0, head.indexOf(10) >= 0 ? head.indexOf(10) + 1 : (head.length >= 64 * 1024 ? 64 * 1024 : 0))),
   };
 }
 export async function readTail(
@@ -116,7 +117,7 @@ export function parseCapturedLines(input: {
         for (const e of parsed) {
           e.fragment_ref = fragmentId;
           if (e.source.message_id && input.known_events.has(e.event_id) &&
-              e.classification !== "automation")
+              e.classification !== "automation" && !isClaudeCompletion(e))
             continue;
           input.known_events.add(e.event_id);
           events.push(e);
@@ -136,5 +137,13 @@ export function parseCapturedLines(input: {
       }
     pos = next + 1;
   }
-  return { events, fragments, gaps };
+  const merged = coalesceNativeUpdates(events);
+  const conflicts = new Set(input.state.native_update_conflicts ?? []);
+  for (const conflict of merged.gaps) conflicts.add(conflict.reason);
+  if (conflicts.size > 100) input.state.native_update_conflict_overflow = true;
+  input.state.native_update_conflicts = [...conflicts].slice(0, 100);
+  gaps.push(...input.state.native_update_conflicts.map(reason => gap(reason, input.locator)));
+  if (input.state.native_update_conflict_overflow)
+    gaps.push(gap("native_event_update_conflicts_overflow_requires_scoped_recollection", input.locator));
+  return { events: merged.events, fragments, gaps };
 }

@@ -105,7 +105,7 @@ test('source read failure keeps independent collection running while Store write
 test('source review failure leaves the next source preparation eligible through real CLI routing', async t => {
   const f = await fixture(t);
   await seed(f);
-  const receipt = await continueDailyPlan(plan(...['wechat', 'codex'].map(source => step(source, ['prepare', '--kind', 'daily', '--lane', 'history', '--source', source, '--max-bundles', '1', '--output', join(f.root, `material-${source}`)]))), f.path, {
+  const receipt = await continueDailyPlan(plan(...['wechat', 'codex'].map(source => step(source, ['prepare', '--kind', 'daily', '--lane', 'live', '--source', source, '--max-bundles', '1', '--output', join(f.root, `material-${source}`)]))), f.path, {
     now: () => cutoff,
     createRuntime: async (config, command, options, now) => {
       const services = await createRuntime(config, command, options, now);

@@ -2,15 +2,16 @@ import { basename } from 'node:path';
 import type { ArchiveRequest, BookkeepingConfig, Store, FactRef, FileOutcome, FileIntent, WorkItem } from '../../contracts/types.ts';
 import { createSafeWikiWriter, acquireWikiLock, readWikiTarget, digestBytes } from '../../publish/index.ts';
 import { canonicalDailyDate, retainedJournal, retainedWindowStart, frontmatterScalar } from '../../publish/journals.ts';
-import { archiveFolder, sha, checkMonth, monthlyPath, effectiveMonthFacts, listMarkdown, readArchiveRecords, type ArchiveReadIssue } from './records.ts';
-import type { WriterOptions } from '../../publish/files.ts';
+import { archiveVersionPath, sha, checkMonth, monthlyPath, effectiveMonthFacts, listMarkdown, readArchiveRecords, type ArchiveReadIssue } from './records.ts';
+import { storageFailureCode } from '../../storage-errors.ts';
+import { hasOperationTime, registerArchiveDeletionVerification, type WriterOptions } from '../../publish/files.ts';
 export { readArchiveRecords } from './records.ts';
 
 interface LinkPlan { path: string; digest: string; desired_base64: string; operation_id: string }
 interface ArchiveSnapshot { month: string; date: string; path: string; source_digest: string; original_base64: string; archive_path: string; archive_base64: string; archive_operation: string; fact_refs: FactRef[] }
 interface ArchivePlan extends ArchiveSnapshot { delete_operation: string; links: LinkPlan[] }
 export interface ArchivePageOutcome { date: string; path: string; status: 'eligible' | 'retained' | 'applied' | 'noop' | 'pending' | 'conflict'; archive_path: string | null; reason: string | null }
-export interface ArchiveResult { schema_version: 1; month: string; mode: 'report' | 'apply'; status: 'complete' | 'partial' | 'pending'; pages: ArchivePageOutcome[]; reason: string | null; issues?: ArchiveReadIssue[] }
+export interface ArchiveResult { schema_version: 1; month: string; mode: 'report' | 'apply'; status: 'complete' | 'partial' | 'pending'; pages: ArchivePageOutcome[]; reason: string | null; issues?: ArchiveReadIssue[]; files?: FileOutcome[] }
 export interface ArchiveOptions extends WriterOptions {
   /** Internal publisher recovery scope; backlink scans remain Wiki-wide. */
   resumePaths?: readonly string[];
@@ -26,7 +27,7 @@ const dailyTargets = (path: string): Set<string> => {
   const stem = path.replace(/\.md$/, '');
   return new Set([basename(stem), stem, stem.replace(/^wiki\//, ''), stem.replace(/^wiki\/personal\//, ''), `${basename(stem)}.md`, path]);
 };
-function rewriteLinks(text: string, path: string, date: string, month: string): string {
+export function rewriteLinks(text: string, path: string, date: string, month: string): string {
   const targets = dailyTargets(path);
   return text.replace(/\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g, (whole, target: string, alias: string | undefined) => {
     const original = target.split('#')[0];
@@ -53,14 +54,27 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
     const allowed = new Map(plans.filter(work => work.payload.month === snapshot.month).flatMap(work =>
       ((work.payload.links ?? []) as LinkPlan[]).filter(link => link.path === snapshot.path).map(link => [link.operation_id, link] as const)));
     let digest = snapshot.source_digest;
-    for (const intent of await store.listFileIntents(['applied'])) {
-      if (!allowed.has(intent.operation_id) || !intent.operation_id.startsWith('archive-link:') || intent.path !== snapshot.path || intent.baseline_digest !== digest) continue;
-      const link = allowed.get(intent.operation_id)!;
-      if (link.digest !== intent.baseline_digest || digestBytes(Buffer.from(link.desired_base64, 'base64')) !== intent.desired_digest) throw new Error('Archive backlink intent differs from saved exact plan');
-      if (intent.backup_bytes_base64 === null || intent.desired_bytes_base64 === null ||
-        digestBytes(Buffer.from(intent.backup_bytes_base64, 'base64')) !== digest ||
-        digestBytes(Buffer.from(intent.desired_bytes_base64, 'base64')) !== intent.desired_digest) throw new Error('Corrupt authorized archive backlink intent');
-      digest = intent.desired_digest;
+    // The saved same-month plan names every permitted link operation exactly.
+    // Never hydrate unrelated historical applied intents to prove this chain.
+    const intents: FileIntent[] = [];
+    for (const id of allowed.keys()) {
+      const intent = await store.getFileIntent(id);
+      if (intent?.state === 'applied' && intent.operation_id.startsWith('archive-link:') && intent.path === snapshot.path) intents.push(intent);
+    }
+    const visited = new Set<string>();
+    for (let step = 0; step < intents.length; step++) {
+      const matches = intents.filter(intent => !visited.has(intent.operation_id) && intent.baseline_digest === digest);
+      if (!matches.length) break;
+      if (new Set(matches.map(intent => intent.desired_digest)).size !== 1) throw new Error('Ambiguous authorized archive backlink chain');
+      for (const intent of matches) {
+        const link = allowed.get(intent.operation_id)!;
+        if (link.digest !== intent.baseline_digest || digestBytes(Buffer.from(link.desired_base64, 'base64')) !== intent.desired_digest) throw new Error('Archive backlink intent differs from saved exact plan');
+        if (intent.backup_bytes_base64 === null || intent.desired_bytes_base64 === null ||
+          digestBytes(Buffer.from(intent.backup_bytes_base64, 'base64')) !== digest ||
+          digestBytes(Buffer.from(intent.desired_bytes_base64, 'base64')) !== intent.desired_digest) throw new Error('Corrupt authorized archive backlink intent');
+        visited.add(intent.operation_id);
+      }
+      digest = matches[0].desired_digest;
     }
     return digest;
   }
@@ -92,17 +106,18 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
     return { schema_version: 1, month: request.month, mode: request.mode, status: pages.some(page => page.status === 'pending') ? 'pending' : issues.length ? 'partial' : 'complete', pages, reason: null, issues };
   }
   async function run(request: ArchiveRequest): Promise<ArchiveResult> {
+    if (!hasOperationTime(options)) return { schema_version: 1, month: request.month, mode: request.mode, status: 'pending', pages: [], reason: 'Task deadline reached before archive operation' };
     checkMonth(request.month);
     if (request.mode !== 'report' && request.mode !== 'apply') throw new Error('Archive mode must be report or apply');
     if (request.mode === 'report') return report(request);
     if (request.month >= retainedWindowStart(config, now()).slice(0, 7)) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages: [], reason: 'Current and preceding month are retained' };
-    const facts = await effectiveMonthFacts(store, request.month);
+    const facts = await effectiveMonthFacts(store, request.month, now().toISOString());
     const issues = (await readArchiveRecords(config)).issues;
     for (const issue of issues) await store.enqueueWork({ schema_version: 1, work_id: `archive-record-issue:${sha(JSON.stringify(issue))}`, kind: 'archive_record', lane: 'history', state: 'pending',
       payload: { ...issue }, reason: issue.reason, migration_key: null, updated_at: now().toISOString() });
     const lock = await acquireWikiLock(config.wiki_root);
     if (!lock) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages: [], reason: 'Wiki writer is active' };
-    const pages: ArchivePageOutcome[] = [];
+    const pages: ArchivePageOutcome[] = [], files: FileOutcome[] = [];
     try {
       const inScope = (path: string) => !options.resumePaths || options.resumePaths.includes(path);
       const pendingPlans = (await store.listWork('archive_plan', 'pending')).filter(work => work.payload.month === request.month && inScope(String(work.payload.path)));
@@ -124,6 +139,7 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
       // Freeze every source BEFORE any backlink mutation. Otherwise archiving A
       // can rewrite B before B's complete original has been preserved.
       for (const path of [...paths].sort()) {
+        if (!hasOperationTime(options)) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages, reason: 'Task deadline reached; archive originals/deletion debt retained' };
         try {
           const source = await readWikiTarget(config.wiki_root, path);
           const prior = byPath.get(path);
@@ -144,7 +160,7 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
               original_stem: basename(path, '.md'), source_path: path, original_digest: source.digest, original_bytes_base64: source.bytes.toString('base64'),
               original_markdown: source.bytes.toString('utf8'), locator: `archive:${identity}:${date}`, fact_refs: refs, retention: 'archived', created_at: now().toISOString() };
             snapshot = { month: request.month, date, path, source_digest: source.digest, original_base64: source.bytes.toString('base64'),
-              archive_path: `${archiveFolder}/v2/${request.month}/${identity}.json`, archive_base64: Buffer.from(JSON.stringify(archiveRecord) + '\n').toString('base64'),
+              archive_path: archiveVersionPath(request.month, identity), archive_base64: Buffer.from(JSON.stringify(archiveRecord) + '\n').toString('base64'),
               archive_operation: `archive-original:${identity}`, fact_refs: refs };
           }
           const work: WorkItem = saved ?? { schema_version: 1, work_id: `archive-snapshot:${snapshot.archive_operation}`, kind: 'archive_snapshot', lane: 'history', state: 'pending',
@@ -152,6 +168,7 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
           await store.enqueueWork(work);
           snapshots.set(path, snapshot); snapshotWork.set(path, work);
         } catch (error) {
+          if (storageFailureCode(error)) throw error;
           const source = await readWikiTarget(config.wiki_root, path), date = canonicalDailyDate(path, source.bytes) ?? (byPath.get(path)?.payload.date as string | undefined);
           if (!date?.startsWith(request.month)) throw error;
           skipped.add(path); pages.push({ date, path, status: 'pending', archive_path: null, reason: (error as Error).message });
@@ -159,18 +176,20 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
       }
       // Persist complete original version files for all frozen sources first.
       for (const [path, snapshot] of snapshots) {
+        if (!hasOperationTime(options)) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages, reason: 'Task deadline reached; frozen archive originals retained' };
         try {
           const output = await writer.writeLocked({ operation_id: snapshot.archive_operation, path: snapshot.archive_path, baseline_digest: 'absent',
             desired_bytes: Buffer.from(snapshot.archive_base64, 'base64'), fact_refs: snapshot.fact_refs }, lock);
           if (!success(output)) throw new Error(output.reason ?? 'Full original preservation is pending');
           const actual = await readWikiTarget(config.wiki_root, snapshot.archive_path);
           if (actual.digest !== digestBytes(Buffer.from(snapshot.archive_base64, 'base64'))) throw new Error('Saved full original differs from frozen snapshot');
-        } catch (error) { skipped.add(path); pages.push({ date: snapshot.date, path, status: 'pending', archive_path: snapshot.archive_path, reason: (error as Error).message }); }
+        } catch (error) { if (storageFailureCode(error)) throw error; skipped.add(path); pages.push({ date: snapshot.date, path, status: 'pending', archive_path: snapshot.archive_path, reason: (error as Error).message }); }
       }
       await options.faultArchive?.('snapshots_saved', request.month);
       for (const path of [...paths].sort()) {
+        if (!hasOperationTime(options)) return { schema_version: 1, month: request.month, mode: 'apply', status: 'pending', pages, reason: 'Task deadline reached; archive deletion debt retained' };
         if (skipped.has(path)) continue;
-        let date: string | null = null, archivePath: string | null = null;
+        let date: string | null = null, archivePath: string | null = null, deletionOperation: string | null = null;
         try {
           const source = await readWikiTarget(config.wiki_root, path);
           const prior = byPath.get(path);
@@ -275,19 +294,30 @@ export function createArchiveService(store: Store, config: BookkeepingConfig, op
             // save a stable retry for ONLY this proved new baseline.
             deleteOperation = `${plan.delete_operation}:${sha(deleteDigest)}`;
           }
+          deletionOperation = deleteOperation;
+          registerArchiveDeletionVerification(lock, deleteOperation, path, deleteDigest);
           const deleted = await writer.writeLocked({ operation_id: deleteOperation, path, baseline_digest: deleteDigest, desired_bytes: null, fact_refs: plan.fact_refs, archive_delete_verified: true }, lock);
+          files.push(deleted);
           if (!success(deleted)) { pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: deleted.reason }); continue; }
           // Once absence is real, every previous baseline-specific attempt can
           // repair its registration. Nothing here authorizes another unlink.
-          for (const intent of await store.listFileIntents()) if (archiveDeleteOperationMatches(plan, intent)) await writer.recoverLocked(intent, lock);
+          const pendingDeletes = store.listPublicationFileIntents ? (await store.listPublicationFileIntents({ schema_version: 1, states: ['prepared', 'pending', 'conflict'], limit: 64 })).items : [];
+          for (const intent of pendingDeletes) if (archiveDeleteOperationMatches(plan, intent)) await writer.recoverLocked(intent, lock);
           await options.faultArchive?.('after_delete', path);
           await store.completeWork(work!.work_id);
           await store.completeWork(snapshotWork.get(path)!.work_id);
           pages.push({ date, path, status: deleted.status, archive_path: archivePath, reason: null });
-        } catch (error) { if (date) pages.push({ date, path, status: 'pending', archive_path: archivePath, reason: (error as Error).message }); else throw error; }
+        } catch (error) {
+          if (storageFailureCode(error)) throw error;
+          if (deletionOperation) {
+            const intent = await store.getFileIntent(deletionOperation);
+            if (intent) files.push({ schema_version: 1, operation_id: intent.operation_id, path: intent.path, status: intent.state === 'applied' ? 'applied' : 'pending', reason: (error as Error).message });
+          }
+          if (date) pages.push({ date, path, status: 'pending', archive_path: archivePath, reason: (error as Error).message }); else throw error;
+        }
       }
       const pending = pages.filter(page => page.status === 'pending' || page.status === 'conflict');
-      return { schema_version: 1, month: request.month, mode: 'apply', status: pending.length ? pages.some(page => page.status === 'applied' || page.status === 'noop') ? 'partial' : 'pending' : issues.length ? 'partial' : 'complete', pages, reason: null, issues };
+      return { schema_version: 1, month: request.month, mode: 'apply', status: pending.length ? pages.some(page => page.status === 'applied' || page.status === 'noop') ? 'partial' : 'pending' : issues.length ? 'partial' : 'complete', pages, reason: null, issues, files };
     } finally { await lock.release(); }
   }
   return { run, report: (month: string) => report({ month, mode: 'report' }) };

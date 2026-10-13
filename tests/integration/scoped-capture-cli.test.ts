@@ -109,7 +109,7 @@ test('unknown capture time remains durable partial evidence and exact-range para
   assert.throws(() => parseArgs(['collect', '--lane', 'history', '--from', range.from, '--to', '2026-10-03T00:00:00Z', '--cutoff', cutoff]), /follow/);
 });
 
-test('CLI exact replay manifest validates bounded IDs before recapture and passes them without creating them', async t => {
+test('CLI exact replay manifest validates bounded IDs without recapture and passes them without creating them', async t => {
   const f = await fixture(t), path = join(f.root, 'events.json');
   let selected: any, recaptured = false;
   const store: any = { getCheckpoints: async () => [], saveCollection: async () => {}, requestSemanticReplay: async (request: any) => { selected = request; return { work_id: 'replay:synthetic', state: 'pending', payload: { cutoff } }; } };
@@ -118,7 +118,7 @@ test('CLI exact replay manifest validates bounded IDs before recapture and passe
   const args = ['replay', '--source', 'codex', '--from', range.from, '--to', range.to, '--events', path];
   await writeFile(path, JSON.stringify({ schema_version: 1, event_ids: ['stable:2', 'stable:1'] }));
   await executeCommand(parseArgs(args), f.config, services, cutoff);
-  assert.deepEqual(selected.event_ids, ['stable:2', 'stable:1']); assert.equal(recaptured, true);
+  assert.deepEqual(selected.event_ids, ['stable:2', 'stable:1']); assert.equal(recaptured, false);
   for (const ids of [[], ['duplicate', 'duplicate'], Array.from({ length: 65 }, (_, index) => String(index))]) {
     recaptured = false; await writeFile(path, JSON.stringify({ schema_version: 1, event_ids: ids }));
     await assert.rejects(executeCommand(parseArgs(args), f.config, services, cutoff), /unique event/); assert.equal(recaptured, false);
@@ -157,7 +157,7 @@ test('exact WeChat zero-fact replay reviews only selected already accepted event
     return { code, json: JSON.parse(stdout), stderr };
   };
   const args = ['replay', '--source', 'wechat', '--from', range.from, '--to', range.to, '--events', selection, '--replay-key', 'synthetic-selected-zero'];
-  const replay = await cli(args); assert.equal(replay.code, 0, replay.stderr); assert.equal(replay.json.recapture[0].capture_status, 'unavailable');
+  const replay = await cli(args); assert.equal(replay.code, 0, replay.stderr); assert.deepEqual(replay.json.recapture, []);
   const output = join(f.root, 'wechat-zero-replay-material');
   const prepared = await cli(['prepare', '--kind', 'daily', '--lane', 'history', '--replay-id', replay.json.replay_id, '--output', output]);
   assert.equal(prepared.code, 0, prepared.stderr); assert.equal(prepared.json.bundles.length, 1);

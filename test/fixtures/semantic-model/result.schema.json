@@ -1,0 +1,129 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "case_id",
+    "unit_dispositions",
+    "fact_operations",
+    "journal",
+    "conflict_notice"
+  ],
+  "properties": {
+    "case_id": {
+      "type": "string"
+    },
+    "unit_dispositions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "unit_id",
+          "disposition",
+          "reason"
+        ],
+        "properties": {
+          "unit_id": {
+            "type": "string"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "recorded_fact",
+              "keep",
+              "no_persistent_information",
+              "defer"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "fact_operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "candidate_id",
+          "disposition",
+          "content",
+          "unit_ids",
+          "target_refs"
+        ],
+        "properties": {
+          "candidate_id": {
+            "type": "string"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "add",
+              "keep",
+              "replace",
+              "retract"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "unit_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "target_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fact_id",
+                "revision"
+              ],
+              "properties": {
+                "fact_id": {
+                  "type": "string"
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "journal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "write_existing",
+        "reason"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "awaiting_user_confirmation",
+            "not_required"
+          ]
+        },
+        "write_existing": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "conflict_notice": {
+      "type": "string"
+    }
+  }
+}

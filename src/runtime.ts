@@ -39,7 +39,9 @@ export async function restoreRuntime(input: string, dataDir: string, config: Boo
 export async function createRuntime(config: BookkeepingConfig, command?: string, options: Record<string, string | boolean> = {}, now?: () => Date): Promise<RuntimeServices> {
   requireNode();
   const storeModule = await loadModule('./store/index.ts');
-  const store: Store = await storeModule.createStore(config);
+  const store: Store = await storeModule.createStore(config, { now });
+  let deadlineAt: number | undefined;
+  const budget = { now, remaining_ms: () => deadlineAt === undefined ? Infinity : Math.max(0, deadlineAt - (now?.() ?? new Date()).getTime()) };
   const adapters: RuntimeServices['adapters'] = [];
   const reviewer: Reviewer = {
     prepare: async () => unavailable('review preparation'),
@@ -53,6 +55,7 @@ export async function createRuntime(config: BookkeepingConfig, command?: string,
   };
   const services: RuntimeServices = {
     store, adapters, reviewer, publisher, consumers: [],
+    setDeadline: deadline => { deadlineAt = Date.parse(deadline); },
     restore: (input, dataDir) => restoreRuntime(input, dataDir, config),
     async close() {
       try { await Promise.all(adapters.map(adapter => adapter.close?.())); }
@@ -60,27 +63,27 @@ export async function createRuntime(config: BookkeepingConfig, command?: string,
     },
   };
   try {
-    if (!command || command === 'collect' || command === 'replay') {
+    if (!command || command === 'collect' || (command === 'replay' && !options.events) || command === 'daily-round') {
       const module = await loadModule('./adapters/index.ts');
       adapters.push(...module.createAdapters(config));
     }
-    if (!command || command === 'prepare') {
+    if (!command || command === 'prepare' || command === 'journal-prepare' || command === 'daily-round' || command === 'monthly-round') {
       const module = await loadModule('./review/index.ts');
       services.reviewer = module.createReviewer(store, config);
     }
-    if (!command || command === 'publish') {
+    if (!command || command === 'publish' || command === 'journal-resolve' || command === 'daily-round' || command === 'monthly-round') {
       const module = await loadModule('./publish/index.ts');
-      services.publisher = module.createPublisher(store, config);
+      services.publisher = module.createPublisher(store, config, budget);
     }
-    if (!command || command === 'consume') {
+    if (!command || command === 'consume' || command === 'daily-round' || command === 'monthly-round') {
       const module = await loadModule('./consumers/index.ts');
       const target = options.target;
       const targets = typeof target === 'string' && target !== 'all' ? [target] : ['analytics', 'monthly', 'evidence', 'index'];
-      services.consumers = await module.createConsumers(store, config, targets, { now });
+      services.consumers = await module.createConsumers(store, config, targets, budget);
     }
-    if (!command || command === 'archive') {
+    if (!command || command === 'archive' || command === 'monthly-round') {
       const module = await loadModule('./consumers/archive/index.ts');
-      services.archive = request => module.createArchiveService(store, config).run(request);
+      services.archive = request => module.createArchiveService(store, config, budget).run(request);
     }
     if (command === 'analytics-review') {
       const module = await loadModule('./consumers/analytics/index.ts');

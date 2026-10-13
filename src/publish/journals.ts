@@ -43,6 +43,31 @@ export function canonicalDailyDate(path: string, bytes: Uint8Array | null = null
   if (!dailyType && !(journalType && /(?:^|[\s,\["'])daily-journal(?:$|[\s,\]"'])/.test(tags))) return null;
   return header.match(/^date:\s*["']?(\d{4}-\d{2}-\d{2})["']?\s*$/m)?.[1] ?? null;
 }
+export function isSemanticJournal(path: string, bytes: Uint8Array | null): boolean {
+  if (canonicalDailyDate(path, bytes) !== null) return true;
+  return path.startsWith('wiki/personal/journals/') && path.endsWith('.md');
+}
+const body = (text: string) => text.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '');
+// A maintenance edit may change only these explicit frontmatter fields. A
+// multi-line field is removed as one whole field, never by scalar prefix alone.
+const maintenanceKeys = new Set(['updated', 'sources', 'tags', 'aliases', 'archive_target', 'retention', 'status', 'privacy']);
+function semanticHeader(bytes: Uint8Array): string {
+  return frontmatter(bytes).split(/\r?\n(?=[^ \t\r\n])/).filter(field => {
+    const key = field.match(/^(?:([a-zA-Z_][\w-]*)|'([^']+)'|"([^"]+)")[ \t]*:/);
+    return !key || !maintenanceKeys.has(key[1] ?? key[2] ?? key[3]);
+  }).join('\n');
+}
+export function journalPrivacyChanged(oldBytes: Uint8Array, newBytes: Uint8Array): boolean {
+  return frontmatterScalar(oldBytes, 'privacy') !== frontmatterScalar(newBytes, 'privacy');
+}
+export function journalChangeKind(oldBytes: Uint8Array, newBytes: Uint8Array): 'metadata' | 'append' | 'replace' {
+  const oldText = Buffer.from(oldBytes).toString('utf8'), newText = Buffer.from(newBytes).toString('utf8');
+  if (!Buffer.from(oldText).equals(Buffer.from(oldBytes)) || !Buffer.from(newText).equals(Buffer.from(newBytes))) return 'replace';
+  if (journalPrivacyChanged(oldBytes, newBytes) || semanticHeader(oldBytes) !== semanticHeader(newBytes)) return 'replace';
+  const oldBody = body(oldText), newBody = body(newText);
+  if (oldBody === newBody) return 'metadata';
+  return newBody.startsWith(oldBody) ? 'append' : 'replace';
+}
 export function retainedWindowStart(config: BookkeepingConfig, instant: Date): string {
   let zone = config.journal_timezone;
   for (const entry of config.journal_timezone_timeline) if (Date.parse(entry.effective_from) <= instant.getTime()) zone = entry.timezone;

@@ -1,6 +1,6 @@
 import type { BookkeepingConfig, PrepareRequest, ReviewBundle, Store, FactRef, FactRevision, ProfessionalFact, WeeklyObservation, FactsPage, CoverageGap } from '../contracts/types.ts';
 import { prepareWeeklyAnalysis, analyticsRepository } from '../consumers/analytics/index.ts';
-import { analysisWeekEnd } from '../time.ts';
+import { analysisWeekEnd, analysisMonthRange } from '../time.ts';
 import { SqliteStore } from '../store/index.ts';
 import { canonical, digest } from '../analytics/serialization.ts';
 import { createMonthlyConsumer } from '../consumers/monthly/index.ts';
@@ -56,6 +56,8 @@ function fitIds(bundle: ReviewBundle, ids: string[], limit: number): string[] {
 }
 async function save(store: Store, bundle: ReviewBundle, limit: number): Promise<ReviewBundle[]> {
     bundle.bundle_id = 'bundle:' + digest(canonical(bundle));
+    if (bundle.kind === 'monthly' && store instanceof SqliteStore)
+        bundle.bundle_id = store.monthlyPreparationBundleId(bundle.bundle_id);
     if (Buffer.byteLength(canonical(bundle)) > limit)
         throw new Error('Bounded semantic context cannot fit; pending only this requested material page');
     await store.saveBundle(bundle);
@@ -130,7 +132,24 @@ export async function prepareWeeklyBundle(store: Store, config: BookkeepingConfi
         bundle.unfinished.push(gap('No ready professional facts; missing projections are excluded and never derived from private source text'));
     return save(store, bundle, limit);
 }
+export async function prepareMonthlyWorkBundle(store:Store,config:BookkeepingConfig,request:PrepareRequest):Promise<ReviewBundle[]> {
+    if (!(store instanceof SqliteStore) || request.kind!=='monthly' || !request.fact_snapshot || request.page_paths?.length || request.archive_context_offset!==undefined || request.range || request.replay_id)
+        throw new Error('Monthly work-only requires exact frozen snapshot without page/archive/source material');
+    const snapshot=store.getFactMaterial(request.fact_snapshot),proof=await store.factMaterialProgress(request.fact_snapshot);
+    if (!snapshot || snapshot.kind!=='monthly' || snapshot.period!==(request.period??snapshot.period) || snapshot.cutoff!==request.cutoff || !proof || request.fact_offset!==proof.total || proof.first_unread_offset!==null || proof.pending_archive_context_count!==0 || !(await store.hasCompleteMonthlyConclusion(request.fact_snapshot)))
+        throw new Error('Monthly work-only requires all frozen refs read and an accepted complete conclusion at the original cutoff');
+    store.assertCurrentMonthlyConclusion(request.fact_snapshot);
+    const ids=store.remainingFrozenWorkIds(snapshot.work_ids??[]);
+    if (!ids.length) throw new Error('No available remaining frozen monthly work; missing IDs remain pending');
+    const bundle:ReviewBundle={schema_version:1,bundle_id:'',kind:'monthly',lane:request.lane,period:snapshot.period,cutoff:snapshot.cutoff,chunks:[{schema_version:1,chunk_id:'monthly-work:'+request.fact_snapshot+':'+'0'.repeat(64),events:[],context_events:[],body_bytes:0}],existing_facts:[],baselines:[],coverage:[],unfinished:[],monthly_context:{schema_version:1,month:snapshot.period,range:analysisMonthRange(snapshot.period),facts:[],coverage:[],coverage_status:'partial',manual_baselines:[],work_only:true,facts_page:{schema_version:1,snapshot_id:request.fact_snapshot,cutoff:snapshot.cutoff,offset:proof.total,next_offset:null,total:proof.total}}};
+    const selected=fitIds(bundle,ids,config.limits.bundle_bytes);
+    if (!selected.length) throw new Error('Frozen monthly work metadata cannot fit the configured material budget');
+    if (proof.pending_work_count>ids.length) bundle.unfinished.push(gap('Missing frozen monthly work IDs remain pending'));
+    bundle.chunks[0].chunk_id='monthly-work:'+request.fact_snapshot+':'+digest(canonical(selected));
+    return save(store,bundle,config.limits.bundle_bytes);
+}
 export async function prepareMonthlyBundle(store: Store, config: BookkeepingConfig, request: PrepareRequest): Promise<ReviewBundle[]> {
+    if (request.work_only) return prepareMonthlyWorkBundle(store,config,request);
     const month = request.period ?? request.cutoff.slice(0, 7), context = await createMonthlyConsumer(store, config).prepareMonthlyContext(month);
     if (!(store instanceof SqliteStore))
         throw new Error('Monthly pagination requires transactional Store');
@@ -185,7 +204,7 @@ export async function prepareMonthlyBundle(store: Store, config: BookkeepingConf
     for (const fact of context.facts)
         reads.add(factKey(fact));
     if (snapshot.refs.every(ref => reads.has(factKey(ref))))
-        fitIds(bundle, snapshot.work_ids, limit);
+        fitIds(bundle, store.remainingFrozenWorkIds(snapshot.work_ids), limit);
     await addArchiveContexts(store, config, bundle, request.archive_context_offset ?? 0);
     for (const record of coverage) {
         if (Buffer.byteLength(canonical(context.coverage)) + Buffer.byteLength(canonical(record)) > 16384)

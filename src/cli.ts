@@ -1,22 +1,28 @@
 #!/usr/bin/env node
-import { readFile, mkdir, open, rename, chmod, lstat, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, absolutePath, DEFAULT_COLLECTION_BUDGETS, canonicalLocation, validateDataLocation } from './config.ts';
-import { InputError, utc, utcComparisonKey, date, parseJsonPreservingIntegers, validateManifest, validateReviewResult, version, array, string } from './contracts/validation.ts';
+import { InputError, utc, utcComparisonKey, date, parseJsonPreservingIntegers, validateManifest, validateReviewResult, validateContextFactRefs, version, array, string } from './contracts/validation.ts';
 import { createRuntime, restoreRuntime, UnavailableError } from './runtime.ts';
+import { readJson, privateDirectory, privateAtomicJson } from './material-files.ts';
+import { prepareJournalCommand, resolveJournalCommand, journalInventoryCommand, journalProposalCommand, journalDecideCommand, journalReassessCommand, reviewRiskInventoryCommand } from './journal-cli.ts';
+import { storageFailureCode, assertStorageAvailable } from './storage-errors.ts';
 import type { BookkeepingConfig, RuntimeServices, TimeRange, Lane, ReviewKind, SourceAdapter, SourceCoverage, CollectionBatch } from './contracts/types.ts';
 
-export const COMMANDS = ['collect','prepare','publish','consume','archive','import','migrate','replay','facts','analytics-review','status','backup','restore','validate'] as const;
+export const COMMANDS = ['collect','prepare','publish','consume','archive','import','migrate','replay','facts','analytics-review','status','backup','restore','validate','daily-round','monthly-round','journal-prepare','journal-resolve','journal-inventory','journal-recover','journal-proposal','journal-decide','journal-reassess','review-risk-inventory'] as const;
 export interface ParsedCommand { command: typeof COMMANDS[number]; options: Record<string,string|boolean> }
 const allowed: Record<string, string[]> = {
-  collect: ['lane', 'source', 'from', 'to', 'cutoff'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset', 'replay-id', 'source', 'max-bundles', 'from', 'to'], publish: ['input', 'resume'],
+  collect: ['lane', 'source', 'from', 'to', 'cutoff'], prepare: ['kind', 'lane', 'period', 'output', 'pages', 'cutoff', 'fact-offset', 'fact-snapshot', 'archive-context-offset', 'replay-id', 'source', 'max-bundles', 'from', 'to', 'selection-basis', 'continuation', 'work-only','context-facts'], publish: ['input', 'resume'],
   consume: ['target'], archive: ['month', 'report', 'apply'], import: ['manifest'], migrate: ['manifest'],
-  replay: ['source', 'from', 'to', 'replay-key', 'events'], facts: ['from', 'to'], 'analytics-review': ['input'],
+  replay: ['source', 'from', 'to', 'replay-key', 'events','stored-only'], facts: ['from', 'to'], 'analytics-review': ['input'],
   status: [], backup: ['output'], restore: ['input', 'data-dir'], validate: ['scope'],
+  'monthly-round': ['manifest','output','input','defer-active','cutoff','finish','reason','archive-month','pages'],
+  'daily-round': ['manifest','output','input','journal-input','defer-active','defer-stage','cutoff','finish','reason'],
+  'journal-prepare': ['output','work','max-items','cutoff'], 'journal-resolve': ['input'],
+  'journal-inventory': ['from','to','after-result','limit','output','exclude-unknown'], 'journal-recover': ['input'], 'journal-proposal':['id','output'], 'journal-decide':['input'], 'journal-reassess':['input'], 'review-risk-inventory':['input'],
 };
-const booleans = new Set(['resume', 'report', 'apply']);
+const booleans = new Set(['resume', 'report', 'apply', 'exclude-unknown', 'finish', 'work-only','stored-only']);
 
 function required(options: ParsedCommand['options'], key: string): string {
   const value = options[key];
@@ -74,6 +80,11 @@ export function parseArgs(args: string[]): ParsedCommand {
       const kind = oneOf(options, 'kind', ['daily', 'weekly', 'monthly']);
       oneOf(options, 'lane', ['live', 'history']);
       required(options, 'output');
+      if(options['work-only']&&(kind!=='monthly'||!options.period||!options['fact-snapshot']||!options.cutoff||options['fact-offset']===undefined||options.pages||options['archive-context-offset']!==undefined||options['replay-id']))throw new InputError('Work-only requires monthly period, exact snapshot/cutoff/offset and no new page/archive/replay material');
+      if(options['context-facts']){absolutePath(required(options,'context-facts'),'context-facts');if(kind!=='daily')throw new InputError('Explicit context facts require daily preparation');}
+      if (options['selection-basis']) { oneOf(options,'selection-basis',['event_time','capture_lane']); if(kind!=='daily'||options['replay-id'])throw new InputError('Selection basis requires non-replay daily preparation'); }
+      if (options.continuation && (kind!=='daily'||!options.source||options['replay-id']))throw new InputError('Candidate continuation requires source-scoped non-replay daily preparation');
+      if(options.continuation)absolutePath(required(options,'continuation'),'continuation');
       if (options['replay-id'] && (kind !== 'daily' || options.period)) throw new InputError('--replay-id requires daily preparation without --period');
       if (options.cutoff) utc(required(options, 'cutoff'), 'cutoff');
       if (options.source && kind !== 'daily') throw new InputError('--source requires daily preparation');
@@ -116,6 +127,7 @@ export function parseArgs(args: string[]): ParsedCommand {
       if (utcComparisonKey(from) >= utcComparisonKey(to)) throw new InputError('--from must precede --to');
       if (command === 'replay') {
         required(options, 'source');
+        if(options['stored-only']){required(options,'events');required(options,'replay-key');}
         if (options.events) absolutePath(required(options, 'events'), 'events');
         if (options['replay-key'] && (!required(options, 'replay-key').trim() || required(options, 'replay-key').length > 512))
           throw new InputError('--replay-key: nonempty key of at most 512 characters required');
@@ -126,15 +138,37 @@ export function parseArgs(args: string[]): ParsedCommand {
     case 'backup': required(options, 'output'); break;
     case 'restore': required(options, 'input'); absolutePath(required(options, 'data-dir'), 'data-dir'); break;
     case 'validate': oneOf(options, 'scope', ['changed', 'all']); break;
+    case 'monthly-round':
+    case 'daily-round':
+      absolutePath(required(options, 'manifest'), 'manifest'); absolutePath(required(options, 'output'), 'output');
+      if ([options.input, options['journal-input'], options['defer-active'], options.finish].filter(Boolean).length > 1) throw new InputError('Daily round accepts only one input or explicit active deferral per step');
+      if (command==='monthly-round'&&options['archive-month'])month(required(options,'archive-month'));
+      if (command==='monthly-round'&&options.pages)absolutePath(required(options,'pages'),'pages');
+      if (options.finish) required(options,'reason');
+      if (options.reason && !options.finish)throw new InputError('--reason requires --finish');
+      if (options['defer-stage'] && (!options['defer-active'] || !['review','material','publish','journal'].includes(options['defer-stage'] as string))) throw new InputError('--defer-stage requires explicit deferral and review|material|publish|journal');
+      if (options.cutoff) utc(required(options, 'cutoff'), 'cutoff');
+      break;
+    case 'journal-prepare':
+      absolutePath(required(options, 'output'), 'output');
+      if (options.cutoff) utc(required(options, 'cutoff'), 'cutoff');
+      if (options.work) absolutePath(required(options, 'work'), 'work');
+      if (options['max-items'] && (!/^[1-9][0-9]*$/.test(required(options, 'max-items')) || !Number.isSafeInteger(Number(options['max-items'])))) throw new InputError('--max-items must be a positive safe integer');
+      break;
+    case 'journal-inventory': {
+      const range = commandRange(options); utc(range.from, 'from'); utc(range.to, 'to');
+      if (utcComparisonKey(range.from) >= utcComparisonKey(range.to)) throw new InputError('--from must precede --to');
+      absolutePath(required(options, 'output'), 'output');
+      if (options.limit && (!/^[1-9][0-9]*$/.test(required(options, 'limit')) || Number(options.limit) > 100)) throw new InputError('--limit must be1–100');
+      break;
+    }
+    case 'journal-proposal': required(options,'id'); absolutePath(required(options,'output'),'output'); break;
+    case 'review-risk-inventory':
+    case 'journal-reassess':
+    case 'journal-decide':
+    case 'journal-resolve': case 'journal-recover': absolutePath(required(options, 'input'), 'input'); break;
   }
   return { command: command as ParsedCommand['command'], options };
-}
-
-async function readJson(path: string): Promise<unknown> {
-  let text: string;
-  try { text = await readFile(resolve(path), 'utf8'); }
-  catch (error) { throw new Error(`Cannot read input ${path}: ${(error as Error).message}`); }
-  return parseJsonPreservingIntegers(text);
 }
 
 function unavailable(capability: string): never { throw new UnavailableError(`Not implemented: ${capability}`); }
@@ -215,7 +249,7 @@ function scopedCaptureBatch(batch: CollectionBatch, scope: string, range: TimeRa
   };
 }
 
-async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string) {
+async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string, maxDurationMs?: number, now: () => Date = () => new Date()) {
   const options = parsed.options;
   const lane = required(options, 'lane') as Lane;
   cutoff = typeof options.cutoff === 'string' ? options.cutoff : cutoff;
@@ -233,9 +267,13 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
   const adapters = services.adapters.filter(adapter => !source || adapter.provider === source);
   if (!adapters.length) unavailable('enabled source adapters');
   const captureScope = explicitRange ? createHash('sha256').update(JSON.stringify([source ?? '*', utcComparisonKey(query.from), utcComparisonKey(query.to), utcComparisonKey(cutoff)])).digest('hex') : undefined;
-  const budget = config.collection_budgets?.[lane] ?? DEFAULT_COLLECTION_BUDGETS[lane];
+  const configuredBudget = config.collection_budgets?.[lane] ?? DEFAULT_COLLECTION_BUDGETS[lane];
+  const startedAt = now().getTime();
   const providers = [];
   for (const adapter of adapters) {
+    const remainingMs = maxDurationMs === undefined ? configuredBudget.max_duration_ms : Math.max(0, maxDurationMs - (now().getTime() - startedAt));
+    if (remainingMs < 1) { providers.push({ provider: adapter.provider, execution_status: 'partial', reason: 'Round capture/time allowance exhausted', batches: 0, events: 0 }); break; }
+    const budget = { ...configuredBudget, max_duration_ms: Math.min(configuredBudget.max_duration_ms, remainingMs) };
     let batches = 0;
     let events = 0;
     const context = { checkpoints: await adapterCheckpoints(services, adapter.provider, captureScope), config,
@@ -254,6 +292,7 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
       providers.push({ provider: adapter.provider, execution_status: 'complete', batches, events });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (storageFailureCode(error)) throw storageFailure(error);
       const identityConflict = persisting && error instanceof Error && ['Work identity conflict', 'Collection batch identity conflict'].includes(error.message);
       if (persisting && !identityConflict) throw storageFailure(error);
       // An immutable identity collision is source-local and rolls back the batch;
@@ -265,43 +304,6 @@ async function collectCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     }
   }
   return { schema_version: 1, lane, cutoff, ...(source ? { source } : {}), range: query, ...(captureScope ? { capture_scope: captureScope } : {}), providers, coverage: (await services.store.listCoverage(query)).filter(item => !source || item.provider === source) };
-}
-
-async function privateDirectory(path: string, config: BookkeepingConfig): Promise<void> {
-  const canonical = await canonicalLocation(path);
-  validateDataLocation(canonical, await canonicalLocation(config.wiki_root),
-    await Promise.all(config.providers.flatMap(provider => provider.roots).map(canonicalLocation)));
-  await mkdir(path, { recursive: true, mode: 0o700 });
-  const stat = await lstat(path);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new InputError('Private review output must be a real directory');
-  await chmod(path, 0o700);
-}
-
-async function privateAtomicJson(directory: string, name: string, value: unknown, immutable = false): Promise<void> {
-  const bytes = JSON.stringify(value) + '\n';
-  const destination = join(directory, name);
-  if (immutable) {
-    try {
-      const stat = await lstat(destination);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new InputError(`Unsafe existing review material ${name}`);
-      if (await readFile(destination, 'utf8') !== bytes) throw new Error(`Existing bundle differs: ${name}`);
-      await chmod(destination, 0o600);
-      return;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  }
-  const temporary = join(directory, `.prepare-${randomUUID()}.tmp`);
-  const handle = await open(temporary, 'wx', 0o600);
-  try {
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await handle.close();
-    await rename(temporary, destination);
-    const parent = await open(directory, 'r');
-    try { await parent.sync(); } finally { await parent.close(); }
-  } finally {
-    await handle.close();
-    await rm(temporary, { force: true });
-  }
 }
 
 async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string) {
@@ -329,7 +331,10 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     const { resolveWikiPath } = await import('./publish/index.ts');
     for (const path of pagePaths) await resolveWikiPath(config.wiki_root, path);
   }
+  let contextFactRefs:import('./contracts/types.ts').FactRef[]|undefined;
+  if(options['context-facts']){const selection=version(await readJson(required(options,'context-facts')),'context fact manifest');if(Object.keys(selection).some(key=>!['schema_version','fact_refs'].includes(key)))throw new InputError('Unknown context fact manifest field');contextFactRefs=validateContextFactRefs(selection.fact_refs);}
   const request = {
+    context_fact_refs:contextFactRefs,
     kind: required(options, 'kind') as ReviewKind, lane: required(options, 'lane') as Lane,
     period: options.period as string | undefined, cutoff, output_dir: outputDir, page_paths: pagePaths,
     fact_offset: options['fact-offset'] === undefined ? undefined : Number(options['fact-offset']),
@@ -337,6 +342,9 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     archive_context_offset: options['archive-context-offset'] === undefined ? undefined : Number(options['archive-context-offset']),
     replay_id: options['replay-id'] as string | undefined,
     source, max_bundles: maxBundles, range,
+    selection_basis: options['selection-basis'] as 'event_time'|'capture_lane'|undefined,
+    work_only: options['work-only']===true,
+    candidate_continuation: options.continuation ? version(await readJson(options.continuation as string),'candidate continuation') as import('./contracts/types.ts').PreparationContinuation : undefined,
   };
   const prepared = services.reviewer.prepareWithOutcomes
     ? await services.reviewer.prepareWithOutcomes(request)
@@ -351,11 +359,14 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
     const name = `bundle-${encodeURIComponent(bundle.bundle_id)}.json`;
     const provider = bundle.source ?? source ?? bundle.chunks?.[0]?.events?.[0]?.source.provider ?? 'unknown';
     try {
-      if (Buffer.byteLength(JSON.stringify(bundle) + '\n') > config.limits.bundle_bytes) throw new Error(`Prepared bundle exceeds final serialized byte budget: ${bundle.bundle_id}`);
-      await privateAtomicJson(outputDir, name, bundle, true);
+      const jsonBytes = Buffer.byteLength(JSON.stringify(bundle));
+      if (jsonBytes > config.limits.bundle_bytes) throw new Error(`Prepared bundle exceeds final serialized byte budget: ${bundle.bundle_id}`);
+      // A trailing LF is optional JSON whitespace; do not reject material that fits exactly.
+      await privateAtomicJson(outputDir, name, bundle, true, config.limits.bundle_bytes, jsonBytes < config.limits.bundle_bytes);
       files.push(name);
       materialOutcomes.push({ schema_version: 1 as const, provider, stage: 'material', execution_status: 'complete', reason: null, bundle_ids: [bundle.bundle_id] });
     } catch (error) {
+      if(storageFailureCode(error))throw error;
       const reason = error instanceof Error ? error.message : String(error);
       // Semantic bundles remain durable; retry material output without hiding
       // failures in the local Store used to record that debt.
@@ -369,6 +380,7 @@ async function prepareCommand(parsed: ParsedCommand, config: BookkeepingConfig, 
   }
   const manifest = {
     schema_version: 1, kind: required(options, 'kind'), lane: required(options, 'lane'), cutoff, bundles: files,
+    selection_basis: request.selection_basis ?? (request.range || request.period ? 'capture_lane' : 'event_time'),
     ...(source ? { source } : {}), ...(range ? { range } : {}), providers: [...prepared.providers, ...materialOutcomes],
   };
   await privateAtomicJson(outputDir, 'manifest.json', manifest);
@@ -382,7 +394,8 @@ async function consumeCommand(parsed: ParsedCommand, services: RuntimeServices) 
   for (const name of expected) {
     const consumer = services.consumers.find(item => item.target === name);
     if (!consumer) unavailable(`consumer ${name}`);
-    outcomes.push(await consumer.consume());
+    try { const outcome = await consumer.consume(); outcomes.push(outcome); assertStorageAvailable({ schema_version: 1, consumers: outcomes }); }
+    catch (error) { if (storageFailureCode(error)) throw error; outcomes.push({ schema_version: 1, target: name, status: 'partial', reason: error instanceof Error ? error.message : String(error) }); }
   }
   return { schema_version: 1, consumers: outcomes };
 }
@@ -398,7 +411,7 @@ async function manifestCommand(parsed: ParsedCommand, services: RuntimeServices)
 async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string) {
   const source = required(parsed.options, 'source');
   const adapters = services.adapters.filter(item => item.provider === source);
-  if (!adapters.length) throw new InputError(`Unknown source ${source}`);
+  if (!config.providers.some(provider=>provider.enabled&&provider.provider===source)) throw new InputError(`Unknown source ${source}`);
   const range = commandRange(parsed.options);
   let eventIds: string[] | undefined;
   if (parsed.options.events) {
@@ -409,7 +422,7 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
   const configured = config.providers.filter(item => item.enabled && item.provider === source);
   let batches = 0;
   const recapture = [];
-  for (const [index, adapter] of adapters.entries()) {
+  for (const [index, adapter] of (eventIds ? [] : adapters).entries()) {
     // Runtime factories preserve configured provider order; adapters may also
     // expose an explicit account identity (e.g. native WeChat).
     const accountId = adapter.account_id ?? (configured.length === adapters.length ? configured[index].account_id : undefined);
@@ -438,7 +451,7 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
         capture_status: saved ? completeCapture ? 'complete' : 'partial' : 'unknown', batches: saved });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      if (persisting) throw storageFailure(error);
+      if (persisting || storageFailureCode(error)) throw storageFailure(error);
       // A source outage cannot prevent review of already durable events. A
       // failure to persist that outage still fails execution rather than hiding it.
       await recordCollectionFailure(services, config, adapter, 'history', range, cutoff, reason, saved > 0, accountId);
@@ -449,15 +462,37 @@ async function replayCommand(parsed: ParsedCommand, config: BookkeepingConfig, s
   const replayKey = typeof parsed.options['replay-key'] === 'string' ? parsed.options['replay-key']
     : 'range:' + createHash('sha256').update(JSON.stringify([source, utcComparisonKey(range.from), utcComparisonKey(range.to)])).digest('hex');
   const work = await services.store.requestSemanticReplay({ schema_version: 1, replay_key: replayKey, source, range, cutoff, ...(eventIds ? { event_ids: eventIds } : {}) });
-  return { schema_version: 1, source, batches, range, recapture, replay_id: work.work_id, cutoff: work.payload.cutoff, review_state: work.state,
+  return { schema_version: 1, source, batches, range, recapture, selection_basis:eventIds?'stored_exact':'recapture_range', replay_id: work.work_id, cutoff: work.payload.cutoff, review_state: work.state,
     next_prepare: `prepare --kind daily --lane history --replay-id ${work.work_id} --output DIR` };
 }
 
-export async function executeCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string): Promise<unknown> {
+export async function executeCommand(parsed: ParsedCommand, config: BookkeepingConfig, services: RuntimeServices, cutoff: string, now: () => Date = () => new Date()): Promise<unknown> {
   const options = parsed.options;
   switch (parsed.command) {
     case 'collect': return collectCommand(parsed, config, services, cutoff);
     case 'prepare': return prepareCommand(parsed, config, services, cutoff);
+    case 'journal-proposal': return journalProposalCommand(options,config,services);
+    case 'review-risk-inventory': return reviewRiskInventoryCommand(await readJson(required(options,'input')),services);
+    case 'journal-reassess': return journalReassessCommand(await readJson(required(options,'input')),services,now);
+    case 'journal-decide': return journalDecideCommand(await readJson(required(options,'input')),config,services);
+    case 'journal-prepare': return prepareJournalCommand(options, config, services, cutoff);
+    case 'journal-resolve': return resolveJournalCommand(await readJson(required(options, 'input')), services);
+    case 'journal-inventory': return journalInventoryCommand(options, config, services);
+    case 'journal-recover': {
+      if (!services.store.recoverJournalPublication) unavailable('journal recovery');
+      const input = version(await readJson(required(options, 'input')), 'journal recovery');
+      const resultIds = array(input.result_ids, 'result_ids').map(id => string(id, 'result_id'));
+      if (!resultIds.length || resultIds.length > 100 || new Set(resultIds).size !== resultIds.length) throw new InputError('Recovery requires1–100 unique accepted result IDs');
+      return services.store.recoverJournalPublication({ schema_version: 1, result_ids: resultIds, created_at: now().toISOString() });
+    }
+    case 'monthly-round': {
+      const {runMonthlyRound}=await import('./monthly-round.ts');return runMonthlyRound(options,config,services,now);
+    }
+    case 'daily-round': {
+      const { runDailyRound } = await import('./daily-round.ts');
+      return runDailyRound(options, config, services, { now,
+        collect: (source, lane, frozen, maxDuration) => collectCommand({ command: 'collect', options: { source, lane, cutoff: frozen } }, config, services, frozen, maxDuration, now) });
+    }
     case 'publish': {
       if (options.resume) return services.publisher.resume();
       const result = validateReviewResult(await readJson(required(options, 'input')));
@@ -472,7 +507,7 @@ export async function executeCommand(parsed: ParsedCommand, config: BookkeepingC
     case 'facts': return { schema_version: 1, facts: await services.store.readEffectiveFacts({ range: commandRange(options) }) };
     case 'analytics-review': return services.analyticsReview
       ? services.analyticsReview(await readJson(required(options, 'input'))) : unavailable('analytics review');
-    case 'status': return { schema_version: 1, ...await services.store.status() };
+    case 'status': return { schema_version: 1, ...await services.store.status(), monthly_semantic: services.store.monthlySemanticStatus ? await services.store.monthlySemanticStatus(cutoff, now().toISOString()) : { schema_version: 1, execution_status: 'unavailable', reason: 'Monthly semantic metadata capability unavailable; completion was not inferred' } };
     case 'backup': {
       const output = resolve(required(options, 'output'));
       await privateDirectory(output, config);
@@ -508,10 +543,13 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     if (parsed.command === 'restore' && !dependencies.createRuntime) {
       result = await restoreRuntime(resolve(required(parsed.options, 'input')), required(parsed.options, 'data-dir'), config);
     } else {
-      const now = (dependencies.now ?? (() => new Date().toISOString()))();
-      utc(now, 'runtime clock');
-      services = await (dependencies.createRuntime ?? createRuntime)(config, parsed.command, parsed.options, () => new Date(now));
-      result = await executeCommand(parsed, config, services, now);
+      const executionClock = dependencies.now ?? (() => new Date().toISOString());
+      const cutoff = executionClock();
+      utc(cutoff, 'runtime clock');
+      const now = () => new Date(utc(executionClock(), 'runtime clock'));
+      services = await (dependencies.createRuntime ?? createRuntime)(config, parsed.command, parsed.options, now);
+      result = await executeCommand(parsed, config, services, cutoff, now);
+      assertStorageAvailable(result);
     }
     if (services) {
       await (services.close ? services.close() : services.store.close());
@@ -524,8 +562,8 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     const message = error instanceof Error ? error.message : String(error);
     stderr(message + '\n');
     const errorCode = (error as NodeJS.ErrnoException)?.code;
-    const storage = typeof errorCode === 'string' && /^(?:BOOKKEEPING_STORAGE_FAILURE|ERR_SQLITE|SQLITE_)/.test(errorCode);
-    stdout(JSON.stringify({ schema_version: 1, error: { kind: code === 2 ? 'invalid_input' : 'execution_failed', message, ...(storage ? { scope: 'storage' } : {}) } }) + '\n');
+    const storage = storageFailureCode(error) !== null;
+    stdout(JSON.stringify({ schema_version: 1, error: { kind: code === 2 ? 'invalid_input' : 'execution_failed', message, ...(storage ? { scope: 'storage' } : {}) }, ...((error as Error & {receipt?: unknown}).receipt ? { receipt: (error as Error & {receipt?: unknown}).receipt } : {}) }) + '\n');
     return code;
   } finally {
     if (services) {

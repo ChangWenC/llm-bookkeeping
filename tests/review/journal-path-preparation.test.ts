@@ -1,0 +1,45 @@
+import test from 'node:test';
+import {mkdir,writeFile,unlink} from 'node:fs/promises';
+import {join,dirname} from 'node:path';
+import assert from 'node:assert/strict';
+import {createStore,canonical,digest} from '../../src/store/index.ts';
+import {createReviewer} from '../../src/review/index.ts';
+import {installPreparationTimingProbe} from '../../src/review/timing-probe.ts';
+import {canonicalJournalPath} from '../../src/store/journal.ts';
+import {config,event,collection,bundle,result,value,range} from '../store/fixtures.ts';
+const request={kind:'daily' as const,lane:'history' as const,source:'synthetic',range,cutoff:range.to,selection_basis:'event_time' as const,max_bundles:1};
+async function setup(){
+ const c=await config(),s=await createStore(c),b=bundle([event('accepted')],'accepted');await s.saveBundle(b);const rr=result(b,'accepted');rr.pages=[];const fact=(await s.commitReview(rr)).facts[0];
+ for(let index=0;index<28;index++){const f={...fact,fact_id:'same-date:'+index,journal_date:value(index<14?'2026-09-29':'2026-09-30'),event_refs:[]};s.db.prepare('INSERT INTO facts VALUES(?,?,?,?)').run(f.fact_id,1,canonical(f),f.recorded_at);}
+ await s.saveCollection(collection([event('primary')]));return {c,s};
+}
+test('archive evidence uses exact partial indexes with large unrelated intents and repeated same-date facts resolve each date once',async()=>{
+ const {c,s}=await setup(),large=Buffer.from('Synthetic unrelated page '.repeat(8192)),encoded=large.toString('base64'),bodyDigest=digest(large);
+ for(let index=0;index<96;index++){const intent={schema_version:1,operation_id:'large:'+index,path:'wiki/other/page_'+index+'.md',baseline_digest:bodyDigest,desired_digest:bodyDigest,backup_bytes_base64:encoded,desired_bytes_base64:encoded,state:'applied',fact_refs:[],created_at:range.to};s.db.prepare('INSERT INTO intents VALUES(?,?,?)').run(intent.operation_id,canonical(intent),'applied');}
+ const activePath='wiki/personal/journals/日记_2026_09_30.md';
+ s.db.prepare('INSERT INTO intents VALUES(?,?,?)').run('active-written',canonical({schema_version:1,operation_id:'active-written',path:activePath,desired_bytes_base64:encoded,state:'applied'}),'applied');
+ s.db.prepare('INSERT INTO intents VALUES(?,?,?)').run('not-applied-delete',canonical({schema_version:1,operation_id:'not-applied-delete',path:activePath,desired_bytes_base64:null,state:'prepared'}),'prepared');
+ const archiveWork={schema_version:1,work_id:'archive-work',kind:'archive',lane:'history',state:'complete',payload:{date:'2026-09-28'},reason:null,migration_key:null,updated_at:range.to};s.db.prepare('INSERT INTO work VALUES(?,?,?,?,?)').run(archiveWork.work_id,canonical(archiveWork),'archive','complete',null);
+ assert.equal(canonicalJournalPath(s.db,'2026-09-28',range.to,c.journal_timezone),'wiki/personal/journals/reviews/回顾_2026_09.md');
+ const date='2026-09-29',path='wiki/personal/journals/日记_2026_09_29.md';s.db.prepare('INSERT INTO intents VALUES(?,?,?)').run('archive-delete',canonical({schema_version:1,operation_id:'archive-delete',path,desired_bytes_base64:null,state:'applied'}),'applied');
+ const plan=s.db.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM intents WHERE state='applied' AND json_extract(json,'$.path')=? AND json_extract(json,'$.desired_bytes_base64') IS NULL LIMIT 1").all(path);assert(plan.some(row=>String(row.detail).includes('archived_journal_intent_path')));
+ const archivePlan=s.db.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM work WHERE kind='archive' AND json_extract(json,'$.payload.date')=? LIMIT 1").all(date);assert(archivePlan.some(row=>String(row.detail).includes('journal_archive_date')));
+ assert.equal(canonicalJournalPath(s.db,date,range.to,c.journal_timezone),'wiki/personal/journals/reviews/回顾_2026_09.md');assert.equal(canonicalJournalPath(s.db,'2026-09-30',range.to,c.journal_timezone),'wiki/personal/journals/日记_2026_09_30.md');
+ const probe=installPreparationTimingProbe(s),prepared=await createReviewer(s,c).prepareWithOutcomes!(request),report=probe.stop();assert.equal(prepared.bundles.length,1);assert.equal(report.totals.find(row=>row.name==='store.resolveJournalPath')!.calls,2);assert.equal(report.totals.find(row=>row.name==='sql.journal_archived_intent')!.calls,2);assert(prepared.bundles[0].baselines.some(page=>page.path.includes('回顾_2026_09')));assert.equal(s.db.prepare('SELECT COUNT(*) n FROM reviewed_sources WHERE source_id=?').get('primary')!.n,0);s.close();
+});
+test('slow distinct-date path resolution records progress before deadline and resumes after restart without repeating resolved dates',async(t)=>{
+ const {c,s:initial}=await setup();let s=initial,clock=0,token:import('../../src/contracts/types.ts').PreparationContinuation|undefined;const resolved=new Set<string>(),frontiers=new Set<string>();t.mock.method(performance,'now',()=>clock);
+ for(let round=0;round<3;round++){clock=0;if(round)s=await createStore(c);const resolve=s.resolveJournalPath.bind(s);s.resolveJournalPath=(...args)=>{assert(!resolved.has(args[0]));resolved.add(args[0]);const path=resolve(...args);clock+=6000;return path;};const output=await createReviewer(s,c).prepareWithOutcomes!({...request,candidate_continuation:token}),p=output.providers[0].preparation!;
+ if(round<2){assert.equal(p.state,'more');assert.equal(p.progress!.phase,'baselines');assert.equal(p.progress!.advanced,true);assert(!frontiers.has(p.progress!.frontier));frontiers.add(p.progress!.frontier);assert(p.progress!.stages.some(stage=>stage.phase==='baselines'&&stage.elapsed_ms===6000));token=p.continuation!;}else{assert.equal(p.state,'ready');assert.equal(output.bundles[0].chunks[0].events[0].event_id,'primary');}
+ assert.equal(s.db.prepare('SELECT COUNT(*) n FROM reviewed_sources WHERE source_id=?').get('primary')!.n,0);s.close();}assert.equal(resolved.size,2);
+});
+
+test('a cached daily context remains frozen across archival but cannot close or recreate the archived target',async(t)=>{
+ const {c,s}=await setup(),daily='wiki/personal/journals/日记_2026_09_29.md',monthly='wiki/personal/journals/reviews/回顾_2026_09.md',old='You verified the parser.\n',month='Archived September synthetic summary.\n';await mkdir(dirname(join(c.wiki_root,daily)),{recursive:true});await writeFile(join(c.wiki_root,daily),old);
+ let clock=0;t.mock.method(performance,'now',()=>clock);const resolve=s.resolveJournalPath.bind(s);s.resolveJournalPath=(...args)=>{const path=resolve(...args);clock+=6000;return path;};const first=await createReviewer(s,c).prepareWithOutcomes!({...request,page_paths:[daily]}),continuation=first.providers[0].preparation!.continuation!;assert.equal(first.providers[0].preparation!.state,'more');
+ s.db.prepare('INSERT INTO intents VALUES(?,?,?)').run('between-rounds-archive-delete',canonical({schema_version:1,operation_id:'between-rounds-archive-delete',path:daily,desired_bytes_base64:null,state:'applied'}),'applied');await unlink(join(c.wiki_root,daily));await mkdir(dirname(join(c.wiki_root,monthly)),{recursive:true});await writeFile(join(c.wiki_root,monthly),month);
+ clock=0;s.resolveJournalPath=resolve;const resumed=await createReviewer(s,c).prepareWithOutcomes!({...request,page_paths:[daily],candidate_continuation:continuation}),b=resumed.bundles[0];assert.equal(resumed.providers[0].preparation!.state,'ready');assert.equal(b.baselines.find(page=>page.path===daily)!.content,old);assert.equal(canonicalJournalPath(s.db,'2026-09-29',range.to,c.journal_timezone),monthly);
+ const rr=result(b,'cached-path-result');rr.pages=[];rr.candidates[0].disposition='keep';rr.candidates[0].target_refs=[{schema_version:1,fact_id:'same-date:0',revision:1}];rr.journal_dispositions=[{schema_version:1,candidate_id:rr.candidates[0].candidate_id,date:'2026-09-29',path:daily,disposition:'already_present',evidence_text:old,reason:'Frozen pre-archive synthetic display',baseline_assessment:{schema_version:1,baseline_digest:digest(old),summary_text:null,body_evidence_text:old,consistency:'consistent',reason:'Synthetic frozen body assessment'}}];
+ await assert.rejects(s.commitReview(rr),/Journal disposition target does not match/);assert.equal(s.db.prepare('SELECT COUNT(*) n FROM reviewed_sources WHERE source_id=?').get('primary')!.n,0);assert.equal(s.db.prepare('SELECT COUNT(*) n FROM patches').get()!.n,0);assert.equal((await s.listWork('journal_publication')).some(item=>item.payload.fact_ref&&item.payload.path===daily),false);
+ rr.journal_dispositions=[];const accepted=await s.commitReview(rr);assert.equal(accepted.facts.length,0);assert.equal(accepted.patches.length,0);const work=(await s.listWork('journal_publication')).find(item=>(item.payload.fact_ref as any)?.fact_id==='same-date:0')!;assert.equal(work.payload.path,monthly);assert.equal(work.state,'pending');const journal=await createReviewer(s,c).prepareJournalWork!({schema_version:1,cutoff:range.to,work_ids:[work.work_id]});assert.equal(journal.baselines.length,1);assert.equal(journal.baselines[0].path,monthly);assert.equal(journal.baselines[0].content,month);assert.equal(s.db.prepare('SELECT COUNT(*) n FROM patches').get()!.n,0);s.close();
+});

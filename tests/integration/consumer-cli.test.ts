@@ -19,7 +19,7 @@ async function setup() {
     project_whitelist: [], goal_whitelist: [],
     index_commands: {
       schema_version: 1,
-      lint: { schema_version: 1, executable: process.execPath, args: ['-e', 'process.exitCode=0'] },
+      lint: { schema_version: 1, executable: process.execPath, args: ['-e', 'console.log(JSON.stringify({report_contract_version:1,capabilities:["daily-journal-archive-target-v2"],generated_at:"2026-10-13T10:00:00Z",counts:{pages:1,errors:0,warnings:0,suggestions:0},errors:[],warnings:[],suggestions:[],disabled_checks:[],tag_source_report:{},synthesis_candidates:[]}))'] },
       build_index: { schema_version: 1, executable: process.execPath, args: ['-e', 'require("node:fs").writeFileSync("index-proof.txt","built")'] },
       qmd: { schema_version: 1, executable: process.execPath, args: ['-e', 'process.exitCode=1'] },
     },

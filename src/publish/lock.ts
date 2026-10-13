@@ -3,6 +3,11 @@ import { resolve, join, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 
+import { markStorageFailure } from '../storage-errors.ts';
+async function writeBoundary<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); } catch (error) { throw markStorageFailure(error, 'local_write'); }
+}
+
 export interface WikiLock { readonly root: string; readonly token: string; release(): Promise<void> }
 export function processIsAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return true;
@@ -19,23 +24,23 @@ export async function wikiLockLocation(wikiRoot: string): Promise<string> {
 export async function acquireWikiLock(wikiRoot: string): Promise<WikiLock | null> {
   const root = await realpath(resolve(wikiRoot));
   const location = await wikiLockLocation(wikiRoot);
-  await mkdir(location, { recursive: true, mode: 0o700 });
+  await writeBoundary(() => mkdir(location, { recursive: true, mode: 0o700 }));
   const token = randomUUID();
   const candidate = join(location, `candidate-${token}`);
   const active = join(location, 'active');
-  await mkdir(candidate, { mode: 0o700 });
+  await writeBoundary(() => mkdir(candidate, { mode: 0o700 }));
   // Fully populate a NONEMPTY candidate before it can become visible as active.
-  await writeFile(join(candidate, 'owner.json'), JSON.stringify({ schema_version: 1, token, pid: process.pid, root }), { flag: 'wx', mode: 0o600 });
+  await writeBoundary(() => writeFile(join(candidate, 'owner.json'), JSON.stringify({ schema_version: 1, token, pid: process.pid, root }), { flag: 'wx', mode: 0o600 }));
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await rename(candidate, active);
+        await writeBoundary(() => rename(candidate, active));
         let released = false;
         return { root, token, async release() {
           if (released) return;
           const owner = JSON.parse(await readFile(join(active, 'owner.json'), 'utf8'));
           if (owner.token !== token || owner.pid !== process.pid) throw new Error('Wiki lock ownership changed');
-          await rm(active, { recursive: true });
+          await writeBoundary(() => rm(active, { recursive: true }));
           released = true;
         } };
       } catch (error) {
@@ -48,11 +53,11 @@ export async function acquireWikiLock(wikiRoot: string): Promise<WikiLock | null
       // Keep the nonempty tombstone permanently. Two reclaimers of the same dead
       // owner cannot rename a later live active directory into this destination:
       // POSIX rename rejects an already nonempty destination directory.
-      try { await rename(active, join(location, `dead-${owner.token}`)); }
+      try { await writeBoundary(() => rename(active, join(location, `dead-${owner.token}`))); }
       catch (error) { if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
     }
     return null;
-  } finally { await rm(candidate, { recursive: true, force: true }); }
+  } finally { await writeBoundary(() => rm(candidate, { recursive: true, force: true })); }
 }
 export async function withWikiLock<T>(wikiRoot: string, operation: (lock: WikiLock) => Promise<T>): Promise<T | null> {
   const lock = await acquireWikiLock(wikiRoot);
